@@ -43,7 +43,7 @@ export default function GamePage() {
 
   const [lobbyState, setLobbyState] = useState<LobbyState | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<QuestionEvent | null>(null);
-  const [questionState, setQuestionState] = useState<string | null>(null);
+  const [questionState, setQuestionState] = useState<QuestionState | null>(null);
   const [submittedAnswers, setSubmittedAnswers] = useState<Record<string, 'YES' | 'NO'>>({});
   const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
   const [resolution, setResolution] = useState<ResolutionEvent | null>(null);
@@ -66,8 +66,24 @@ export default function GamePage() {
 
   // Track processed resolutions to prevent flickering from duplicate events
   const processedResolutionIds = useRef<Set<string>>(new Set());
+  const acknowledgedAnswerIds = useRef<Set<string>>(new Set());
+  const currentQuestionRef = useRef<QuestionEvent | null>(null);
+  const questionStateRef = useRef<QuestionState | null>(null);
+  const submittedAnswersRef = useRef<Record<string, 'YES' | 'NO'>>({});
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
+  useEffect(() => {
+    currentQuestionRef.current = currentQuestion;
+  }, [currentQuestion]);
+
+  useEffect(() => {
+    questionStateRef.current = questionState;
+  }, [questionState]);
+
+  useEffect(() => {
+    submittedAnswersRef.current = submittedAnswers;
+  }, [submittedAnswers]);
+
   const hydrateQuestionFromLobby = useEffectEvent((state: LobbyState) => {
     const question = state.currentQuestion;
     if (!question) {
@@ -88,7 +104,7 @@ export default function GamePage() {
         ? (typeof question.answerDeadline === 'string'
             ? question.answerDeadline
             : new Date(question.answerDeadline).toISOString())
-        : new Date(new Date(triggeredAt).getTime() + 21_000).toISOString();
+        : undefined;
 
       return {
         instanceId: question.id,
@@ -137,6 +153,13 @@ export default function GamePage() {
     ) && (isProcessingAnswer || hasLocalSubmission);
 
     if (isStaleSubmissionError) {
+      if (currentInstanceId && !acknowledgedAnswerIds.current.has(currentInstanceId)) {
+        setSubmittedAnswers((current) => {
+          const next = { ...current };
+          delete next[currentInstanceId];
+          return next;
+        });
+      }
       setIsProcessingAnswer(false);
       return;
     }
@@ -178,16 +201,34 @@ export default function GamePage() {
         setLobbyState(state);
         setLeaderboard(state.leaderboard);
         if (state.currentQuestion) {
-          // Only hydrate from lobby state if we don't have a current question being processed
-          // to prevent flickering/race conditions
-          if (!currentQuestion) {
+          const current = currentQuestionRef.current;
+          const currentState = questionStateRef.current;
+          const hasRealtimeActiveQuestion = Boolean(
+            current
+            && currentState
+            && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(currentState)
+          );
+
+          if (!hasRealtimeActiveQuestion || current?.instanceId === state.currentQuestion.id) {
             hydrateQuestionFromLobby(state);
           }
           return;
         }
 
         if (state.latestResolution) {
-          // Only set resolution from lobby state if not already processed
+          const activeInstanceId = currentQuestionRef.current?.instanceId ?? null;
+          const activeState = questionStateRef.current;
+          const hasConflictingActiveQuestion = Boolean(
+            activeInstanceId
+            && activeInstanceId !== state.latestResolution.instanceId
+            && activeState
+            && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(activeState)
+          );
+
+          if (hasConflictingActiveQuestion) {
+            return;
+          }
+
           if (!processedResolutionIds.current.has(state.latestResolution.instanceId)) {
             processedResolutionIds.current.add(state.latestResolution.instanceId);
             setResolution(state.latestResolution);
@@ -196,12 +237,12 @@ export default function GamePage() {
         }
       }),
       socket.on(SERVER_EVENTS.QUESTION_EVENT, (event: QuestionEvent) => {
-        // Use server's answerDeadline directly (already calculated by server)
+        acknowledgedAnswerIds.current.delete(event.instanceId);
         setCurrentQuestion({
           ...event,
           answerDeadline: event.answerDeadline,
         });
-        setQuestionState(event.state ?? 'LIVE');
+        setQuestionState(event.state);
         setResolution(null);
         setIsProcessingAnswer(false);
         setSuggestedStatKeys(event.suggestedStatKeys ?? []);
@@ -290,14 +331,15 @@ export default function GamePage() {
         setReportReason('WRONG_ANSWER');
         
         // Update local correct answers counter if user answered correctly
-        if (resolvedAnswerIsCorrect) {
-          setLocalCorrectAnswers(prev => prev + 1);
+        if (submittedAnswersRef.current[event.instanceId] === event.correctAnswer) {
+          setLocalCorrectAnswers((prev) => prev + 1);
         }
       }),
       socket.on(SERVER_EVENTS.LEADERBOARD_UPDATE, (entries: LeaderboardEntry[]) => {
         setLeaderboard(entries);
       }),
-      socket.on(SERVER_EVENTS.ANSWER_RECEIVED, () => {
+      socket.on(SERVER_EVENTS.ANSWER_RECEIVED, (data: { instanceId: string }) => {
+        acknowledgedAnswerIds.current.add(data.instanceId);
         setIsProcessingAnswer(false);
       }),
       socket.on(SERVER_EVENTS.RACE_SNAPSHOT_UPDATE, (snapshot: RaceSnapshotEvent) => {
@@ -321,7 +363,7 @@ export default function GamePage() {
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [currentUserId, handleSocketError, hydrateQuestionFromLobby, router]);
+  }, [currentUserId, router]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -355,7 +397,7 @@ export default function GamePage() {
 
   const handleSubmitAnswer = useCallback(
     (selectedAnswer: 'YES' | 'NO') => {
-      if (!currentQuestion || submittedAnswers[currentQuestion.instanceId] || isProcessingAnswer) return;
+      if (!currentQuestion || questionState !== 'LIVE' || submittedAnswers[currentQuestion.instanceId] || isProcessingAnswer) return;
 
       getSocketClient().submitAnswer(currentQuestion.instanceId, selectedAnswer);
       setSubmittedAnswers((current) => ({
@@ -364,7 +406,7 @@ export default function GamePage() {
       }));
       setIsProcessingAnswer(true);
     },
-    [currentQuestion, isProcessingAnswer, submittedAnswers]
+    [currentQuestion, isProcessingAnswer, questionState, submittedAnswers]
   );
 
   const handleSubmitReport = useCallback(async () => {
@@ -646,14 +688,21 @@ export default function GamePage() {
                     className="swiss-grid-pattern relative p-6 md:p-8"
                   >
                     <div className="mb-6 flex justify-center">
-                      <CountdownTimer deadline={currentQuestion.answerDeadline} size="lg" />
+                      <CountdownTimer
+                        deadline={
+                          currentQuestion.answerDeadline
+                            ?? new Date(new Date(currentQuestion.triggeredAt).getTime() + 20_000).toISOString()
+                        }
+                        size="lg"
+                      />
                     </div>
-                    <QuestionCard
+                  <QuestionCard
                       questionText={currentQuestion.questionText}
                       category={currentQuestion.category}
                       difficulty={currentQuestion.difficulty}
                       instanceId={currentQuestion.instanceId}
                       onSubmit={handleSubmitAnswer}
+                      disabled={questionState !== 'LIVE'}
                       answered={currentSubmittedAnswer}
                     />
 
@@ -681,13 +730,19 @@ export default function GamePage() {
                     className="p-8 text-center"
                   >
                     <p className="font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                      {questionState === 'ACTIVE' ? 'Question Active' : 'Answers Locked'}
+                      {questionState === 'TRIGGERED'
+                        ? 'Question Incoming'
+                        : questionState === 'ACTIVE'
+                          ? 'Question Active'
+                          : 'Answers Locked'}
                     </p>
                     <p className="mt-4 font-display text-4xl uppercase leading-tight">{currentQuestion.questionText}</p>
                     <p className="mt-3 font-body text-sm text-[var(--color-muted-fg)]">
-                      {questionState === 'ACTIVE'
-                        ? 'Outcome is now tied to live race telemetry. Waiting for the next resolution signal.'
-                        : 'Awaiting lap completion and resolution.'}
+                      {questionState === 'TRIGGERED'
+                        ? 'The server has detected a valid race trigger. Answers open as soon as the question goes live.'
+                        : questionState === 'ACTIVE'
+                          ? 'Outcome is now tied to live race telemetry. Waiting for the next resolution signal.'
+                          : 'Awaiting lap completion and resolution.'}
                     </p>
                   </Card>
                 );

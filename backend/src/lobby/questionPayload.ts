@@ -6,15 +6,13 @@ import type {
   QuestionInstanceState,
 } from '../types';
 
-const UNRESOLVED_STATES: ReadonlySet<InstanceState> = new Set(['LIVE', 'LOCKED', 'ACTIVE']);
-const ANSWER_WINDOW_MS = 20_000;
+const UNRESOLVED_STATES: ReadonlySet<InstanceState> = new Set(['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE']);
 
 export function isUnresolvedQuestionState(state: InstanceState): boolean {
   return UNRESOLVED_STATES.has(state);
 }
 
 interface BuildQuestionEventOptions {
-  includeState?: boolean;
   answerDeadline?: Date | null;
 }
 
@@ -30,14 +28,15 @@ export function buildQuestionEventPayload(
     questionText: instance.questionText ?? 'Question in progress',
     category,
     difficulty,
+    state: instance.state,
     windowSize: instance.windowSize,
     triggeredAt: instance.triggeredAt.toISOString(),
-    answerDeadline: (options.answerDeadline ?? instance.answerDeadline ?? new Date(instance.triggeredAt.getTime() + ANSWER_WINDOW_MS)).toISOString(),
     suggestedStatKeys: instance.suggestedStatKeys ?? [],
   };
 
-  if (options.includeState) {
-    payload.state = instance.state;
+  const answerDeadline = options.answerDeadline ?? instance.answerDeadline ?? null;
+  if (answerDeadline) {
+    payload.answerDeadline = answerDeadline.toISOString();
   }
 
   return payload;

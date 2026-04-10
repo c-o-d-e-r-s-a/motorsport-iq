@@ -7,7 +7,6 @@ import type {
   PresenceExpiryReason,
   QuestionEvent,
   QuestionStateEvent,
-  QuestionTextUpdateEvent,
   ResolutionEvent,
   LeaderboardEntry,
   RaceSnapshotEvent,

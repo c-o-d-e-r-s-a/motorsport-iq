@@ -12,7 +12,7 @@ export function resolveBackendUrl(): string {
     return 'http://localhost:4000';
   }
 
-  // When deployed on Vercel, use the Railway backend
+  // Fallback only when the deployment env var is missing.
   if (window.location.hostname.includes('vercel.app')) {
     return PRODUCTION_BACKEND_URL;
   }

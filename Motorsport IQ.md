@@ -28,7 +28,7 @@ Read every section carefully. Implement exactly what is specified. Do not skip s
 Frontend:   Next.js 14 (App Router) + Tailwind CSS
 Backend:    Node.js + Express + Socket.io (WebSockets)
 Database:   Supabase (PostgreSQL)
-Hosting:    Vercel (frontend) + Render (backend)
+Hosting:    Vercel (frontend) + Railway (backend)
 Data:       OpenF1 API — https://api.openf1.org/v1
 AI:         Groq API — model: llama-3.3-70b-versatile
 ```
@@ -698,7 +698,7 @@ Real-time F1 prediction companion app. Private lobbies, live race questions, 20s
 
 ## Stack
 - Frontend: Next.js 14 App Router + Tailwind CSS → Vercel
-- Backend: Node.js + Express + Socket.io → Render
+- Backend: Node.js + Express + Socket.io → Railway
 - Database: Supabase (PostgreSQL)
 - Data: OpenF1 API (https://api.openf1.org/v1) — poll every 10s, lap completion only
 - AI: Anthropic Claude API, model `claude-sonnet-4-20250514`

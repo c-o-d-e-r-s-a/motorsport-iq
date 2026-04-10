@@ -32,13 +32,15 @@ export default function LapProgressBar({
   highlighted = false,
 }: LapProgressBarProps) {
   // Track lap start time based on telemetry lap start time from backend
-  const lapStartTimeRef = useRef<number>(
-    leaderLapStartTime ? new Date(leaderLapStartTime).getTime() : Date.now()
-  );
+  const lapStartTimeRef = useRef<number>(0);
   const previousLapNumberRef = useRef<number>(lapNumber);
   const lastProgressRef = useRef<number>(0);
 
   useEffect(() => {
+    if (lapStartTimeRef.current === 0) {
+      lapStartTimeRef.current = leaderLapStartTime ? new Date(leaderLapStartTime).getTime() : Date.now();
+    }
+
     // Reset on actual lap transition
     if (lapNumber !== previousLapNumberRef.current) {
       if (leaderLapStartTime) {
@@ -57,15 +59,10 @@ export default function LapProgressBar({
     }
   }, [leaderLapStartTime, lapNumber]);
 
-  const [progress, setProgress] = useState(() => {
-    if (raceCompleted) return 100;
-    const lapStartTime = lapStartTimeRef.current;
-    return calculateProgress(lapStartTime, leaderLapTime, Date.now());
-  });
+  const [progress, setProgress] = useState(() => (raceCompleted ? 100 : 0));
 
   useEffect(() => {
     if (raceCompleted) {
-      setProgress(100);
       return;
     }
 
@@ -84,6 +81,8 @@ export default function LapProgressBar({
     return () => window.clearInterval(interval);
   }, [leaderLapTime, raceCompleted]);
 
+  const displayProgress = raceCompleted ? 100 : progress;
+
   return (
     <div
       className={cn(
@@ -100,11 +99,11 @@ export default function LapProgressBar({
       <div className="mt-3 h-2 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--color-border),transparent_30%)]">
         <div
           className="h-full rounded-full bg-[linear-gradient(90deg,#ff1801_0%,#ff7b00_100%)] transition-[width] duration-200"
-          style={{ width: `${progress}%` }}
+          style={{ width: `${displayProgress}%` }}
         />
       </div>
       <p className="mt-2 font-display text-[10px] uppercase tracking-[0.18em] text-[var(--color-muted-fg)]">
-        {Math.round(progress)}% through the current lap
+        {Math.round(displayProgress)}% through the current lap
       </p>
     </div>
   );

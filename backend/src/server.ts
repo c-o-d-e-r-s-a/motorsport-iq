@@ -39,6 +39,7 @@ import {
   clearAllTimers,
   clearLobbyLifecycle,
 } from './lobby/lifecycleManager';
+import { LobbyLifecycleQueue } from './lobby/lifecycleQueue';
 import { generateQuestionText } from './ai/explanationGenerator';
 import { OpenF1Client } from './data/openf1Client';
 import { selectQuestion, clearCooldowns, formatQuestionText } from './engine/questionEngine';
@@ -316,14 +317,17 @@ app.patch('/admin/reports/:id', requireAdminSession, async (req, res) => {
 });
 
 const sessionLookupClient = new OpenF1Client();
+const lifecycleQueue = new LobbyLifecycleQueue();
 const runtimeManager = new SessionRuntimeManager({
   onSnapshotUpdate: (snapshot, lobbyIds) => {
     broadcastRaceSnapshot(snapshot, lobbyIds);
   },
   onLapComplete: async (snapshot, lobbyIds) => {
     for (const lobbyId of lobbyIds) {
-      await checkAndResolveQuestion(lobbyId, snapshot);
-      await checkAndTriggerQuestion(lobbyId, snapshot);
+      await lifecycleQueue.enqueue(lobbyId, async () => {
+        await checkAndResolveQuestion(lobbyId, snapshot);
+        await checkAndTriggerQuestion(lobbyId, snapshot);
+      });
     }
   },
   onFeedStall: (stalled, lobbyIds) => {
@@ -408,7 +412,10 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
   const lobbyState = await getLobbyState(lobbyId);
   if (!lobbyState || lobbyState.status !== 'active') return;
 
-  const activeQuestion = getActiveQuestion(lobbyId);
+  const existingQuestion = getActiveQuestion(lobbyId);
+  if (existingQuestion) {
+    return;
+  }
 
   // Check if SC/VSC - resume paused questions
   if (snapshot.trackStatus === 'GREEN') {
@@ -420,13 +427,17 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
     );
   }
 
+  if (getActiveQuestion(lobbyId)) {
+    return;
+  }
+
   // Try to select a new question
   const previousSnapshot = runtimeManager.getRuntimeForLobby(lobbyId)?.getPreviousSnapshot() ?? null;
   const newQuestion = selectQuestion(
     snapshot,
     previousSnapshot,
     lobbyId,
-    activeQuestion,
+    null,
     lobbyState.questionCount
   );
 
@@ -437,27 +448,26 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
       ? formatQuestionText(questionDef, newQuestion.driver1, newQuestion.driver2 ?? null)
       : 'Will this prediction come true?';
 
-    // Set initial question text to fallback for immediate broadcast
+    // Set initial question text to fallback before any emission so reconnect state is truthful.
     newQuestion.questionText = fallbackText;
     setLatestResolution(lobbyId, null);
-    console.log(`[PERF] Triggering question ${newQuestion.questionId} for lobby ${lobbyId} (fallback text)`);
+    console.log(`[QUESTION_TRIGGER] lobby=${lobbyId} instance=${newQuestion.id} question=${newQuestion.questionId} state=${newQuestion.state}`);
 
-    // Broadcast question event immediately with fallback text
+    // Start lifecycle first so the active-question guard is visible to concurrent lap updates.
+    await startQuestionLifecycle(
+      newQuestion,
+      (instance) => handleStateChange(lobbyId, instance),
+      (result) => handleResolution(lobbyId, result)
+    );
+
     io.to(lobbyId).emit('question_event', {
       ...buildQuestionEventPayload(
         newQuestion,
         getQuestionCategory(newQuestion.questionId),
         getQuestionDifficulty(newQuestion.questionId)
       ),
-      suggestedStatKeys: [], // Will be populated after AI generation
+      suggestedStatKeys: [],
     });
-
-    // Start lifecycle immediately (don't wait for AI)
-    await startQuestionLifecycle(
-      newQuestion,
-      (instance) => handleStateChange(lobbyId, instance),
-      (result) => handleResolution(lobbyId, result)
-    );
 
     // PERFORMANCE OPTIMIZATION: Fire AI generation in background
     const aiStartTime = Date.now();
@@ -513,6 +523,11 @@ function handleStateChange(lobbyId: string, instance: QuestionInstanceState): vo
   const answerDeadline = instance.state === 'LIVE'
     ? getAnswerDeadline(instance.id)?.toISOString()
     : undefined;
+
+  console.log(
+    `[QUESTION_STATE] lobby=${lobbyId} instance=${instance.id} state=${instance.state}`
+    + (answerDeadline ? ` deadline=${answerDeadline}` : '')
+  );
 
   io.to(lobbyId).emit('question_state', {
     instanceId: instance.id,
@@ -738,6 +753,10 @@ io.on('connection', (socket) => {
       await markUserActive(currentUserId);
 
       const result = await submitAnswer(data.instanceId, currentUserId, data.answer);
+      console.log(
+        `[ANSWER_SUBMIT] user=${currentUserId} instance=${data.instanceId} answer=${data.answer} success=${result.success}`
+        + (result.error ? ` error="${result.error}"` : '')
+      );
 
       if (result.success) {
         socket.emit('answer_received', { instanceId: data.instanceId });
@@ -797,7 +816,6 @@ io.on('connection', (socket) => {
           getQuestionCategory(activeQuestion.questionId),
           getQuestionDifficulty(activeQuestion.questionId),
           {
-            includeState: true,
             answerDeadline: activeQuestion.state === 'LIVE' ? getAnswerDeadline(activeQuestion.id) : null,
           }
         ));

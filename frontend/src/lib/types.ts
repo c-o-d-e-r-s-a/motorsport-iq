@@ -119,10 +119,10 @@ export interface QuestionEvent {
   questionText: string;
   category: QuestionCategory;
   difficulty: Difficulty;
-  state?: QuestionState;
+  state: QuestionState;
   windowSize: number;
   triggeredAt: string;
-  answerDeadline: string;
+  answerDeadline?: string;
   suggestedStatKeys?: StatHintKey[];
 }
 

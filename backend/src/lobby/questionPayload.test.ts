@@ -36,7 +36,8 @@ function createInstance(state: QuestionInstanceState['state']): QuestionInstance
 }
 
 describe('questionPayload', () => {
-  it('marks LIVE, LOCKED, and ACTIVE as unresolved question states', () => {
+  it('marks TRIGGERED, LIVE, LOCKED, and ACTIVE as unresolved question states', () => {
+    expect(isUnresolvedQuestionState('TRIGGERED')).toBe(true);
     expect(isUnresolvedQuestionState('LIVE')).toBe(true);
     expect(isUnresolvedQuestionState('LOCKED')).toBe(true);
     expect(isUnresolvedQuestionState('ACTIVE')).toBe(true);
@@ -48,8 +49,7 @@ describe('questionPayload', () => {
     const payload = buildQuestionEventPayload(
       createInstance('ACTIVE'),
       'GAP_CLOSING',
-      'MEDIUM',
-      { includeState: true }
+      'MEDIUM'
     );
 
     expect(payload.state).toBe('ACTIVE');
@@ -63,9 +63,20 @@ describe('questionPayload', () => {
       createInstance('LIVE'),
       'GAP_CLOSING',
       'MEDIUM',
-      { includeState: true, answerDeadline }
+      { answerDeadline }
     );
 
     expect(payload.answerDeadline).toBe(answerDeadline.toISOString());
+  });
+
+  it('omits the answer deadline before the question is live', () => {
+    const payload = buildQuestionEventPayload(
+      createInstance('TRIGGERED'),
+      'GAP_CLOSING',
+      'MEDIUM'
+    );
+
+    expect(payload.state).toBe('TRIGGERED');
+    expect(payload.answerDeadline).toBeUndefined();
   });
 });

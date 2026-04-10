@@ -10,6 +10,11 @@ interface WinnerScreenProps {
   onBackToLobby: () => void;
 }
 
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
 function sortEntries(entries: LeaderboardEntry[]): LeaderboardEntry[] {
   return [...entries].sort((a, b) => {
     if (b.points !== a.points) return b.points - a.points;
@@ -22,19 +27,14 @@ export default function WinnerScreen({ entries, onBackToLobby }: WinnerScreenPro
   const rankedEntries = sortEntries(entries);
   const podium = [rankedEntries[2], rankedEntries[1], rankedEntries[0]].filter(Boolean);
   const remainingEntries = rankedEntries.slice(3);
-  const [revealedPlaces, setRevealedPlaces] = useState(0);
-  const [celebrationActive, setCelebrationActive] = useState(false);
+  const [revealedPlaces, setRevealedPlaces] = useState(() => (prefersReducedMotion() ? 3 : 0));
+  const [celebrationActive, setCelebrationActive] = useState(() => prefersReducedMotion());
 
   useEffect(() => {
-    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (prefersReducedMotion) {
-      setRevealedPlaces(3);
-      setCelebrationActive(true);
+    if (prefersReducedMotion()) {
       return;
     }
 
-    setRevealedPlaces(0);
-    setCelebrationActive(false);
     const timers = [350, 700, 1050].map((delay, index) => (
       window.setTimeout(() => {
         setRevealedPlaces(index + 1);
