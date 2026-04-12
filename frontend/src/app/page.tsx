@@ -24,15 +24,23 @@ export default function Home() {
   const [statusFetchError, setStatusFetchError] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
+  const [isWarmingUp, setIsWarmingUp] = useState(false);
 
   useEffect(() => {
     const socket = getSocketClient();
     socket.connect();
 
+    // Show a warming-up notice after 4s if still not connected (Render cold start)
+    const warmUpTimer = setTimeout(() => {
+      if (!socket.isConnected()) setIsWarmingUp(true);
+    }, 4000);
+
     const unsubscribers = [
       socket.on('connected', () => {
         setIsReconnecting(false);
         setConnectionNotice(null);
+        setIsWarmingUp(false);
+        clearTimeout(warmUpTimer);
       }),
       socket.on('disconnected', () => {
         setIsReconnecting(true);
@@ -220,6 +228,23 @@ export default function Home() {
           >
             <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-[linear-gradient(90deg,transparent,var(--color-accent),transparent)] opacity-70" />
             <SectionLabel index="02" label="Lobby Access" className="mb-5" />
+
+            {isWarmingUp && (
+              <div className="mb-5 border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-muted),transparent_20%)] p-4">
+                <div className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-2.5 w-2.5 shrink-0">
+                    <span className="absolute inline-flex h-2.5 w-2.5 animate-ping rounded-full bg-[var(--color-accent)] opacity-60" />
+                    <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[var(--color-accent)]" />
+                  </span>
+                  <div>
+                    <p className="font-display text-xs uppercase tracking-[0.2em] text-[var(--color-fg)]">Server Warming Up</p>
+                    <p className="mt-1 text-xs leading-5 text-[var(--color-muted-fg)]">
+                      The game server is starting from sleep — this usually takes 30–60 seconds on first visit. Hang tight.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-bg),transparent_20%)] p-5 md:p-6">
               <div className="flex items-end justify-between gap-4 border-b border-[var(--color-border)] pb-4">
