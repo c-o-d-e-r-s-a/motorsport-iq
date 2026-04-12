@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import QuestionCard from '@/components/QuestionCard';
 import CountdownTimer from '@/components/CountdownTimer';
 import Leaderboard from '@/components/Leaderboard';
-import LapProgressBar from '@/components/LapProgressBar';
+
 import RaceConditionBadge from '@/components/RaceConditionBadge';
 import TireStats from '@/components/TireStats';
 import WinnerScreen from '@/components/WinnerScreen';
@@ -542,16 +542,7 @@ export default function GamePage() {
                 {connectionNotice}
               </p>
             )}
-            {raceSnapshot && (
-              <LapProgressBar
-                lapNumber={raceSnapshot.lapNumber}
-                totalLaps={raceSnapshot.totalLaps}
-                leaderLapTime={raceSnapshot.leaderLapTime}
-                leaderLapStartTime={raceSnapshot.leaderLapStartTime}
-                raceCompleted={hasRaceCompleted}
-                highlighted={suggestedStatKeys.includes('LAP_PROGRESS')}
-              />
-            )}
+
           </div>
           <div className="flex flex-wrap gap-2 md:justify-end">
             <ThemeToggle />
