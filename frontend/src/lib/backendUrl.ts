@@ -1,4 +1,4 @@
-const PRODUCTION_BACKEND_URL = 'https://motorsport-iq-backend-production.up.railway.app';
+const PRODUCTION_BACKEND_URL = 'https://motorsport-iq-backend.onrender.com';
 
 export function resolveBackendUrl(): string {
   const configuredUrl = process.env.NEXT_PUBLIC_SOCKET_URL?.trim();
