@@ -11,6 +11,8 @@ import TireStats from '@/components/TireStats';
 import WinnerScreen from '@/components/WinnerScreen';
 import { getSocketClient } from '@/lib/socket';
 import { apiFetch } from '@/lib/api';
+import { useQuestionSound } from '@/hooks/useQuestionSound';
+import { useAnswerOutcomeSounds } from '@/hooks/useAnswerOutcomeSounds';
 import {
   SERVER_EVENTS,
   type CreateProblemReportInput,
@@ -63,6 +65,9 @@ export default function GamePage() {
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [isLeaving, setIsLeaving] = useState(false);
   const [localCorrectAnswers, setLocalCorrectAnswers] = useState<number>(0);
+
+  const { playSound } = useQuestionSound('/sounds/question-alert.mp3');
+  const { playCorrectSound, playWrongSound } = useAnswerOutcomeSounds();
 
   // Track processed resolutions to prevent flickering from duplicate events
   const processedResolutionIds = useRef<Set<string>>(new Set());
@@ -252,6 +257,8 @@ export default function GamePage() {
         setReportError(null);
         setReportNote('');
         setReportReason('WRONG_ANSWER');
+        
+        playSound();
       }),
       socket.on(
         SERVER_EVENTS.QUESTION_STATE,
@@ -330,9 +337,15 @@ export default function GamePage() {
         setReportNote('');
         setReportReason('WRONG_ANSWER');
         
-        // Update local correct answers counter if user answered correctly
-        if (submittedAnswersRef.current[event.instanceId] === event.correctAnswer) {
-          setLocalCorrectAnswers((prev) => prev + 1);
+        // Check if user submitted an answer and play appropriate sound
+        const userAnswer = submittedAnswersRef.current[event.instanceId];
+        if (userAnswer) {
+          if (userAnswer === event.correctAnswer) {
+            setLocalCorrectAnswers((prev) => prev + 1);
+            playCorrectSound();
+          } else {
+            playWrongSound();
+          }
         }
       }),
       socket.on(SERVER_EVENTS.LEADERBOARD_UPDATE, (entries: LeaderboardEntry[]) => {
