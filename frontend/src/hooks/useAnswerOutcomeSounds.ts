@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 export function useAnswerOutcomeSounds() {
   const correctAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -9,10 +9,10 @@ export function useAnswerOutcomeSounds() {
 
     const correctAudio = new Audio('/sounds/correct.mp3');
     const wrongAudio = new Audio('/sounds/wrong.mp3');
-    
+
     correctAudio.preload = 'auto';
     wrongAudio.preload = 'auto';
-    
+
     correctAudioRef.current = correctAudio;
     wrongAudioRef.current = wrongAudio;
 
@@ -28,23 +28,23 @@ export function useAnswerOutcomeSounds() {
     };
   }, []);
 
-  const playCorrectSound = () => {
+  const playCorrectSound = useCallback(() => {
     if (!correctAudioRef.current) return;
 
     correctAudioRef.current.currentTime = 0;
     correctAudioRef.current.play().catch((error) => {
       console.warn('[Audio] Correct answer sound blocked:', error.message);
     });
-  };
+  }, []);
 
-  const playWrongSound = () => {
+  const playWrongSound = useCallback(() => {
     if (!wrongAudioRef.current) return;
 
     wrongAudioRef.current.currentTime = 0;
     wrongAudioRef.current.play().catch((error) => {
       console.warn('[Audio] Wrong answer sound blocked:', error.message);
     });
-  };
+  }, []);
 
   return { playCorrectSound, playWrongSound };
 }

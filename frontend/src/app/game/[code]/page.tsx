@@ -257,7 +257,7 @@ export default function GamePage() {
         setReportError(null);
         setReportNote('');
         setReportReason('WRONG_ANSWER');
-        
+
         playSound();
       }),
       socket.on(
@@ -336,7 +336,7 @@ export default function GamePage() {
         setReportError(null);
         setReportNote('');
         setReportReason('WRONG_ANSWER');
-        
+
         // Check if user submitted an answer and play appropriate sound
         const userAnswer = submittedAnswersRef.current[event.instanceId];
         if (userAnswer) {
@@ -376,7 +376,7 @@ export default function GamePage() {
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [currentUserId, router]);
+  }, [currentUserId, playCorrectSound, playSound, playWrongSound, router]);
 
   useEffect(() => {
     if (!currentUserId) {

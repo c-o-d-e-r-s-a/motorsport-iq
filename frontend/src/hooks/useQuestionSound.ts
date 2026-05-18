@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export function useQuestionSound(soundPath: string) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -17,7 +17,7 @@ export function useQuestionSound(soundPath: string) {
         await audio.pause();
         audio.currentTime = 0;
         setCanAutoplay(true);
-      } catch (error) {
+      } catch {
         setCanAutoplay(false);
       }
     };
@@ -32,18 +32,18 @@ export function useQuestionSound(soundPath: string) {
     };
   }, [soundPath]);
 
-  const playSound = () => {
+  const playSound = useCallback(() => {
     if (!audioRef.current) return;
 
     audioRef.current.currentTime = 0;
-    
+
     audioRef.current.play().catch((error) => {
       console.warn('[Audio] Playback blocked:', error.message);
       if (canAutoplay === null || canAutoplay === true) {
         setCanAutoplay(false);
       }
     });
-  };
+  }, [canAutoplay]);
 
   return { playSound, canAutoplay };
 }
