@@ -1,5 +1,6 @@
 import { OpenF1Client } from '../data/openf1Client';
 import { SnapshotStore } from '../data/snapshotStore';
+import { F1SignalRClient } from '../data/f1SignalRClient';
 import type {
   OpenF1Interval,
   OpenF1Lap,
@@ -116,6 +117,9 @@ abstract class BaseRuntime implements SessionRuntime {
 }
 
 class LiveSessionRuntime extends BaseRuntime {
+  private signalRClient: F1SignalRClient | null = null;
+  private isUsingFallback = false;
+
   constructor(session: OpenF1Session, callbacks: RuntimeCallbacks) {
     super(session, 'live', null, callbacks);
   }
@@ -123,17 +127,81 @@ class LiveSessionRuntime extends BaseRuntime {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+
+    // 1. Initialize the shared snapshot store cache
     this.client.setSession(this.session.session_key);
     await this.snapshotStore.initialize(this.session.session_key, {
       sessionMode: 'live',
       replaySpeed: null,
     });
+
+    console.log(`[Live Runtime] Booting real-time streaming pipeline for session: ${this.sessionId}`);
+
+    // 2. Spin up the real-time SignalR feed
+    this.signalRClient = new F1SignalRClient({
+      onPositionUpdate: (positions) => {
+        if (!this.isUsingFallback) this.snapshotStore.processPositionUpdate(positions);
+      },
+      onLapCompletion: (lap) => {
+        if (!this.isUsingFallback) this.snapshotStore.processLapCompletion(lap);
+      },
+      onConnectionLoss: () => {
+        console.warn(`[Live Runtime] SignalR connection unstable for session ${this.sessionId}. Monitoring...`);
+      },
+      onConnectionRestored: () => {
+        console.log(`[Live Runtime] SignalR connection fully restored for session ${this.sessionId}.`);
+      },
+      onConnectionClosedPermanently: () => {
+        console.error(`[Live Runtime] SignalR closed permanently. Triggering REST emergency fallback.`);
+        this.activateRESTFallback();
+      }
+    });
+
+    try {
+      // 3. Kick off the connection
+      await this.signalRClient.start();
+      console.log("[Live Runtime] Primary SignalR connection established successfully.");
+
+      // TEST SIMULATION SHORT-CIRCUIT FOR SCENARIO B:
+      // (Uncomment the block below when you want to test mid-race crash-protection handling)
+      /*
+      setTimeout(() => {
+        console.log("\n [Test Sim] Triggering sudden simulated WebSocket connection drop...");
+        (this.signalRClient as any).options.onConnectionClosedPermanently?.();
+      }, 7000);
+      */
+
+    } catch (error: any) {
+      console.error(`[Live Runtime] SignalR handshake failed. Instantly dropping back to REST polling:`, error.message);
+      this.activateRESTFallback();
+    }
+  }
+
+  private activateRESTFallback(): void {
+    if (this.isUsingFallback) return;
+    this.isUsingFallback = true;
+
+    console.log(`[Fallback Engine] Initializing original OpenF1 REST polling client for session ${this.sessionId}.`);
+    
+    // Safely tear down the broken SignalR engine if it exists
+    if (this.signalRClient) {
+      try { this.signalRClient.stop(); } catch {}
+      this.signalRClient = null;
+    }
+
+    // Switch tracks instantly to the REST Polling engine
     this.client.startPolling();
   }
 
   stop(): void {
-    this.client.stopPolling();
+    if (this.isUsingFallback) {
+      this.client.stopPolling();
+    } else if (this.signalRClient) {
+      this.signalRClient.stop();
+    }
     this.started = false;
+    this.isUsingFallback = false;
+    console.log(`[Live Runtime] Tearing down session runtime: ${this.sessionId}`);
   }
 }
 

@@ -69,6 +69,24 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'https://motorsport-iq.vercel.app',
 ];
 
+// Temporary development endpoint to verify direct connection and handshake with F1 SignalR hub
+import { F1SignalRClient } from './data/f1SignalRClient';
+
+app.get('/test-signalr', async (req, res) => {
+  try {
+    const client = new F1SignalRClient();
+    await client.start();
+    
+    setTimeout(() => {
+      client.stop();
+    }, 30000); 
+
+    res.json({ status: 'SignalR test started, check your backend console logs!' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 function normalizeOriginValue(origin: string): string {
   return origin.trim().replace(/\/+$/, '');
 }
@@ -916,6 +934,34 @@ process.on('SIGINT', () => {
     process.exit(0);
   });
 });
+
+/* TEMPORARY STEP 3 BACKDOOR TEST ROUTE
+app.get('/debug-force-live', async (req, res) => {
+  try {
+    console.log("\n [Debug Backdoor] Manually forcing a Live Session Runtime initialization...");
+    
+    // 1. Mock an active live F1 session object (99999 represents a live session key)
+    const mockLiveSession = {
+      session_key: 9158,
+      session_name: "Simulated Canadian GP Live",
+      date_start: new Date().toISOString(),
+      date_end: new Date(Date.now() + 3600000).toISOString() // Ends 1 hour in the future = Forces Live mode!
+    };
+
+    // 2. In your server.ts, runtimeManager is directly accessible in this scope!
+    console.log("[Debug Backdoor] Triggering attachLobbyToSession...");
+    await runtimeManager.attachLobbyToSession("test-debug-lobby-id", mockLiveSession as any);
+
+    res.json({ 
+      success: true,
+      message: "LiveSessionRuntime ignition sequence triggered! Check your backend terminal console logs right now." 
+    });
+  } catch (err: any) {
+    console.error("Backdoor test failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+*/
 
 // Start server
 httpServer.listen(PORT, () => {
