@@ -163,10 +163,10 @@ export default function LobbyPage() {
     }
 
     const selectedSessionInfo = sessions.find((session) => String(session.session_key) === selectedSession);
-    if (!selectedSessionInfo?.isCompleted) {
+    /*if (!selectedSessionInfo?.isCompleted) {
       setError('This session has not completed yet');
       return;
-    }
+    }*/
 
     if (lobbyState.players.length < 1) {
       setError('Need at least 1 player to start');
@@ -307,7 +307,8 @@ export default function LobbyPage() {
                         <button
                           key={session.session_key}
                           type="button"
-                          disabled={!isCompleted}
+                          //disabled={!isCompleted}
+                          disabled={false}
                           onClick={() => isCompleted && setSelectedSession(String(session.session_key))}
                           className={`w-full border-2 p-4 text-left transition-colors ${
                             isSelected
@@ -332,7 +333,7 @@ export default function LobbyPage() {
                               <span className="border-2 border-[var(--color-border)] px-2 py-1 font-display text-[10px] uppercase tracking-[0.18em]">
                                 {session.mode === 'replay' ? 'Replay' : 'Live'}
                               </span>
-                              <span
+                              {/*<span
                                 className={`border-2 px-2 py-1 font-display text-[10px] uppercase tracking-[0.18em] ${
                                   isCompleted
                                     ? 'border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)]'
@@ -340,13 +341,19 @@ export default function LobbyPage() {
                                 }`}
                               >
                                 {isCompleted ? 'Replay Ready' : 'Not Completed Yet'}
+                              </span>*/}
+                              <span className="border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)] px-2 py-1 font-display text-[10px] uppercase tracking-[0.18em]">
+                                {isCompleted ? 'Replay Ready' : 'Not Completed Yet'}  
                               </span>
                             </div>
                           </div>
                           <p className="mt-3 font-display text-xs uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">
-                            {isCompleted
+                            {/*{isCompleted
                               ? 'Available now. Telemetry replay runs at 10x and triggers AI-written questions from the server question bank.'
-                              : 'Unavailable until the session finishes and OpenF1 historical data is complete.'}
+                              : 'Unavailable until the session finishes and OpenF1 historical data is complete.'}*/}
+                            {session.mode == 'live'
+                              ? 'This session follows live telemetry. Questions appear only when the server-side trigger engine finds a valid race situation.'
+                              : 'Replay ready. Telemetry replay runs at 10x and triggers AI-written questions from the server question bank.'}
                           </p>
                         </button>
                       );
@@ -360,25 +367,30 @@ export default function LobbyPage() {
 
                 {selectedSessionInfo && (
                   <p className="mt-4 border-2 border-[var(--color-border)] bg-[var(--color-bg)] p-3 font-display text-xs uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">
-                    {selectedSessionInfo.isCompleted
+                    {/*{selectedSessionInfo.isCompleted
                       ? 'Historical telemetry replay starts at 10x speed. Questions appear when server-side race signals match the curated question bank, then Groq/Llama rewrites the prompt and explanation.'
-                      : 'This session has not completed yet and cannot be started.'}
+                      : 'This session has not completed yet and cannot be started.'}*/}
+                    {selectedSessionInfo.mode == 'live'
+                     ? 'Live session connects to real-time F1 SignalR telemetry stream. Questions appear when server-side race signals match valid triggers.'
+                     : 'Historical telemetry replay starts at 10x speed. Questions appear when server-side race signals match the curated question bank, then Groq/Llama rewrites the prompt and explanation.'}
                   </p>
                 )}
 
-                {sessions.length > 0 && completedSessions.length === 0 && (
+                {/*{sessions.length > 0 && completedSessions.length === 0 && (
                   <p className="mt-4 border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_92%)] p-3 font-display text-xs uppercase tracking-[0.14em]">
                     No completed sessions are available for this year yet.
                   </p>
-                )}
+                )}*/}
 
                 <Button
                   onClick={handleStartGame}
-                  disabled={isStarting || !selectedSession || !selectedSessionInfo?.isCompleted}
+                  //disabled={isStarting || !selectedSession || !selectedSessionInfo?.isCompleted}
+                  disabled={isStarting || !selectedSession}
                   size="lg"
                   className="mt-6 w-full"
                 >
-                  {isStarting ? 'Starting Session...' : selectedSessionInfo?.isCompleted ? 'Start Race Session' : 'Session Unavailable'}
+                  {/*{isStarting ? 'Starting Session...' : selectedSessionInfo?.isCompleted ? 'Start Race Session' : 'Session Unavailable'}*/}
+                  {isStarting ? 'Starting Session...' : selectedSessionInfo?.mode === 'live' ? 'Start Live Session' : 'Start Replay Session'}
                 </Button>
               </>
             ) : (
