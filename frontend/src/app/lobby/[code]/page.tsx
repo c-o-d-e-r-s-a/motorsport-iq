@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { getSocketClient } from '@/lib/socket';
 import { SERVER_EVENTS, type LobbyState, type ServerErrorEvent, type SessionInfo } from '@/lib/types';
+import { filterSessionsForDisplay, isLiveCanadianGrandPrixWindow } from '@/lib/sessionDisplay';
 import { Button, Card, Dialog, SectionLabel, ThemeToggle } from '@/components/ui';
 
 export default function LobbyPage() {
@@ -126,12 +127,17 @@ export default function LobbyPage() {
 
     socket.getSessions(selectedYear);
 
+    const pollInterval = window.setInterval(() => {
+      socket.getSessions(selectedYear);
+    }, 15_000);
+
     const userId = localStorage.getItem('msp_user_id');
     if (userId) {
       socket.reconnectLobby(userId);
     }
 
     return () => {
+      window.clearInterval(pollInterval);
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, [currentUserId, lobbyCode, router, selectedYear]);
@@ -203,8 +209,15 @@ export default function LobbyPage() {
     setSelectedSession(key);
   }, [selectedSession]);
 
+  const displaySessions = useMemo(
+    () => filterSessionsForDisplay(sessions),
+    [sessions]
+  );
+
   const isHost = lobbyState?.hostId === currentUserId;
-  const selectedSessionInfo = sessions.find((session) => String(session.session_key) === selectedSession) ?? null;
+  const selectedSessionInfo = displaySessions.find((session) => String(session.session_key) === selectedSession)
+    ?? sessions.find((session) => String(session.session_key) === selectedSession)
+    ?? null;
   const canStartSession = Boolean(
     selectedSession && selectedSessionInfo && (selectedSessionInfo.isLive || selectedSessionInfo.isCompleted)
   );
@@ -214,11 +227,9 @@ export default function LobbyPage() {
       setConfirmSession(selectedSessionInfo);
     }
   }, [canStartSession, selectedSessionInfo]);
-  const liveSessionInList = sessions.find((session) => session.isLive) ?? null;
-  // Backend filters the list down to a single live session when one is in
-  // progress (OpenF1 is 401-locked during the live window). We surface a
-  // dedicated banner so the host knows historical replays are paused.
-  const liveOnlyMode = Boolean(liveSessionInList) && sessions.length === 1;
+  const liveSessionInList = displaySessions.find((session) => session.isLive) ?? null;
+  const liveOnlyMode = isLiveCanadianGrandPrixWindow(sessions)
+    || (Boolean(liveSessionInList) && displaySessions.length === 1);
 
   const years = useMemo(() => {
     const currentYear = new Date().getFullYear();
@@ -314,42 +325,48 @@ export default function LobbyPage() {
             {isHost ? (
               <>
                 <SectionLabel index="03B" label="Session Setup" className="mb-4" />
-                <div className="grid gap-4 md:grid-cols-2">
-                  <label className="block">
-                    <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                      Season Year
-                    </span>
-                    <select
-                      value={selectedYear}
-                      onChange={(event) => {
-                        setSelectedYear(Number(event.target.value));
-                        setSelectedSession('');
-                      }}
-                      className="h-12 w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 font-display text-sm uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
-                    >
-                      {years.map((year) => (
-                        <option key={year} value={year}>
-                          {year}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                {!liveOnlyMode && (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
+                        Season Year
+                      </span>
+                      <select
+                        value={selectedYear}
+                        onChange={(event) => {
+                          setSelectedYear(Number(event.target.value));
+                          setSelectedSession('');
+                        }}
+                        className="h-12 w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 font-display text-sm uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                      >
+                        {years.map((year) => (
+                          <option key={year} value={year}>
+                            {year}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
 
-                  <label className="block">
-                    <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                      Race Session
-                    </span>
-                    <p className="font-body text-sm text-[var(--color-muted-fg)]">
-                      {liveOnlyMode
-                        ? 'A live race is in progress. Historical replays pause until the chequered flag — only the live session is available right now.'
-                        : 'Select a live session during the race window, or a completed session for 10x replay.'}
-                    </p>
-                  </label>
-                </div>
+                    <label className="block">
+                      <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
+                        Race Session
+                      </span>
+                      <p className="font-body text-sm text-[var(--color-muted-fg)]">
+                        Select a live session during the race window, or a completed session for 10x replay.
+                      </p>
+                    </label>
+                  </div>
+                )}
 
-                <div className="mt-4 space-y-3">
-                  {sessions.length > 0 ? (
-                    sessions.map((session) => {
+                {liveOnlyMode && (
+                  <p className="mb-4 border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_90%)] p-4 font-body text-sm text-[var(--color-fg)]">
+                    The Canadian Grand Prix is live. Only the live race session is available — start when your lobby is ready.
+                  </p>
+                )}
+
+                <div className={`space-y-3 ${liveOnlyMode ? '' : 'mt-4'}`}>
+                  {displaySessions.length > 0 ? (
+                    displaySessions.map((session) => {
                       const isSelected = String(session.session_key) === selectedSession;
                       const isLive = session.isLive;
                       const isCompleted = session.isCompleted;

@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { SERVER_EVENTS, type LobbyState, type SessionInfo } from '@/lib/types';
 import { getSocketClient } from '@/lib/socket';
 import { deriveHomeOpenF1Status } from '@/lib/homeStatus';
+import { filterSessionsForDisplay } from '@/lib/sessionDisplay';
 import { Button, Card, Input, SectionLabel, ThemeToggle } from '@/components/ui';
 
 export default function Home() {
@@ -90,17 +91,30 @@ export default function Home() {
     const socket = getSocketClient();
     socket.connect();
     socket.getSessions(statusYear);
+
+    const interval = window.setInterval(() => {
+      socket.getSessions(statusYear);
+    }, 30_000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
   }, [statusYear]);
+
+  const displaySessions = useMemo(
+    () => filterSessionsForDisplay(sessions),
+    [sessions]
+  );
 
   const homeStatus = useMemo(
     () =>
       deriveHomeOpenF1Status({
-        sessions,
+        sessions: displaySessions,
         isLoading: isStatusLoading,
         hasError: statusFetchError,
         year: statusYear,
       }),
-    [sessions, isStatusLoading, statusFetchError, statusYear]
+    [displaySessions, isStatusLoading, statusFetchError, statusYear]
   );
 
   const handleCreateLobby = () => {
