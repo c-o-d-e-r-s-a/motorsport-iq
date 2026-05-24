@@ -134,6 +134,21 @@ export function evaluateTrigger(
     case 'lateRacePhase':
       return signals.lateRacePhase;
 
+    case 'withinOneSecond':
+      return signals.withinOneSecond.get(driver1.driverNumber) ?? false;
+
+    case 'fallingBack':
+      return signals.fallingBack.get(driver1.driverNumber) ?? false;
+
+    case 'tyreCliffRisk':
+      return signals.tyreCliffRisk.get(driver1.driverNumber) ?? false;
+
+    case 'podiumStabilityTrend':
+      return signals.podiumStabilityTrend && driver1.position >= 1 && driver1.position <= 3;
+
+    case 'drsEnabled':
+      return driver1.drsEnabled === true;
+
     case 'positionRange': {
       const min = Number(trigger.params.min ?? 1);
       const max = Number(trigger.params.max ?? 20);
@@ -222,6 +237,16 @@ export function applyPriorityHierarchy(candidates: QuestionCandidate[]): Questio
   });
 }
 
+function pickQuestionCandidate(candidates: QuestionCandidate[]): QuestionCandidate {
+  const sorted = applyPriorityHierarchy(candidates);
+  const bestPriority = sorted[0].question.priority;
+  const tier = sorted.filter((candidate) => candidate.question.priority === bestPriority);
+  const topScore = tier[0].score;
+  const contenders = tier.filter((candidate) => candidate.score >= topScore - 15);
+
+  return contenders[Math.floor(Math.random() * contenders.length)];
+}
+
 export function selectQuestion(
   snapshot: RaceSnapshot,
   previousSnapshot: RaceSnapshot | null,
@@ -253,7 +278,7 @@ export function selectQuestion(
     return null;
   }
 
-  const selected = applyPriorityHierarchy(allCandidates)[0];
+  const selected = pickQuestionCandidate(allCandidates);
 
     return {
     id: randomUUID(),
@@ -275,7 +300,10 @@ export function selectQuestion(
 export function formatQuestionText(question: Question, driver1: DriverState, driver2: DriverState | null): string {
   return question.template
     .replace(/{driver1}/g, driver1.name)
-    .replace(/{driver2}/g, driver2?.name ?? 'the car ahead');
+    .replace(/{driver2}/g, driver2?.name ?? 'the car ahead')
+    .replace(/{windowSize}/g, String(question.windowSize))
+    .replace(/{position}/g, String(driver1.position))
+    .replace(/{tyreAge}/g, String(driver1.tyreAge));
 }
 
 export function clearCooldowns(lobbyId: string): void {

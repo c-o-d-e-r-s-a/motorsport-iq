@@ -223,6 +223,7 @@ export interface SessionInfo {
   circuit_short_name: string;
   year: number;
   isCompleted: boolean;
+  isLive: boolean;
   mode: SessionMode;
 }
 

@@ -12,6 +12,7 @@ import type {
 } from '../types';
 
 const OPENF1_BASE_URL = process.env.OPENF1_BASE_URL || 'https://api.openf1.org/v1';
+const OPENF1_API_KEY = process.env.OPENF1_API_KEY || ''; // Optional; only needed for historical access during live sessions
 const POLLING_INTERVAL = 10000;
 const MAX_RETRIES = 4;
 const BASE_BACKOFF = 1000;
@@ -52,10 +53,22 @@ export class OpenF1Client {
   private lastLapNumbers: Map<number, number> = new Map();
   private options: OpenF1ClientOptions;
   private fetchImpl: FetchType;
+  // Sticky flag — once OpenF1 returns 401 "Live F1 session in progress" we
+  // stop banging on data endpoints for the rest of this client's lifetime.
+  // SignalR is the source of truth for the live window.
+  private static liveLocked = false;
 
   constructor(options: OpenF1ClientOptions = {}, fetchImpl: FetchType = fetch) {
     this.options = options;
     this.fetchImpl = fetchImpl;
+  }
+
+  static isLiveLocked(): boolean {
+    return OpenF1Client.liveLocked;
+  }
+
+  static resetLiveLock(): void {
+    OpenF1Client.liveLocked = false;
   }
 
   setSession(sessionId: number): void {
@@ -161,13 +174,31 @@ export class OpenF1Client {
       return cached.data;
     }
 
+    // While OpenF1 is locked by an in-progress live session, only the
+    // `/sessions` metadata endpoint stays reliably accessible. Skip every
+    // data endpoint immediately and return cached value (or null) so we
+    // don't spam 401s. SignalR delivers the real-time data instead.
+    if (OpenF1Client.liveLocked && !endpoint.startsWith('/sessions')) {
+      return cached ? cached.data : null;
+    }
+
     const url = `${OPENF1_BASE_URL}${endpoint}?${new URLSearchParams(
       Object.entries(params).map(([key, value]) => [key, String(value)])
     )}`;
 
+    const __fetchT0 = Date.now();
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       try {
-        const response = await this.fetchImpl(url);
+        const headers: Record<string, string> = {};
+        if (OPENF1_API_KEY) {
+          headers['Authorization'] = `Bearer ${OPENF1_API_KEY}`;
+        }
+
+        const __attemptT0 = Date.now();
+        const response = await this.fetchImpl(url, { headers });
+        // #region agent log
+        fetch('http://127.0.0.1:7872/ingest/ea1b051c-aa7e-4ed0-a900-48054fe3ab82',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f8159b'},body:JSON.stringify({sessionId:'f8159b',hypothesisId:'H6',location:'openf1Client.ts:fetchWithCache:attempt',message:'http response received',data:{endpoint,attempt,maxRetries:MAX_RETRIES,httpStatus:response.status,attemptElapsedMs:Date.now()-__attemptT0,totalElapsedMs:Date.now()-__fetchT0},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
 
         if (response.status === 429 || response.status >= 500) {
           const retryAfterHeader = response.headers.get('retry-after');
@@ -184,6 +215,17 @@ export class OpenF1Client {
           throw new Error(`Rate limited or server error: ${response.status}`);
         }
         if (!response.ok) {
+          if (response.status === 401) {
+            const bodyText = await response.text().catch(() => '');
+            if (bodyText.includes('Live F1 session in progress')) {
+              if (!OpenF1Client.liveLocked) {
+                console.log('[OpenF1] Live session lock detected — suppressing data-endpoint calls until next process restart. SignalR is authoritative.');
+              }
+              OpenF1Client.liveLocked = true;
+              // Don't throw — surface as "no data" so callers degrade silently.
+              return cached ? cached.data : null;
+            }
+          }
           throw new Error(`HTTP error: ${response.status}`);
         }
 
@@ -191,6 +233,10 @@ export class OpenF1Client {
         this.cache.set(cacheKey, { data, timestamp: Date.now() });
         return data;
       } catch (error) {
+        // #region agent log
+        const __willRetry = attempt < MAX_RETRIES;
+        fetch('http://127.0.0.1:7872/ingest/ea1b051c-aa7e-4ed0-a900-48054fe3ab82',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f8159b'},body:JSON.stringify({sessionId:'f8159b',hypothesisId:'H6',location:'openf1Client.ts:fetchWithCache:catch',message:'catch block reached',data:{endpoint,attempt,maxRetries:MAX_RETRIES,errorMessage:(error as Error).message,willRetry:__willRetry,nextBackoffMs:__willRetry?BASE_BACKOFF * 2 ** attempt:null,totalElapsedMs:Date.now()-__fetchT0,hasCached:Boolean(cached)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         if (attempt < MAX_RETRIES) {
           await sleep(BASE_BACKOFF * 2 ** attempt);
           continue;

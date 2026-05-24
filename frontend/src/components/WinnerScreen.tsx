@@ -25,7 +25,11 @@ function sortEntries(entries: LeaderboardEntry[]): LeaderboardEntry[] {
 
 export default function WinnerScreen({ entries, onBackToLobby }: WinnerScreenProps) {
   const rankedEntries = sortEntries(entries);
-  const podium = [rankedEntries[2], rankedEntries[1], rankedEntries[0]].filter(Boolean);
+  const podiumSlots = [
+    { place: 3 as const, entry: rankedEntries[2] },
+    { place: 2 as const, entry: rankedEntries[1] },
+    { place: 1 as const, entry: rankedEntries[0] },
+  ].filter((slot): slot is { place: 1 | 2 | 3; entry: LeaderboardEntry } => Boolean(slot.entry));
   const remainingEntries = rankedEntries.slice(3);
   const [revealedPlaces, setRevealedPlaces] = useState(() => (prefersReducedMotion() ? 3 : 0));
   const [celebrationActive, setCelebrationActive] = useState(() => prefersReducedMotion());
@@ -73,14 +77,9 @@ export default function WinnerScreen({ entries, onBackToLobby }: WinnerScreenPro
         <h2 className="mt-3 font-display text-4xl uppercase tracking-tight md:text-6xl">Final Podium</h2>
 
         <div className="mt-8 grid gap-4 md:grid-cols-3">
-          {podium.map((entry, index) => {
-            if (!entry) {
-              return null;
-            }
-
-            const podiumPlace = 3 - index;
+          {podiumSlots.map(({ place, entry }, index) => {
             const revealed = revealedPlaces >= index + 1;
-            const isWinner = podiumPlace === 1;
+            const isWinner = place === 1;
 
             return (
               <div
@@ -98,7 +97,7 @@ export default function WinnerScreen({ entries, onBackToLobby }: WinnerScreenPro
                   </>
                 )}
                 <p className="relative font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                  {podiumPlace === 1 ? '🥇 1st Place' : podiumPlace === 2 ? '🥈 2nd Place' : '🥉 3rd Place'}
+                  {place === 1 ? '🥇 1st Place' : place === 2 ? '🥈 2nd Place' : '🥉 3rd Place'}
                 </p>
                 <p className="relative mt-3 font-display text-3xl uppercase leading-none md:text-4xl">{entry.username}</p>
                 <p className="relative mt-4 font-display text-5xl leading-none">{entry.points}</p>

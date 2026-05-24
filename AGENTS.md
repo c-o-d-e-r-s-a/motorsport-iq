@@ -18,7 +18,8 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 | Backend | Node.js, Express, Socket.io, TypeScript |
 | Database | Supabase (PostgreSQL) — project `rwwdnhclabuqvoxqzrcy`, region `AWS us-east-2` |
 | AI | Groq API — `llama-3.3-70b-versatile` — question explanations & stat hints |
-| Race Data | OpenF1 API (`https://api.openf1.org/v1`) — live & historical telemetry |
+| Race Data (live) | F1 SignalR WebSocket feed |
+| Race Data (replay) | OpenF1 API (`https://api.openf1.org/v1`) — historical telemetry & session listing |
 
 ---
 
@@ -44,6 +45,7 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 | 2026-03 | Initial deploy on Railway (backend) + Vercel (frontend) |
 | 2026-04 | Migrated backend from Railway → Render (free tier) |
 | 2026-04 | Fixed `SUPABASE_URL` typo (`voy`/`vox` project ref mismatch) causing `TypeError: fetch failed` on lobby creation |
+| 2026-05 | Live sessions migrated to F1 SignalR feed; OpenF1 retained for replay and session metadata only |
 
 ### Environment Variables — Backend (Render dashboard + `backend/.env`)
 | Variable | Notes |
@@ -52,7 +54,7 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 | `SUPABASE_SERVICE_KEY` | Service role key — ref must match `vox` project |
 | `GROQ_API_KEY` | Groq API key |
 | `GROQ_MODEL` | `llama-3.3-70b-versatile` |
-| `OPENF1_BASE_URL` | `https://api.openf1.org/v1` |
+| `OPENF1_BASE_URL` | `https://api.openf1.org/v1` — replay telemetry and session listing (not used for live data) |
 | `PORT` | `4000` |
 | `CORS_ORIGIN` | Comma-separated allowed origins |
 | `ADMIN_SESSION_SECRET` | 32-char random secret |
@@ -113,7 +115,9 @@ motorsport-iq/
 │       │   ├── sessionRuntimeManager.ts  # Live vs Replay coordination
 │       │   └── replayTimeline.ts    # Replay playback control
 │       ├── data/                    # External integrations
-│       │   ├── openf1Client.ts      # OpenF1 API client
+│       │   ├── f1SignalRClient.ts   # Live F1 SignalR feed
+│       │   ├── f1Calendar.ts        # Hardcoded weekend calendar fallback
+│       │   ├── openf1Client.ts      # OpenF1 API client (replay + session lookup)
 │       │   └── snapshotStore.ts     # Race state persistence
 │       ├── ai/                      # AI generation
 │       │   ├── explanationGenerator.ts

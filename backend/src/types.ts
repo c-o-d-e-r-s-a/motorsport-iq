@@ -80,6 +80,7 @@ export interface OpenF1Session {
 
 export interface SessionInfo extends OpenF1Session {
   isCompleted: boolean;
+  isLive: boolean;
   mode: SessionMode;
 }
 
@@ -288,6 +289,7 @@ export interface LeaderboardEntryState {
 // Derived signals (used for trigger evaluation)
 export interface DerivedSignals {
   closingTrend: Map<number, boolean>; // driverNumber -> isClosing
+  fallingBack: Map<number, boolean>; // driverNumber -> gap to car ahead is opening
   withinOneSecond: Map<number, boolean>; // driverNumber -> within 1s of car ahead
   overtakeOpportunity: Map<number, boolean>; // driverNumber -> close and closing
   pitWindowOpen: Map<number, boolean>; // driverNumber -> inPitWindow

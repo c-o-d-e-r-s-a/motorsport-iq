@@ -1,4 +1,5 @@
 import { OpenF1Client } from '../data/openf1Client';
+import { getScheduledLaps } from '../data/f1Calendar';
 import { SnapshotStore } from '../data/snapshotStore';
 import { F1SignalRClient } from '../data/f1SignalRClient';
 import type {
@@ -118,7 +119,7 @@ abstract class BaseRuntime implements SessionRuntime {
 
 class LiveSessionRuntime extends BaseRuntime {
   private signalRClient: F1SignalRClient | null = null;
-  private isUsingFallback = false;
+  private raceFinished = false;
 
   constructor(session: OpenF1Session, callbacks: RuntimeCallbacks) {
     super(session, 'live', null, callbacks);
@@ -127,80 +128,89 @@ class LiveSessionRuntime extends BaseRuntime {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    this.raceFinished = false;
 
-    // 1. Initialize the shared snapshot store cache
-    this.client.setSession(this.session.session_key);
+    // We intentionally do NOT call client.setSession or any OpenF1 data
+    // endpoint here. While a live session is in progress OpenF1 returns
+    // 401 "Live F1 session in progress" on every data route, so the
+    // entire live pipeline is fed by the F1 SignalR feed.
     await this.snapshotStore.initialize(this.session.session_key, {
       sessionMode: 'live',
       replaySpeed: null,
+      skipDriverPreload: true,
     });
 
-    console.log(`[Live Runtime] Booting real-time streaming pipeline for session: ${this.sessionId}`);
+    const scheduledLaps = getScheduledLaps(this.session);
+    if (scheduledLaps) {
+      this.snapshotStore.setTotalLaps(scheduledLaps);
+    }
 
-    // 2. Spin up the real-time SignalR feed
+    console.log(`[Live Runtime] Booting SignalR streaming pipeline for session: ${this.sessionId}`);
+
     this.signalRClient = new F1SignalRClient({
-      onPositionUpdate: (positions) => {
-        if (!this.isUsingFallback) this.snapshotStore.processPositionUpdate(positions);
+      onPositionUpdate: (positions) => this.snapshotStore.processPositionUpdate(positions),
+      onIntervalUpdate: (intervals) => this.snapshotStore.processIntervalUpdate(intervals),
+      onLapCompletion: (lap) => this.snapshotStore.processLapCompletion(lap),
+      onTimingProgress: (maxLap) => this.snapshotStore.syncLapNumber(maxLap),
+      onTrackStatusChange: (status) => {
+        this.snapshotStore.setTrackStatus(status);
+        
+        // Auto-finish live sessions when chequered flag appears. This handles
+        // the edge case where SignalR keeps streaming cooldown lap data after
+        // the race ends but before the calendar's scheduled date_end. Without
+        // this, users joining a "live" session 5-10 minutes after the flag
+        // would see telemetry updates but zero questions (all blocked by
+        // CHEQUERED guard in the question engine).
+        if (status === 'CHEQUERED' && !this.raceFinished) {
+          this.raceFinished = true;
+          console.log(`[Live Runtime] Chequered flag detected for session ${this.sessionId}. Marking all attached lobbies as finished.`);
+          
+          // Reuse the replay completion flow — marks lobbies finished, clears
+          // timers, broadcasts final state, and stops accepting new questions.
+          void this.callbacks.onReplayComplete(
+            this.snapshotStore.getCurrentSnapshot(),
+            cloneLobbyIds(this.lobbyIds)
+          );
+        }
       },
-      onLapCompletion: (lap) => {
-        if (!this.isUsingFallback) this.snapshotStore.processLapCompletion(lap);
-      },
+      onTotalLaps: (totalLaps) => this.snapshotStore.setTotalLaps(totalLaps),
+      onDriverList: (drivers) => this.snapshotStore.processDriverListUpdate(drivers),
+      onStintUpdate: (stints) => this.snapshotStore.processStintUpdate(stints),
+      onPitUpdate: (pits) => this.snapshotStore.processPitUpdate(pits),
       onConnectionLoss: () => {
         console.warn(`[Live Runtime] SignalR connection unstable for session ${this.sessionId}. Monitoring...`);
+        this.snapshotStore.handleFeedStall(true);
       },
       onConnectionRestored: () => {
-        console.log(`[Live Runtime] SignalR connection fully restored for session ${this.sessionId}.`);
+        console.log(`[Live Runtime] SignalR connection restored for session ${this.sessionId}.`);
+        this.snapshotStore.handleFeedStall(false);
       },
       onConnectionClosedPermanently: () => {
-        console.error(`[Live Runtime] SignalR closed permanently. Triggering REST emergency fallback.`);
-        this.activateRESTFallback();
-      }
+        // OpenF1 is unusable while the live session is in progress, so we
+        // surface a feed-stall instead of attempting a REST fallback that
+        // would 401. Operators will see the stall banner on the client.
+        console.error(`[Live Runtime] SignalR closed permanently for session ${this.sessionId}. Feed marked stalled (no REST fallback during live window).`);
+        this.snapshotStore.handleFeedStall(true);
+        this.callbacks.onFeedStall(true, cloneLobbyIds(this.lobbyIds));
+      },
     });
 
     try {
-      // 3. Kick off the connection
       await this.signalRClient.start();
-      console.log("[Live Runtime] Primary SignalR connection established successfully.");
-
-      // TEST SIMULATION SHORT-CIRCUIT FOR SCENARIO B:
-      // (Uncomment the block below when you want to test mid-race crash-protection handling)
-      /*
-      setTimeout(() => {
-        console.log("\n [Test Sim] Triggering sudden simulated WebSocket connection drop...");
-        (this.signalRClient as any).options.onConnectionClosedPermanently?.();
-      }, 7000);
-      */
-
+      console.log('[Live Runtime] SignalR connection established.');
     } catch (error: any) {
-      console.error(`[Live Runtime] SignalR handshake failed. Instantly dropping back to REST polling:`, error.message);
-      this.activateRESTFallback();
+      console.error(`[Live Runtime] SignalR handshake failed:`, error?.message ?? error);
+      this.snapshotStore.handleFeedStall(true);
+      this.callbacks.onFeedStall(true, cloneLobbyIds(this.lobbyIds));
     }
-  }
-
-  private activateRESTFallback(): void {
-    if (this.isUsingFallback) return;
-    this.isUsingFallback = true;
-
-    console.log(`[Fallback Engine] Initializing original OpenF1 REST polling client for session ${this.sessionId}.`);
-    
-    // Safely tear down the broken SignalR engine if it exists
-    if (this.signalRClient) {
-      try { this.signalRClient.stop(); } catch {}
-      this.signalRClient = null;
-    }
-
-    // Switch tracks instantly to the REST Polling engine
-    this.client.startPolling();
   }
 
   stop(): void {
-    if (this.isUsingFallback) {
-      this.client.stopPolling();
-    } else if (this.signalRClient) {
+    if (this.signalRClient) {
       this.signalRClient.stop();
+      this.signalRClient = null;
     }
     this.started = false;
-    this.isUsingFallback = false;
     console.log(`[Live Runtime] Tearing down session runtime: ${this.sessionId}`);
   }
 }
@@ -400,11 +410,16 @@ export class SessionRuntimeManager {
   }
 }
 
-export function toSessionInfo(session: OpenF1Session): OpenF1Session & { isCompleted: boolean; mode: SessionMode } {
-  const isCompleted = new Date(session.date_end).getTime() < Date.now();
+export function toSessionInfo(session: OpenF1Session): OpenF1Session & { isCompleted: boolean; isLive: boolean; mode: SessionMode } {
+  const now = Date.now();
+  const start = new Date(session.date_start).getTime();
+  const end = new Date(session.date_end).getTime();
+  const isCompleted = end < now;
+  const isLive = start <= now && now < end;
   return {
     ...session,
     isCompleted,
-    mode: isCompleted ? 'replay' : 'live',
+    isLive,
+    mode: isLive ? 'live' : 'replay',
   };
 }

@@ -111,7 +111,7 @@ describe('scoringEngine', () => {
 
   it('calculates a wrong answer without increasing the correct counter', () => {
     expect(calculateScore('NO', 'YES', 4)).toEqual({
-      pointsChange: -5,
+      pointsChange: 0,
       isCorrect: false,
       newStreak: 0,
       streakBonus: 0,

@@ -162,6 +162,20 @@ export function evaluateSuccessCondition(
       return currentDriver1.position < currentDriver2.position;
     }
 
+    case 'maintainPosition': {
+      return currentDriver1.position === triggerDriver1.position;
+    }
+
+    case 'stillWithinGap': {
+      const targetGap = condition.params.targetGap as number;
+      return currentDriver1.interval !== null && currentDriver1.interval <= targetGap;
+    }
+
+    case 'gapExceeded': {
+      const targetGap = condition.params.targetGap as number;
+      return currentDriver1.interval === null || currentDriver1.interval > targetGap;
+    }
+
     default:
       console.warn(`Unknown success condition type: ${condition.type}`);
       return false;
@@ -215,6 +229,15 @@ export function generateExplanation(
 
     case 'finishAhead':
       return `${yesNo}! ${driver1Name} finished ${outcome ? 'ahead of' : 'behind'} ${driver2Name}.`;
+
+    case 'maintainPosition':
+      return `${yesNo}! ${driver1Name} ${outcome ? 'held' : 'lost'} P${triggerDriver1?.position}. Now P${currentDriver1?.position}.`;
+
+    case 'stillWithinGap':
+      return `${yesNo}! ${driver1Name} ${outcome ? 'stayed within' : 'fell outside of'} DRS range behind ${driver2Name}.`;
+
+    case 'gapExceeded':
+      return `${yesNo}! ${driver1Name} ${outcome ? 'dropped back beyond' : 'stayed within'} 1 second of ${driver2Name}.`;
 
     default:
       return `${yesNo}! The prediction ${didDidNot} come true for ${driver1Name}.`;

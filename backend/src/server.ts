@@ -42,6 +42,14 @@ import {
 import { LobbyLifecycleQueue } from './lobby/lifecycleQueue';
 import { generateQuestionText } from './ai/explanationGenerator';
 import { OpenF1Client } from './data/openf1Client';
+import {
+  dedupeWeekendSessions,
+  getActiveLiveCalendarSession,
+  getCalendarSession,
+  isCalendarPlaceholderKey,
+  mergeWithCalendar,
+  resolveSessionForReplay,
+} from './data/f1Calendar';
 import { selectQuestion, clearCooldowns, formatQuestionText } from './engine/questionEngine';
 import { SessionRuntimeManager, toSessionInfo } from './runtime/sessionRuntimeManager';
 import { PresenceManager, type PresenceExpiryReason } from './lobby/presenceManager';
@@ -68,24 +76,6 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'https://motorsport-iq.vercel.app',
 ];
-
-// Temporary development endpoint to verify direct connection and handshake with F1 SignalR hub
-import { F1SignalRClient } from './data/f1SignalRClient';
-
-app.get('/test-signalr', async (req, res) => {
-  try {
-    const client = new F1SignalRClient();
-    await client.start();
-    
-    setTimeout(() => {
-      client.stop();
-    }, 30000); 
-
-    res.json({ status: 'SignalR test started, check your backend console logs!' });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
 function normalizeOriginValue(origin: string): string {
   return origin.trim().replace(/\/+$/, '');
@@ -451,6 +441,28 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
 
   // Try to select a new question
   const previousSnapshot = runtimeManager.getRuntimeForLobby(lobbyId)?.getPreviousSnapshot() ?? null;
+
+  // ──── AI TRIGGER DETECTION — high-visibility logs for scenario/debug testing ──
+  if (snapshot.trackStatus === 'YELLOW' || snapshot.trackStatus === 'SC' || snapshot.trackStatus === 'VSC') {
+    console.log(`\n⚠️  ============================================`);
+    console.log(`⚠️  ${snapshot.trackStatus} FLAG DETECTED (lobby=${lobbyId}, lap=${snapshot.lapNumber})`);
+    console.log(`⚠️  AI Question Generator SUPPRESSED — caution period active`);
+    console.log(`⚠️  ============================================\n`);
+  } else if (snapshot.trackStatus === 'CHEQUERED') {
+    console.log(`\n🏆 CHEQUERED FLAG (lobby=${lobbyId}, lap=${snapshot.lapNumber}) — race over, no new questions`);
+  } else if (previousSnapshot && snapshot.trackStatus === 'GREEN') {
+    for (const driver of snapshot.drivers) {
+      const prev = previousSnapshot.drivers.find((d) => d.driverNumber === driver.driverNumber);
+      if (prev && prev.position > driver.position && driver.position <= 3) {
+        console.log(`\n🔴 ============================================`);
+        console.log(`🔴 OVERTAKE DETECTED (lobby=${lobbyId}, lap=${snapshot.lapNumber})`);
+        console.log(`🔴 ${driver.name}: P${prev.position} → P${driver.position}`);
+        console.log(`🔴 Triggering AI Question Generator...`);
+        console.log(`🔴 ============================================\n`);
+      }
+    }
+  }
+
   const newQuestion = selectQuestion(
     snapshot,
     previousSnapshot,
@@ -716,17 +728,51 @@ io.on('connection', (socket) => {
       currentLobbyId = data.lobbyId;
       await markUserActive(actingUserId);
 
-      const session = await sessionLookupClient.getSession(parseInt(data.sessionId, 10));
+      const requestedKey = parseInt(data.sessionId, 10);
+      const calendarSession = Number.isFinite(requestedKey) ? getCalendarSession(requestedKey) : null;
+      let session = calendarSession
+        ?? (Number.isFinite(requestedKey) ? await sessionLookupClient.getSession(requestedKey) : null);
       if (!session) {
-        throw new Error('OpenF1 session not found');
+        throw new Error('Session not found');
       }
-      if (new Date(session.date_end).getTime() >= Date.now()) {
-        throw new Error('This session has not completed yet');
+
+      // For race-style sessions we require either a completed session (replay)
+      // OR an active live window. Calendar-backed sessions in the future are
+      // gated until they go live; OpenF1-backed historical sessions are
+      // replay-only and require completion.
+      const sessionStart = new Date(session.date_start).getTime();
+      const sessionEnd = new Date(session.date_end).getTime();
+      const now = Date.now();
+      const isLive = sessionStart <= now && now < sessionEnd;
+      const isCompleted = sessionEnd < now;
+
+      if (!isLive && !isCompleted) {
+        throw new Error('This session has not started yet');
+      }
+
+      if (isCalendarPlaceholderKey(session.session_key) && !isLive) {
+        let openf1SessionsForReplay: Awaited<ReturnType<OpenF1Client['getSessions']>> = [];
+        if (!OpenF1Client.isLiveLocked()) {
+          try {
+            openf1SessionsForReplay = await sessionLookupClient.getSessions(session.year);
+          } catch (lookupError) {
+            console.warn(
+              `[start_session] OpenF1 lookup failed while resolving replay session ${session.session_key}:`,
+              (lookupError as Error).message
+            );
+          }
+        }
+
+        const resolvedSession = resolveSessionForReplay(session, openf1SessionsForReplay ?? []);
+        if (resolvedSession.session_key === session.session_key && isCompleted) {
+          throw new Error('Replay telemetry is not available yet for this session');
+        }
+        session = resolvedSession;
       }
 
       // Update lobby status
       await updateLobbyStatus(data.lobbyId, 'active');
-      await setLobbySession(data.lobbyId, data.sessionId);
+      await setLobbySession(data.lobbyId, String(session.session_key));
       setLatestResolution(data.lobbyId, null);
 
       const runtime = await runtimeManager.attachLobbyToSession(data.lobbyId, session);
@@ -738,7 +784,7 @@ io.on('connection', (socket) => {
 
       // Notify all players
       io.to(data.lobbyId).emit('session_started', {
-        sessionId: data.sessionId,
+        sessionId: String(session.session_key),
         mode: runtime.mode,
         replaySpeed: runtime.replaySpeed,
       });
@@ -753,7 +799,7 @@ io.on('connection', (socket) => {
         broadcastRaceSnapshot(snapshot, new Set([data.lobbyId]));
       }
 
-      console.log(`Session ${data.sessionId} started for lobby ${lobbyState.code}`);
+      console.log(`Session ${session.session_key} started for lobby ${lobbyState.code}`);
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
     }
@@ -866,18 +912,53 @@ io.on('connection', (socket) => {
   });
 
   /**
-   * Get available sessions
+   * Get available sessions.
+   *
+   * When a calendar session is currently LIVE we deliberately short-circuit
+   * the OpenF1 historical lookup:
+   *   1. OpenF1's data endpoints return 401 "Live F1 session in progress"
+   *      during the live window, so any historical replay attempt would
+   *      fail anyway with confusing "cannot get previous data" errors.
+   *   2. We surface ONLY the live race so the host can't accidentally pick
+   *      a stale Sprint/Race entry and hit "session has not started yet".
    */
   socket.on('get_sessions', async (data: { year?: number }) => {
     try {
       const year = data?.year || new Date().getFullYear();
-      const sessions = await sessionLookupClient.getSessions(year);
-      const supportedSessions = (sessions ?? [])
-        .filter((session) => ['Race', 'Sprint'].includes(session.session_name))
-        .sort(
-          (a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime()
-        )
-        .map((session) => toSessionInfo(session));
+
+      const activeLiveSession = getActiveLiveCalendarSession();
+      const liveIsPlayable = activeLiveSession
+        && ['Race', 'Sprint'].includes(activeLiveSession.session_name);
+
+      if (liveIsPlayable && activeLiveSession) {
+        socket.emit('sessions_list', [toSessionInfo(activeLiveSession)]);
+        return;
+      }
+
+      let openf1Sessions: Awaited<ReturnType<OpenF1Client['getSessions']>> = [];
+      // Skip OpenF1 entirely while the API is live-locked — its data
+      // endpoints are gated and we already returned the live race above
+      // for the playable case. This also silences 401 noise in the logs.
+      if (!OpenF1Client.isLiveLocked()) {
+        try {
+          openf1Sessions = await sessionLookupClient.getSessions(year);
+        } catch (lookupError) {
+          console.warn(
+            `[get_sessions] OpenF1 lookup failed for year=${year}; falling back to calendar only:`,
+            (lookupError as Error).message
+          );
+        }
+      }
+
+      const merged = mergeWithCalendar(openf1Sessions ?? [], year);
+
+      const filtered = merged
+        .filter((session) => !/^practice\b/i.test(session.session_name))
+        .filter((session) =>
+          ['Race', 'Sprint'].includes(session.session_name)
+        );
+
+      const supportedSessions = dedupeWeekendSessions(filtered).map((session) => toSessionInfo(session));
       socket.emit('sessions_list', supportedSessions);
     } catch (error) {
       emitSocketError(socket, 'Failed to fetch sessions');
@@ -934,34 +1015,6 @@ process.on('SIGINT', () => {
     process.exit(0);
   });
 });
-
-/* TEMPORARY STEP 3 BACKDOOR TEST ROUTE
-app.get('/debug-force-live', async (req, res) => {
-  try {
-    console.log("\n [Debug Backdoor] Manually forcing a Live Session Runtime initialization...");
-    
-    // 1. Mock an active live F1 session object (99999 represents a live session key)
-    const mockLiveSession = {
-      session_key: 9158,
-      session_name: "Simulated Canadian GP Live",
-      date_start: new Date().toISOString(),
-      date_end: new Date(Date.now() + 3600000).toISOString() // Ends 1 hour in the future = Forces Live mode!
-    };
-
-    // 2. In your server.ts, runtimeManager is directly accessible in this scope!
-    console.log("[Debug Backdoor] Triggering attachLobbyToSession...");
-    await runtimeManager.attachLobbyToSession("test-debug-lobby-id", mockLiveSession as any);
-
-    res.json({ 
-      success: true,
-      message: "LiveSessionRuntime ignition sequence triggered! Check your backend terminal console logs right now." 
-    });
-  } catch (err: any) {
-    console.error("Backdoor test failed:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-*/
 
 // Start server
 httpServer.listen(PORT, () => {
