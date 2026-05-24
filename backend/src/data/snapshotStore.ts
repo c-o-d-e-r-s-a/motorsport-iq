@@ -66,7 +66,10 @@ export class SnapshotStore {
     this.options = options;
   }
 
-  async initialize(sessionId: number, config?: { sessionMode?: SessionMode; replaySpeed?: number | null }): Promise<void> {
+  async initialize(
+    sessionId: number,
+    config?: { sessionMode?: SessionMode; replaySpeed?: number | null; skipDriverPreload?: boolean }
+  ): Promise<void> {
     this.sessionId = String(sessionId);
     this.drivers.clear();
     this.lapNumber = 0;
@@ -83,18 +86,30 @@ export class SnapshotStore {
       this.hudSnapshotTimer = null;
     }
 
-    const driverData = await this.client.getDrivers();
-    if (driverData) {
-      for (const driver of driverData) {
-        this.drivers.set(driver.driver_number, {
-          driver,
-          latestPosition: null,
-          latestInterval: null,
-          latestLap: null,
-          pits: [],
-          stints: [],
-        });
+    if (config?.skipDriverPreload) {
+      console.log('[SnapshotStore] Live session — skipping OpenF1 driver pre-load. Drivers will be populated from SignalR DriverList topic.');
+      return;
+    }
+
+    try {
+      const driverData = await this.client.getDrivers();
+      if (driverData) {
+        for (const driver of driverData) {
+          this.drivers.set(driver.driver_number, {
+            driver,
+            latestPosition: null,
+            latestInterval: null,
+            latestLap: null,
+            pits: [],
+            stints: [],
+          });
+        }
+        console.log(`[SnapshotStore] Pre-loaded ${driverData.length} drivers from OpenF1 API`);
       }
+    } catch (error) {
+      // OpenF1 data endpoints are auth-gated during live sessions. The
+      // SignalR DriverList topic will populate driver metadata instead.
+      console.warn('[SnapshotStore] Could not pre-load drivers from OpenF1 API. Falling back to live-stream driver list.');
     }
   }
 
@@ -105,6 +120,35 @@ export class SnapshotStore {
       this.currentSnapshot.totalLaps = this.totalLaps;
       this.options.onSnapshotUpdate?.(this.currentSnapshot);
     }
+  }
+
+  setTrackStatus(status: TrackStatus): void {
+    if (status === this.trackStatus) {
+      return;
+    }
+    this.trackStatus = status;
+    if (this.currentSnapshot) {
+      this.buildSnapshot();
+    }
+  }
+
+  processDriverListUpdate(drivers: OpenF1Driver[]): void {
+    for (const driver of drivers) {
+      const existing = this.drivers.get(driver.driver_number);
+      if (existing) {
+        existing.driver = driver;
+      } else {
+        this.drivers.set(driver.driver_number, {
+          driver,
+          latestPosition: null,
+          latestInterval: null,
+          latestLap: null,
+          pits: [],
+          stints: [],
+        });
+      }
+    }
+    this.scheduleHudSnapshotUpdate();
   }
 
   setSessionContext(config: { sessionMode: SessionMode; replaySpeed?: number | null }): void {
@@ -124,17 +168,41 @@ export class SnapshotStore {
     return this.previousSnapshot;
   }
 
+  private ensureDriverEntry(driverNumber: number, sessionKey = 0, meetingKey = 0): DriverData {
+    let driverData = this.drivers.get(driverNumber);
+    if (driverData) return driverData;
+    driverData = {
+      driver: {
+        driver_number: driverNumber,
+        broadcast_name: `Driver ${driverNumber}`,
+        full_name: `Driver ${driverNumber}`,
+        name_acronym: `D${driverNumber}`,
+        team_name: 'Unknown',
+        team_colour: '000000',
+        first_name: 'Driver',
+        last_name: String(driverNumber),
+        headshot_url: '',
+        country_code: '',
+        session_key: sessionKey,
+        meeting_key: meetingKey,
+      },
+      latestPosition: null,
+      latestInterval: null,
+      latestLap: null,
+      pits: [],
+      stints: [],
+    };
+    this.drivers.set(driverNumber, driverData);
+    console.log(`[SnapshotStore] Auto-created driver entry for #${driverNumber} from live data`);
+    return driverData;
+  }
+
   processLapCompletion(lap: OpenF1Lap): void {
-    const driverData = this.drivers.get(lap.driver_number);
-    if (driverData) {
-      driverData.latestLap = lap;
-    }
+    const driverData = this.ensureDriverEntry(lap.driver_number, lap.session_key, lap.meeting_key);
+    driverData.latestLap = lap;
 
     if (lap.lap_number > this.lapNumber) {
       this.lapNumber = lap.lap_number;
-      if (this.sessionMode === 'live' && (this.totalLaps === null || this.lapNumber > this.totalLaps)) {
-        this.totalLaps = this.lapNumber;
-      }
     }
 
     this.buildSnapshot();
@@ -143,10 +211,17 @@ export class SnapshotStore {
     }
   }
 
+  syncLapNumber(lapNumber: number): void {
+    if (lapNumber > this.lapNumber) {
+      this.lapNumber = lapNumber;
+      this.scheduleHudSnapshotUpdate();
+    }
+  }
+
   processPositionUpdate(positions: OpenF1Position[]): void {
     for (const pos of positions) {
-      const driverData = this.drivers.get(pos.driver_number);
-      if (driverData && hasNewerTimestamp(pos.date, driverData.latestPosition?.date)) {
+      const driverData = this.ensureDriverEntry(pos.driver_number, pos.session_key, pos.meeting_key);
+      if (hasNewerTimestamp(pos.date, driverData.latestPosition?.date)) {
         driverData.latestPosition = pos;
       }
     }
@@ -161,8 +236,8 @@ export class SnapshotStore {
     }
 
     for (const interval of intervals) {
-      const driverData = this.drivers.get(interval.driver_number);
-      if (driverData && hasNewerTimestamp(interval.date, driverData.latestInterval?.date)) {
+      const driverData = this.ensureDriverEntry(interval.driver_number, interval.session_key, interval.meeting_key);
+      if (hasNewerTimestamp(interval.date, driverData.latestInterval?.date)) {
         driverData.latestInterval = interval;
       }
     }
@@ -171,12 +246,10 @@ export class SnapshotStore {
 
   processPitUpdate(pits: OpenF1Pit[]): void {
     for (const pit of pits) {
-      const driverData = this.drivers.get(pit.driver_number);
-      if (driverData) {
-        const existingPit = driverData.pits.find((record) => record.number === pit.number);
-        if (!existingPit) {
-          driverData.pits.push(pit);
-        }
+      const driverData = this.ensureDriverEntry(pit.driver_number, pit.session_key, pit.meeting_key);
+      const existingPit = driverData.pits.find((record) => record.number === pit.number);
+      if (!existingPit) {
+        driverData.pits.push(pit);
       }
     }
     this.scheduleHudSnapshotUpdate();
@@ -184,10 +257,7 @@ export class SnapshotStore {
 
   processStintUpdate(stints: OpenF1Stint[]): void {
     for (const stint of stints) {
-      const driverData = this.drivers.get(stint.driver_number);
-      if (!driverData) {
-        continue;
-      }
+      const driverData = this.ensureDriverEntry(stint.driver_number, stint.session_key, stint.meeting_key);
 
       const existingIndex = driverData.stints.findIndex((entry) => entry.stint_number === stint.stint_number);
       if (existingIndex === -1) {
@@ -450,6 +520,7 @@ export class SnapshotStore {
     if (!snapshot) {
       return {
         closingTrend: new Map(),
+        fallingBack: new Map(),
         withinOneSecond: new Map(),
         overtakeOpportunity: new Map(),
         pitWindowOpen: new Map(),
@@ -461,6 +532,7 @@ export class SnapshotStore {
     }
 
     const closingTrend = new Map<number, boolean>();
+    const fallingBack = new Map<number, boolean>();
     const withinOneSecond = new Map<number, boolean>();
     const overtakeOpportunity = new Map<number, boolean>();
     const pitWindowOpen = new Map<number, boolean>();
@@ -471,7 +543,9 @@ export class SnapshotStore {
       const prevGap = this.previousGaps.get(driver.driverNumber);
       const currentGap = driver.gap;
       const isClosing = prevGap !== undefined && currentGap !== null ? prevGap - currentGap > 0.1 : false;
+      const isOpening = prevGap !== undefined && currentGap !== null ? currentGap - prevGap > 0.1 : false;
       closingTrend.set(driver.driverNumber, isClosing);
+      fallingBack.set(driver.driverNumber, isOpening);
       withinOneSecond.set(driver.driverNumber, driver.interval !== null && driver.interval <= 1.0);
       overtakeOpportunity.set(driver.driverNumber, isClosing && driver.interval !== null && driver.interval <= 1.5);
 
@@ -492,6 +566,7 @@ export class SnapshotStore {
 
     return {
       closingTrend,
+      fallingBack,
       withinOneSecond,
       overtakeOpportunity,
       pitWindowOpen,

@@ -87,6 +87,7 @@ export function getCloseBattles(
 
 export function calculateDerivedSignals(currentSnapshot: RaceSnapshot, previousSnapshot: RaceSnapshot | null): DerivedSignals {
   const closingTrend = new Map<number, boolean>();
+  const fallingBack = new Map<number, boolean>();
   const withinOneSecond = new Map<number, boolean>();
   const overtakeOpportunity = new Map<number, boolean>();
   const pitWindowOpen = new Map<number, boolean>();
@@ -98,8 +99,12 @@ export function calculateDerivedSignals(currentSnapshot: RaceSnapshot, previousS
     const closing = previousDriver && driver.interval !== null && previousDriver.interval !== null
       ? isClosingTrend(driver.interval, previousDriver.interval)
       : false;
+    const opening = previousDriver && driver.interval !== null && previousDriver.interval !== null
+      ? isClosingTrend(previousDriver.interval, driver.interval)
+      : false;
 
     closingTrend.set(driver.driverNumber, closing);
+    fallingBack.set(driver.driverNumber, opening);
     withinOneSecond.set(driver.driverNumber, isWithinOneSecond(driver));
     overtakeOpportunity.set(driver.driverNumber, closing && (driver.interval ?? Infinity) <= 1.5);
     pitWindowOpen.set(driver.driverNumber, isInPitWindow(driver));
@@ -108,6 +113,7 @@ export function calculateDerivedSignals(currentSnapshot: RaceSnapshot, previousS
 
   return {
     closingTrend,
+    fallingBack,
     withinOneSecond,
     overtakeOpportunity,
     pitWindowOpen,

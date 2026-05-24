@@ -254,6 +254,6 @@ describe('questionEngine MVP guardrails', () => {
       driver2: createDriver({ driverNumber: 4, name: 'Charles Leclerc', position: 1, interval: null }),
     };
 
-    await expect(generateQuestionText(instance)).resolves.toBe('Will Lando Norris overtake Charles Leclerc within the next 3 laps?');
+    await expect(generateQuestionText(instance)).resolves.toBe('Will Lando Norris overtake Charles Leclerc in the next 3 laps?');
   });
 });

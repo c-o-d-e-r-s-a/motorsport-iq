@@ -25,7 +25,7 @@ export interface UserScore {
 
 // Scoring constants
 export const POINTS_CORRECT = 10;
-export const POINTS_WRONG = -5;
+export const POINTS_WRONG = 0;
 export const POINTS_NO_ANSWER = 0;
 export const STREAK_BONUS_3 = 5;
 export const STREAK_BONUS_5 = 10;

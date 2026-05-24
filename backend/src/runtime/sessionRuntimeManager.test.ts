@@ -1,4 +1,5 @@
 import { SessionRuntimeManager, toSessionInfo } from './sessionRuntimeManager';
+import { OpenF1Client } from '../data/openf1Client';
 import type { OpenF1Session } from '../types';
 
 function createSession(overrides: Partial<OpenF1Session> = {}): OpenF1Session {
@@ -56,6 +57,7 @@ describe('SessionRuntimeManager', () => {
     jest.useFakeTimers();
     jest.spyOn(global, 'fetch').mockImplementation(fetchMock as typeof fetch);
     fetchMock.mockClear();
+    OpenF1Client.resetLiveLock();
   });
 
   afterEach(() => {
@@ -145,9 +147,18 @@ describe('SessionRuntimeManager', () => {
   });
 
   it('adds derived session info for the picker', () => {
-    const info = toSessionInfo(createSession({ date_end: '2024-09-01T15:00:00Z' }));
-    expect(info.isCompleted).toBe(true);
-    expect(info.mode).toBe('replay');
+    const completed = toSessionInfo(createSession({ date_end: '2024-09-01T15:00:00Z' }));
+    expect(completed.isCompleted).toBe(true);
+    expect(completed.isLive).toBe(false);
+    expect(completed.mode).toBe('replay');
+
+    const upcoming = toSessionInfo(createSession({
+      date_start: '2099-01-01T15:00:00Z',
+      date_end: '2099-01-01T16:00:00Z',
+    }));
+    expect(upcoming.isCompleted).toBe(false);
+    expect(upcoming.isLive).toBe(false);
+    expect(upcoming.mode).toBe('replay');
   });
 
   it('initializes replay runtimes with the actual race distance from lap data', async () => {

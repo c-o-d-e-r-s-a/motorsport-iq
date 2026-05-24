@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { getSocketClient } from '@/lib/socket';
 import { SERVER_EVENTS, type LobbyState, type ServerErrorEvent, type SessionInfo } from '@/lib/types';
-import { Button, Card, SectionLabel, ThemeToggle } from '@/components/ui';
+import { filterSessionsForDisplay, isLiveCanadianGrandPrixWindow } from '@/lib/sessionDisplay';
+import { Button, Card, Dialog, SectionLabel, ThemeToggle } from '@/components/ui';
 
 export default function LobbyPage() {
   const params = useParams();
@@ -21,6 +22,7 @@ export default function LobbyPage() {
   const [copied, setCopied] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
+  const [confirmSession, setConfirmSession] = useState<SessionInfo | null>(null);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
 
@@ -86,12 +88,19 @@ export default function LobbyPage() {
       socket.on(SERVER_EVENTS.SESSIONS_LIST, (sessionList: SessionInfo[]) => {
         setSessions(sessionList);
         if (sessionList.length > 0) {
+          const liveSession = sessionList.find((session) => session.isLive);
           const firstCompleted = sessionList.find((session) => session.isCompleted);
+          const firstPlayable = sessionList.find((session) => session.isLive || session.isCompleted);
           setSelectedSession((current) => {
             if (current && sessionList.some((session) => String(session.session_key) === current)) {
-              return current;
+              const stillPlayable = sessionList.some(
+                (session) => String(session.session_key) === current && (session.isLive || session.isCompleted)
+              );
+              if (stillPlayable) return current;
             }
-            return firstCompleted ? String(firstCompleted.session_key) : String(sessionList[0].session_key);
+            if (liveSession) return String(liveSession.session_key);
+            if (firstCompleted) return String(firstCompleted.session_key);
+            return firstPlayable ? String(firstPlayable.session_key) : '';
           });
         }
       }),
@@ -118,12 +127,17 @@ export default function LobbyPage() {
 
     socket.getSessions(selectedYear);
 
+    const pollInterval = window.setInterval(() => {
+      socket.getSessions(selectedYear);
+    }, 15_000);
+
     const userId = localStorage.getItem('msp_user_id');
     if (userId) {
       socket.reconnectLobby(userId);
     }
 
     return () => {
+      window.clearInterval(pollInterval);
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, [currentUserId, lobbyCode, router, selectedYear]);
@@ -156,15 +170,17 @@ export default function LobbyPage() {
     router.push('/');
   }, [router]);
 
-  const handleStartGame = useCallback(() => {
-    if (!lobbyState || !selectedSession) {
+  const handleStartGame = useCallback((sessionKey?: string) => {
+    const key = sessionKey ?? selectedSession;
+
+    if (!lobbyState || !key) {
       setError('Please select a session');
       return;
     }
 
-    const selectedSessionInfo = sessions.find((session) => String(session.session_key) === selectedSession);
-    if (!selectedSessionInfo?.isCompleted) {
-      setError('This session has not completed yet');
+    const sessionInfo = sessions.find((session) => String(session.session_key) === key);
+    if (!sessionInfo?.isLive && !sessionInfo?.isCompleted) {
+      setError('This session has not started yet');
       return;
     }
 
@@ -173,13 +189,47 @@ export default function LobbyPage() {
       return;
     }
 
+    setConfirmSession(null);
     setIsStarting(true);
-    getSocketClient().startSession(lobbyState.id, selectedSession, currentUserId);
+    getSocketClient().startSession(lobbyState.id, key, currentUserId);
   }, [currentUserId, lobbyState, selectedSession, sessions]);
 
+  const handleSessionClick = useCallback((session: SessionInfo) => {
+    const isSelectable = session.isLive || session.isCompleted;
+    if (!isSelectable) {
+      return;
+    }
+
+    const key = String(session.session_key);
+    if (selectedSession === key) {
+      setConfirmSession(session);
+      return;
+    }
+
+    setSelectedSession(key);
+  }, [selectedSession]);
+
+  const displaySessions = useMemo(
+    () => filterSessionsForDisplay(sessions),
+    [sessions]
+  );
+
   const isHost = lobbyState?.hostId === currentUserId;
-  const selectedSessionInfo = sessions.find((session) => String(session.session_key) === selectedSession) ?? null;
-  const completedSessions = sessions.filter((session) => session.isCompleted);
+  const selectedSessionInfo = displaySessions.find((session) => String(session.session_key) === selectedSession)
+    ?? sessions.find((session) => String(session.session_key) === selectedSession)
+    ?? null;
+  const canStartSession = Boolean(
+    selectedSession && selectedSessionInfo && (selectedSessionInfo.isLive || selectedSessionInfo.isCompleted)
+  );
+
+  const openStartConfirm = useCallback(() => {
+    if (selectedSessionInfo && canStartSession) {
+      setConfirmSession(selectedSessionInfo);
+    }
+  }, [canStartSession, selectedSessionInfo]);
+  const liveSessionInList = displaySessions.find((session) => session.isLive) ?? null;
+  const liveOnlyMode = isLiveCanadianGrandPrixWindow(sessions)
+    || (Boolean(liveSessionInList) && displaySessions.length === 1);
 
   const years = useMemo(() => {
     const currentYear = new Date().getFullYear();
@@ -223,7 +273,16 @@ export default function LobbyPage() {
               </p>
             )}
           </div>
-          <div className="flex flex-wrap gap-2 md:justify-end">
+          <div className="flex flex-wrap items-center gap-2 md:justify-end">
+            {isHost && (
+              <Button
+                onClick={openStartConfirm}
+                disabled={isStarting || !canStartSession}
+                size="md"
+              >
+                {isStarting ? 'Starting Session...' : 'Start Session'}
+              </Button>
+            )}
             <ThemeToggle />
             <Button variant="secondary" onClick={handleCopyCode}>
               {copied ? 'Code Copied' : 'Copy Code'}
@@ -266,55 +325,65 @@ export default function LobbyPage() {
             {isHost ? (
               <>
                 <SectionLabel index="03B" label="Session Setup" className="mb-4" />
-                <div className="grid gap-4 md:grid-cols-2">
-                  <label className="block">
-                    <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                      Season Year
-                    </span>
-                    <select
-                      value={selectedYear}
-                      onChange={(event) => {
-                        setSelectedYear(Number(event.target.value));
-                        setSelectedSession('');
-                      }}
-                      className="h-12 w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 font-display text-sm uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
-                    >
-                      {years.map((year) => (
-                        <option key={year} value={year}>
-                          {year}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                {!liveOnlyMode && (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
+                        Season Year
+                      </span>
+                      <select
+                        value={selectedYear}
+                        onChange={(event) => {
+                          setSelectedYear(Number(event.target.value));
+                          setSelectedSession('');
+                        }}
+                        className="h-12 w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 font-display text-sm uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                      >
+                        {years.map((year) => (
+                          <option key={year} value={year}>
+                            {year}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
 
-                  <label className="block">
-                    <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                      Race Session
-                    </span>
-                    <p className="font-body text-sm text-[var(--color-muted-fg)]">
-                      Completed sessions launch a 10x telemetry replay. Future sessions stay visible but unavailable until OpenF1 has final race data.
-                    </p>
-                  </label>
-                </div>
+                    <label className="block">
+                      <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
+                        Race Session
+                      </span>
+                      <p className="font-body text-sm text-[var(--color-muted-fg)]">
+                        Select a live session during the race window, or a completed session for 10x replay.
+                      </p>
+                    </label>
+                  </div>
+                )}
 
-                <div className="mt-4 space-y-3">
-                  {sessions.length > 0 ? (
-                    sessions.map((session) => {
+                {liveOnlyMode && (
+                  <p className="mb-4 border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_90%)] p-4 font-body text-sm text-[var(--color-fg)]">
+                    The Canadian Grand Prix is live. Only the live race session is available — start when your lobby is ready.
+                  </p>
+                )}
+
+                <div className={`space-y-3 ${liveOnlyMode ? '' : 'mt-4'}`}>
+                  {displaySessions.length > 0 ? (
+                    displaySessions.map((session) => {
                       const isSelected = String(session.session_key) === selectedSession;
+                      const isLive = session.isLive;
                       const isCompleted = session.isCompleted;
+                      const isSelectable = isLive || isCompleted;
 
                       return (
                         <button
                           key={session.session_key}
                           type="button"
-                          disabled={!isCompleted}
-                          onClick={() => isCompleted && setSelectedSession(String(session.session_key))}
+                          disabled={!isSelectable}
+                          onClick={() => handleSessionClick(session)}
                           className={`w-full border-2 p-4 text-left transition-colors ${
-                            isSelected
+                            isSelected && isSelectable
                               ? 'border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_90%)]'
                               : 'border-[var(--color-border)] bg-[var(--color-bg)]'
                           } ${
-                            isCompleted
+                            isSelectable
                               ? 'cursor-pointer hover:border-[var(--color-accent)]'
                               : 'cursor-not-allowed opacity-55'
                           }`}
@@ -330,24 +399,31 @@ export default function LobbyPage() {
                             </div>
                             <div className="flex flex-wrap gap-2">
                               <span className="border-2 border-[var(--color-border)] px-2 py-1 font-display text-[10px] uppercase tracking-[0.18em]">
-                                {session.mode === 'replay' ? 'Replay' : 'Live'}
+                                {isLive ? 'Live' : isCompleted ? 'Replay' : 'Upcoming'}
                               </span>
                               <span
                                 className={`border-2 px-2 py-1 font-display text-[10px] uppercase tracking-[0.18em] ${
-                                  isCompleted
+                                  isLive || isCompleted
                                     ? 'border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)]'
                                     : 'border-[var(--color-border)]'
                                 }`}
                               >
-                                {isCompleted ? 'Replay Ready' : 'Not Completed Yet'}
+                                {isLive ? 'Live Now' : isCompleted ? 'Replay Ready' : 'Not Started'}
                               </span>
                             </div>
                           </div>
                           <p className="mt-3 font-display text-xs uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">
-                            {isCompleted
-                              ? 'Available now. Telemetry replay runs at 10x and triggers AI-written questions from the server question bank.'
-                              : 'Unavailable until the session finishes and OpenF1 historical data is complete.'}
+                            {isLive
+                              ? 'This session follows live telemetry. Questions appear only when the server-side trigger engine finds a valid race situation.'
+                              : isCompleted
+                                ? 'Replay ready. Telemetry replay runs at 10x and triggers AI-written questions from the server question bank.'
+                                : 'Unavailable until the session start time. Check back when the session goes live.'}
                           </p>
+                          {isSelected && isSelectable && (
+                            <p className="mt-2 font-display text-[10px] uppercase tracking-[0.18em] text-[var(--color-accent)]">
+                              Click again to start
+                            </p>
+                          )}
                         </button>
                       );
                     })
@@ -360,26 +436,13 @@ export default function LobbyPage() {
 
                 {selectedSessionInfo && (
                   <p className="mt-4 border-2 border-[var(--color-border)] bg-[var(--color-bg)] p-3 font-display text-xs uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">
-                    {selectedSessionInfo.isCompleted
-                      ? 'Historical telemetry replay starts at 10x speed. Questions appear when server-side race signals match the curated question bank, then Groq/Llama rewrites the prompt and explanation.'
-                      : 'This session has not completed yet and cannot be started.'}
+                    {selectedSessionInfo.isLive
+                      ? 'Live session connects to real-time F1 SignalR telemetry stream. Questions appear when server-side race signals match valid triggers.'
+                      : selectedSessionInfo.isCompleted
+                        ? 'Historical telemetry replay starts at 10x speed. Questions appear when server-side race signals match the curated question bank, then Groq/Llama rewrites the prompt and explanation.'
+                        : 'This session has not started yet and cannot be started.'}
                   </p>
                 )}
-
-                {sessions.length > 0 && completedSessions.length === 0 && (
-                  <p className="mt-4 border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_92%)] p-3 font-display text-xs uppercase tracking-[0.14em]">
-                    No completed sessions are available for this year yet.
-                  </p>
-                )}
-
-                <Button
-                  onClick={handleStartGame}
-                  disabled={isStarting || !selectedSession || !selectedSessionInfo?.isCompleted}
-                  size="lg"
-                  className="mt-6 w-full"
-                >
-                  {isStarting ? 'Starting Session...' : selectedSessionInfo?.isCompleted ? 'Start Race Session' : 'Session Unavailable'}
-                </Button>
               </>
             ) : (
               <>
@@ -401,6 +464,47 @@ export default function LobbyPage() {
           </Card>
         </section>
       </div>
+
+      <Dialog
+        open={Boolean(confirmSession)}
+        onClose={() => {
+          if (!isStarting) {
+            setConfirmSession(null);
+          }
+        }}
+        title="Start Session"
+      >
+        {confirmSession && (
+          <>
+            <p className="mt-3 font-display text-lg uppercase leading-tight">
+              {confirmSession.session_name} · {confirmSession.location}
+            </p>
+            <p className="mt-1 font-body text-sm text-[var(--color-muted-fg)]">
+              {confirmSession.circuit_short_name}, {confirmSession.country_name}
+            </p>
+            <p className="mt-4 font-body text-sm text-[var(--color-muted-fg)]">
+              {confirmSession.isLive
+                ? 'All players will join the live race feed. Questions trigger from real-time telemetry.'
+                : 'All players will join a 10x telemetry replay with server-triggered prediction questions.'}
+            </p>
+            <div className="mt-6 flex flex-wrap gap-2">
+              <Button
+                onClick={() => handleStartGame(String(confirmSession.session_key))}
+                disabled={isStarting}
+              >
+                {isStarting ? 'Starting Session...' : 'Start Session'}
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => setConfirmSession(null)}
+                disabled={isStarting}
+              >
+                Cancel
+              </Button>
+            </div>
+          </>
+        )}
+      </Dialog>
     </main>
   );
 }
