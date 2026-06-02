@@ -7,9 +7,12 @@
     "dev": "nodemon src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
+    "worker:scoring": "node dist/workers/scoringWorker.js",
     "test": "jest",
     "test:e2e": "jest --config jest.e2e.config.js",
-    "lint": "eslint src/**/*.ts"
+    "lint": "eslint src/**/*.ts",
+    "loadtest:500": "node loadtest/runSummary.js loadtest/scenario-500-live.json",
+    "loadtest:5000": "node loadtest/runSummary.js loadtest/scenario-5000-live.json"
   },
   "keywords": [
     "f1",
@@ -20,12 +23,15 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "@supabase/supabase-js": "^2.98.0",
     "bcryptjs": "^3.0.3",
+    "bullmq": "^5.58.0",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "groq-sdk": "^0.37.0",
+    "ioredis": "^5.8.2",
     "socket.io": "^4.8.3",
     "uuid": "^13.0.0",
     "ws": "^8.21.0"

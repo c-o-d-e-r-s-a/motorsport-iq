@@ -14,6 +14,7 @@ import {
   detectPitStopsFromTimingLine,
   mapPitLaneTimeCollectionToPits,
   mapTimingAppDataToStints,
+  normalizeCompound,
 } from './f1SignalRPitStintMapper';
 
 export interface F1SignalRClientOptions {
@@ -25,6 +26,7 @@ export interface F1SignalRClientOptions {
   onTotalLaps?: (totalLaps: number) => void;
   onDriverList?: (drivers: OpenF1Driver[]) => void;
   onStintUpdate?: (stints: OpenF1Stint[]) => void;
+  onCompoundUpdate?: (driverNumber: number, compound: string) => void;
   onPitUpdate?: (pits: OpenF1Pit[]) => void;
   onConnectionLoss?: () => void;
   onConnectionRestored?: () => void;
@@ -59,12 +61,13 @@ const SOCKET_BASE = 'wss://livetiming.formula1.com/signalr/connect';
 const CONNECTION_DATA = encodeURIComponent(JSON.stringify([{ name: 'Streaming' }]));
 
 // F1 TrackStatus.Status numeric codes from livetiming feed.
+// Code 2 is often a local/sector yellow — we only treat race-control-backed
+// messages as full-track YELLOW. TrackStatus is trusted for GREEN, SC, VSC,
+// RED, and CHEQUERED transitions.
 const TRACK_STATUS_MAP: Record<string, TrackStatus> = {
   '1': 'GREEN',
-  '2': 'YELLOW',
   '4': 'SC',
   '5': 'RED',
-  '6': 'SC',
   '7': 'VSC',
   '21': 'CHEQUERED',
 };
@@ -89,6 +92,66 @@ function parseLapTimeToSeconds(timeStr: string): number | null {
   }
   const secondsDirect = parseFloat(timeStr);
   return Number.isFinite(secondsDirect) ? secondsDirect : null;
+}
+
+function normalizeDriverListPayload(data: unknown): Record<string, Record<string, unknown>> {
+  if (!data || typeof data !== 'object') {
+    return {};
+  }
+
+  if (Array.isArray(data)) {
+    const mapped: Record<string, Record<string, unknown>> = {};
+    for (const entry of data) {
+      if (!entry || typeof entry !== 'object') continue;
+      const record = entry as Record<string, unknown>;
+      const driverNumber = record.RacingNumber ?? record.racingNumber ?? record.DriverNumber ?? record.driver_number;
+      if (driverNumber === undefined || driverNumber === null) continue;
+      mapped[String(driverNumber)] = record;
+    }
+    return mapped;
+  }
+
+  const root = data as Record<string, unknown>;
+  if (root.Drivers && typeof root.Drivers === 'object') {
+    return root.Drivers as Record<string, Record<string, unknown>>;
+  }
+
+  return root as Record<string, Record<string, unknown>>;
+}
+
+function mapDriverListEntry(driverNumber: number, info: Record<string, unknown>): OpenF1Driver {
+  const firstName = String(info.FirstName ?? info.firstName ?? '').trim();
+  const lastName = String(info.LastName ?? info.lastName ?? '').trim();
+  const broadcastName = String(info.BroadcastName ?? info.broadcastName ?? '').trim();
+  const fullName = String(info.FullName ?? info.fullName ?? '').trim()
+    || [firstName, lastName].filter(Boolean).join(' ').trim()
+    || broadcastName
+    || `Driver ${driverNumber}`;
+  const resolvedBroadcastName = broadcastName || fullName;
+  const nameParts = fullName.split(' ').filter(Boolean);
+  const resolvedFirstName = firstName || nameParts.slice(0, -1).join(' ') || fullName;
+  const resolvedLastName = lastName || nameParts.slice(-1).join(' ') || String(driverNumber);
+  const teamName = String(info.TeamName ?? info.teamName ?? info.Team ?? 'Unknown');
+  const teamColour = String(info.TeamColour ?? info.teamColour ?? info.TeamColor ?? '000000').replace('#', '');
+
+  return {
+    driver_number: driverNumber,
+    broadcast_name: resolvedBroadcastName,
+    full_name: fullName,
+    name_acronym: String(info.Tla ?? info.tla ?? info.RacingNumber ?? driverNumber),
+    team_name: teamName,
+    team_colour: teamColour,
+    first_name: resolvedFirstName,
+    last_name: resolvedLastName,
+    headshot_url: String(info.HeadshotUrl ?? info.headshotUrl ?? ''),
+    country_code: String(info.CountryCode ?? info.countryCode ?? ''),
+    session_key: 0,
+    meeting_key: 0,
+  };
+}
+
+function completedLapsToCurrentLap(completedLaps: number): number {
+  return completedLaps > 0 ? completedLaps + 1 : 0;
 }
 
 export class F1SignalRClient {
@@ -378,6 +441,11 @@ export class F1SignalRClient {
         this.lastLapByDriver.set(driverNumber, lapNumber);
       }
 
+      const compound = normalizeCompound(lineData.Compound ?? lineData.compound);
+      if (compound) {
+        this.options.onCompoundUpdate?.(driverNumber, compound);
+      }
+
       this.processTimingLinePitSignals(driverNumber, lineData, timestamp, lapNumber);
 
       if (lineData.LastLapTime?.Value && lapNumber > 0) {
@@ -413,7 +481,7 @@ export class F1SignalRClient {
     });
 
     if (maxLap > 0) {
-      this.options.onTimingProgress?.(maxLap);
+      this.options.onTimingProgress?.(completedLapsToCurrentLap(maxLap));
     }
 
     if (positions.length > 0) {
@@ -472,6 +540,7 @@ export class F1SignalRClient {
       driverNumber,
       timestamp,
       lapNumber,
+      lastKnownLap: this.lastLapByDriver.get(driverNumber) ?? null,
       pitStopCount: Number.isFinite(pitStopCount ?? NaN) ? pitStopCount : null,
       inPit,
       previousPitStopCount: this.lastPitStopCountByDriver.get(driverNumber) ?? 0,
@@ -514,7 +583,7 @@ export class F1SignalRClient {
   private handleTrackStatus(data: any): void {
     const statusCode = String(data?.Status ?? '');
     const message = String(data?.Message ?? '').toLowerCase();
-    let status = TRACK_STATUS_MAP[statusCode] ?? 'GREEN';
+    let status = TRACK_STATUS_MAP[statusCode] ?? null;
 
     if (message.includes('virtual safety car')) {
       status = 'VSC';
@@ -524,10 +593,12 @@ export class F1SignalRClient {
       status = 'RED';
     } else if (message.includes('chequered')) {
       status = 'CHEQUERED';
-    } else if (message.includes('yellow')) {
-      status = 'YELLOW';
     } else if (message.includes('track clear') || message.includes('all clear')) {
       status = 'GREEN';
+    }
+
+    if (!status) {
+      return;
     }
 
     if (status === this.lastTrackStatus) return;
@@ -541,35 +612,29 @@ export class F1SignalRClient {
     if (Number.isFinite(totalLaps) && totalLaps > 0) {
       this.options.onTotalLaps?.(totalLaps);
     }
+
+    const currentLap = parseInt(String(data?.CurrentLap ?? data?.LapCount ?? ''), 10);
+    if (Number.isFinite(currentLap) && currentLap > 0) {
+      this.options.onTimingProgress?.(currentLap);
+    }
   }
 
   private handleDriverList(data: any): void {
-    const drivers: OpenF1Driver[] = Object.entries(data ?? {}).map(([driverNumberStr, entry]) => {
+    const entries = normalizeDriverListPayload(data);
+    const drivers: OpenF1Driver[] = Object.entries(entries).map(([driverNumberStr, entry]) => {
       const driverNumber = parseInt(driverNumberStr, 10);
-      const info = entry as Record<string, unknown>;
-      const fullName = String(info.FullName ?? info.BroadcastName ?? `Driver ${driverNumber}`);
-      const broadcastName = String(info.BroadcastName ?? fullName);
-      const teamName = String(info.TeamName ?? 'Unknown');
-      const teamColour = String(info.TeamColour ?? '000000').replace('#', '');
-      const nameParts = fullName.split(' ');
-      const firstName = nameParts.slice(0, -1).join(' ') || fullName;
-      const lastName = nameParts.slice(-1).join(' ') || String(driverNumber);
-
-      return {
-        driver_number: driverNumber,
-        broadcast_name: broadcastName,
-        full_name: fullName,
-        name_acronym: String(info.Tla ?? info.RacingNumber ?? driverNumber),
-        team_name: teamName,
-        team_colour: teamColour,
-        first_name: firstName,
-        last_name: lastName,
-        headshot_url: String(info.HeadshotUrl ?? ''),
-        country_code: String(info.CountryCode ?? ''),
-        session_key: 0,
-        meeting_key: 0,
-      };
-    });
+      if (!Number.isFinite(driverNumber)) {
+        const fallbackNumber = parseInt(
+          String(entry.RacingNumber ?? entry.racingNumber ?? entry.DriverNumber ?? ''),
+          10
+        );
+        if (!Number.isFinite(fallbackNumber)) {
+          return null;
+        }
+        return mapDriverListEntry(fallbackNumber, entry);
+      }
+      return mapDriverListEntry(driverNumber, entry);
+    }).filter((driver): driver is OpenF1Driver => driver !== null);
 
     if (drivers.length > 0) {
       this.options.onDriverList?.(drivers);
@@ -600,9 +665,14 @@ export class F1SignalRClient {
       status = 'RED';
     } else if (message.includes('chequered')) {
       status = 'CHEQUERED';
-    } else if (message.includes('yellow')) {
+    } else if (
+      message.includes('yellow flag')
+      || message.includes('double yellow')
+      || message.includes('yellow in sector')
+      || (message.includes('yellow') && !message.includes('yellow card'))
+    ) {
       status = 'YELLOW';
-    } else if (message.includes('track clear') || message.includes('green flag')) {
+    } else if (message.includes('track clear') || message.includes('green flag') || message.includes('track is clear')) {
       status = 'GREEN';
     }
 

@@ -26,6 +26,7 @@ interface DriverData {
   latestLap: OpenF1Lap | null;
   pits: OpenF1Pit[];
   stints: OpenF1Stint[];
+  latestCompound: string | null;
 }
 
 const DEBUG_DRIVER_PROVENANCE = process.env.DEBUG_DRIVER_PROVENANCE === 'true';
@@ -102,6 +103,7 @@ export class SnapshotStore {
             latestLap: null,
             pits: [],
             stints: [],
+            latestCompound: null,
           });
         }
         console.log(`[SnapshotStore] Pre-loaded ${driverData.length} drivers from OpenF1 API`);
@@ -136,7 +138,10 @@ export class SnapshotStore {
     for (const driver of drivers) {
       const existing = this.drivers.get(driver.driver_number);
       if (existing) {
-        existing.driver = driver;
+        const hasRealName = !/^Driver \d+$/.test(driver.full_name);
+        const existingIsPlaceholder = !existing.driver
+          || /^Driver \d+$/.test(existing.driver.full_name);
+        existing.driver = (hasRealName || existingIsPlaceholder) ? driver : existing.driver;
       } else {
         this.drivers.set(driver.driver_number, {
           driver,
@@ -145,9 +150,34 @@ export class SnapshotStore {
           latestLap: null,
           pits: [],
           stints: [],
+          latestCompound: null,
         });
       }
     }
+    this.scheduleHudSnapshotUpdate();
+  }
+
+  processCompoundUpdate(driverNumber: number, compound: string): void {
+    const driverData = this.ensureDriverEntry(driverNumber);
+    driverData.latestCompound = compound;
+
+    const activeStint = this.getActiveStintForCurrentLap(driverData);
+    if (activeStint) {
+      activeStint.compound = compound;
+    } else {
+      driverData.stints.push({
+        date: new Date().toISOString(),
+        session_key: 0,
+        meeting_key: 0,
+        driver_number: driverNumber,
+        stint_number: driverData.pits.length + 1,
+        lap_start: this.lapNumber > 0 ? this.lapNumber : 1,
+        lap_end: null,
+        compound,
+        tyre_age_at_start: 0,
+      });
+    }
+
     this.scheduleHudSnapshotUpdate();
   }
 
@@ -191,6 +221,7 @@ export class SnapshotStore {
       latestLap: null,
       pits: [],
       stints: [],
+      latestCompound: null,
     };
     this.drivers.set(driverNumber, driverData);
     console.log(`[SnapshotStore] Auto-created driver entry for #${driverNumber} from live data`);
@@ -201,8 +232,10 @@ export class SnapshotStore {
     const driverData = this.ensureDriverEntry(lap.driver_number, lap.session_key, lap.meeting_key);
     driverData.latestLap = lap;
 
-    if (lap.lap_number > this.lapNumber) {
-      this.lapNumber = lap.lap_number;
+    // Live F1 timing reports completed laps; replays use OpenF1 lap_number as-is.
+    const nextLap = this.sessionMode === 'live' ? lap.lap_number + 1 : lap.lap_number;
+    if (nextLap > this.lapNumber) {
+      this.lapNumber = nextLap;
     }
 
     this.buildSnapshot();
@@ -212,6 +245,10 @@ export class SnapshotStore {
   }
 
   syncLapNumber(lapNumber: number): void {
+    if (this.sessionMode !== 'live') {
+      return;
+    }
+
     if (lapNumber > this.lapNumber) {
       this.lapNumber = lapNumber;
       this.scheduleHudSnapshotUpdate();
@@ -328,6 +365,7 @@ export class SnapshotStore {
 
       const tyreAge = this.calculateTyreAge(data);
       const activeStint = this.getActiveStintForCurrentLap(data);
+      const stintNumber = activeStint?.stint_number ?? data.pits.length + 1;
       const name = data.driver.full_name || data.driver.broadcast_name || `Driver ${driverNumber}`;
       const nameSource = data.driver.full_name
         ? 'full_name'
@@ -344,9 +382,9 @@ export class SnapshotStore {
         position: data.latestPosition?.position ?? 0,
         gap: data.latestInterval?.gap_to_leader ?? null,
         interval: data.latestInterval?.interval ?? null,
-        tyreCompound: activeStint?.compound ?? null,
+        tyreCompound: activeStint?.compound ?? data.latestCompound ?? null,
         tyreAge: this.calculateCurrentTyreAge(activeStint, tyreAge),
-        stintNumber: activeStint?.stint_number ?? null,
+        stintNumber,
         drsEnabled: false,
         pitCount: data.pits.length,
         lastLapTime: data.latestLap?.lap_duration ?? null,
@@ -424,7 +462,16 @@ export class SnapshotStore {
     const lastPitLap = data.pits.length > 0
       ? Math.max(...data.pits.map((pit) => pit.lap_number))
       : 0;
-    return this.lapNumber - lastPitLap;
+
+    if (this.lapNumber <= 0) {
+      return 0;
+    }
+
+    if (lastPitLap <= 0) {
+      return Math.max(0, this.lapNumber - 1);
+    }
+
+    return Math.max(0, this.lapNumber - lastPitLap - 1);
   }
 
   private calculateCurrentTyreAge(stint: OpenF1Stint | null, fallbackTyreAge: number): number {

@@ -2,6 +2,20 @@ import type { OpenF1Pit, OpenF1Stint } from '../types';
 
 const VALID_COMPOUNDS = new Set(['SOFT', 'MEDIUM', 'HARD', 'INTERMEDIATE', 'WET']);
 
+const COMPOUND_ALIASES: Record<string, string> = {
+  S: 'SOFT',
+  SOFT: 'SOFT',
+  M: 'MEDIUM',
+  MEDIUM: 'MEDIUM',
+  H: 'HARD',
+  HARD: 'HARD',
+  I: 'INTERMEDIATE',
+  INTER: 'INTERMEDIATE',
+  INTERMEDIATE: 'INTERMEDIATE',
+  W: 'WET',
+  WET: 'WET',
+};
+
 export interface SignalRStintEntry {
   Compound?: string;
   TotalLaps?: number | string;
@@ -19,6 +33,11 @@ export function normalizeCompound(raw: unknown): string | null {
   const compound = String(raw).trim().toUpperCase();
   if (!compound || compound === 'UNKNOWN') {
     return null;
+  }
+
+  const mapped = COMPOUND_ALIASES[compound];
+  if (mapped) {
+    return mapped;
   }
 
   return VALID_COMPOUNDS.has(compound) ? compound : null;
@@ -76,12 +95,31 @@ export function mapTimingAppDataToStints(
     for (let index = 0; index < stintEntries.length; index += 1) {
       const [stintKey, stintData] = stintEntries[index];
       const totalLaps = parsePositiveInt(stintData.TotalLaps);
+      const compound = normalizeCompound(stintData.Compound);
+      const isActiveStint = index === stintEntries.length - 1;
+
       if (totalLaps === null) {
+        if (!isActiveStint || !compound) {
+          continue;
+        }
+
+        stints.push({
+          date: timestamp,
+          session_key: 0,
+          meeting_key: 0,
+          driver_number: driverNumber,
+          stint_number: parseInt(stintKey, 10) + 1,
+          lap_start: nextLapStart,
+          lap_end: null,
+          compound,
+          tyre_age_at_start: isTruthyFlag(stintData.New)
+            ? 0
+            : parseNonNegativeNumber(stintData.StartLaps) ?? 0,
+        });
         continue;
       }
 
       const stintNumber = parseInt(stintKey, 10) + 1;
-      const isActiveStint = index === stintEntries.length - 1;
       const lapStart = nextLapStart;
       const lapEnd = isActiveStint ? null : lapStart + totalLaps - 1;
 
@@ -112,6 +150,7 @@ export interface PitStopDetectionInput {
   driverNumber: number;
   timestamp: string;
   lapNumber: number;
+  lastKnownLap?: number | null;
   pitStopCount: number | null;
   inPit: boolean | null;
   previousPitStopCount: number;
@@ -124,14 +163,31 @@ export interface PitStopDetectionResult {
   nextWasInPit: boolean;
 }
 
+function resolvePitLapNumber(lapNumber: number, lastKnownLap: number | undefined): number | null {
+  const effectiveLap = lapNumber > 1
+    ? lapNumber
+    : (lastKnownLap && lastKnownLap > 0 ? lastKnownLap : lapNumber);
+
+  if (!Number.isFinite(effectiveLap) || effectiveLap <= 0) {
+    return null;
+  }
+
+  return effectiveLap;
+}
+
 export function detectPitStopsFromTimingLine(input: PitStopDetectionInput): PitStopDetectionResult {
   const pits: OpenF1Pit[] = [];
   let nextPitStopCount = input.previousPitStopCount;
   let nextWasInPit = input.wasInPit;
+  const resolvedLap = resolvePitLapNumber(input.lapNumber, input.lastKnownLap ?? undefined);
+
+  if (resolvedLap === null) {
+    return { pits, nextPitStopCount, nextWasInPit: input.inPit ?? input.wasInPit };
+  }
 
   if (input.pitStopCount !== null && input.pitStopCount > input.previousPitStopCount) {
     for (let pitNumber = input.previousPitStopCount + 1; pitNumber <= input.pitStopCount; pitNumber += 1) {
-      pits.push(createPitRecord(input.driverNumber, pitNumber, input.lapNumber, input.timestamp, null));
+      pits.push(createPitRecord(input.driverNumber, pitNumber, resolvedLap, input.timestamp, null));
     }
     nextPitStopCount = input.pitStopCount;
   }
@@ -143,7 +199,7 @@ export function detectPitStopsFromTimingLine(input: PitStopDetectionInput): PitS
       const fallbackCount = input.pitStopCount ?? input.previousPitStopCount + 1;
       if (fallbackCount > input.previousPitStopCount) {
         for (let pitNumber = input.previousPitStopCount + 1; pitNumber <= fallbackCount; pitNumber += 1) {
-          pits.push(createPitRecord(input.driverNumber, pitNumber, input.lapNumber, input.timestamp, null));
+          pits.push(createPitRecord(input.driverNumber, pitNumber, resolvedLap, input.timestamp, null));
         }
         nextPitStopCount = fallbackCount;
       }

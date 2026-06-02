@@ -65,6 +65,12 @@ export default function GamePage() {
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [isLeaving, setIsLeaving] = useState(false);
   const [localCorrectAnswers, setLocalCorrectAnswers] = useState<number>(0);
+  const [joinUsername, setJoinUsername] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return localStorage.getItem('msp_username') ?? '';
+  });
+  const [showJoinForm, setShowJoinForm] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
 
   const { playSound } = useQuestionSound('/sounds/question-alert.mp3');
   const { playCorrectSound, playWrongSound } = useAnswerOutcomeSounds();
@@ -75,6 +81,7 @@ export default function GamePage() {
   const currentQuestionRef = useRef<QuestionEvent | null>(null);
   const questionStateRef = useRef<QuestionState | null>(null);
   const submittedAnswersRef = useRef<Record<string, 'YES' | 'NO'>>({});
+  const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
   useEffect(() => {
@@ -88,6 +95,10 @@ export default function GamePage() {
   useEffect(() => {
     submittedAnswersRef.current = submittedAnswers;
   }, [submittedAnswers]);
+
+  useEffect(() => {
+    joinUsernameRef.current = joinUsername;
+  }, [joinUsername]);
 
   const hydrateQuestionFromLobby = useEffectEvent((state: LobbyState) => {
     const question = state.currentQuestion;
@@ -142,8 +153,8 @@ export default function GamePage() {
 
     if (isSessionExpired) {
       localStorage.removeItem('msp_user_id');
-      setConnectionNotice('Session expired. Redirecting to lobby join.');
-      router.push('/');
+      setShowJoinForm(true);
+      setConnectionNotice('Enter your driver name to rejoin this session.');
       return;
     }
 
@@ -188,8 +199,17 @@ export default function GamePage() {
       socket.on('connected', () => {
         setIsSocketConnected(true);
         setConnectionNotice(null);
-        if (currentUserId) {
-          socket.reconnectLobby(currentUserId);
+        const storedUserId = localStorage.getItem('msp_user_id');
+        if (storedUserId) {
+          socket.reconnectLobby(storedUserId);
+          return;
+        }
+
+        socket.lookupLobby(lobbyCode);
+      }),
+      socket.on(SERVER_EVENTS.LOBBY_LOOKUP, () => {
+        if (!localStorage.getItem('msp_user_id')) {
+          setShowJoinForm(true);
         }
       }),
       socket.on('disconnected', () => {
@@ -205,6 +225,17 @@ export default function GamePage() {
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);
         setLeaderboard(state.leaderboard);
+        setShowJoinForm(false);
+        setIsJoining(false);
+
+        const storedUsername = localStorage.getItem('msp_username');
+        const joinedUser = state.players.find(
+          (player) => player.username === joinUsernameRef.current.trim() || player.username === storedUsername
+        );
+        if (joinedUser) {
+          localStorage.setItem('msp_user_id', joinedUser.id);
+          localStorage.setItem('msp_username', joinedUser.username);
+        }
         if (state.currentQuestion) {
           const current = currentQuestionRef.current;
           const currentState = questionStateRef.current;
@@ -318,6 +349,19 @@ export default function GamePage() {
         setSuggestedStatKeys(data.suggestedStatKeys ?? []);
       }),
       socket.on(SERVER_EVENTS.RESOLUTION_EVENT, (event: ResolutionEvent) => {
+        const activeQuestion = currentQuestionRef.current;
+        const activeState = questionStateRef.current;
+        const hasUnresolvedQuestion = Boolean(
+          activeQuestion
+          && activeState
+          && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(activeState)
+          && activeQuestion.instanceId !== event.instanceId
+        );
+
+        if (hasUnresolvedQuestion) {
+          return;
+        }
+
         // Deduplicate: skip if already processed this resolution
         if (processedResolutionIds.current.has(event.instanceId)) {
           console.log(`[RESOLUTION] Skipping duplicate for ${event.instanceId}`);
@@ -361,7 +405,13 @@ export default function GamePage() {
       socket.on(SERVER_EVENTS.FEED_STATUS, ({ stalled }: { stalled: boolean }) => {
         setFeedStalled(stalled);
       }),
-      socket.on(SERVER_EVENTS.ERROR, handleSocketError),
+      socket.on(SERVER_EVENTS.ERROR, (payload: ServerErrorEvent) => {
+        if (payload.code === 'VALIDATION_ERROR' && payload.message.toLowerCase().includes('lobby not found')) {
+          setError('Lobby not found');
+          return;
+        }
+        handleSocketError(payload);
+      }),
       socket.on(SERVER_EVENTS.PRESENCE_EXPIRED, () => {
         localStorage.removeItem('msp_user_id');
         router.push('/');
@@ -371,12 +421,14 @@ export default function GamePage() {
     const userId = localStorage.getItem('msp_user_id');
     if (userId) {
       socket.reconnectLobby(userId);
+    } else {
+      socket.lookupLobby(lobbyCode);
     }
 
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [currentUserId, playCorrectSound, playSound, playWrongSound, router]);
+  }, [lobbyCode, playCorrectSound, playSound, playWrongSound, router]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -387,7 +439,7 @@ export default function GamePage() {
     socket.sendPresencePing();
     const interval = window.setInterval(() => {
       socket.sendPresencePing();
-    }, 60_000);
+    }, 90_000);
 
     return () => {
       window.clearInterval(interval);
@@ -479,13 +531,69 @@ export default function GamePage() {
   const resolvedAnswer = resolution ? submittedAnswers[resolution.instanceId] ?? null : null;
   const resolvedAnswerIsCorrect = resolvedAnswer !== null && resolvedAnswer === resolution?.correctAnswer;
   const hasRaceCompleted = raceCompletedLap !== null;
-  const showWinnerScreen = hasRaceCompleted && !currentQuestion && lobbyState?.status === 'finished';
+  const hasActiveQuestion = Boolean(
+    currentQuestion
+    && questionState
+    && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(questionState)
+  );
+  const raceHasEnded = Boolean(
+    hasRaceCompleted
+    || raceSnapshot?.trackStatus === 'CHEQUERED'
+    || raceSnapshot?.isReplayComplete
+    || lobbyState?.status === 'finished'
+  );
+  const showWinnerScreen = raceHasEnded && !hasActiveQuestion;
   const tireStatsHighlighted = suggestedStatKeys.some((key) => (
     key === 'TYRE_COMPOUND' || key === 'TYRE_AGE' || key === 'STINT_NUMBER'
   ));
   const showQuestionWaitingState = Boolean(
     currentQuestion && ['TRIGGERED', 'LOCKED', 'ACTIVE'].includes(questionState ?? '')
   );
+
+  const handleJoinSession = useCallback(() => {
+    if (!joinUsername.trim()) {
+      setError('Please enter a username');
+      return;
+    }
+
+    setError(null);
+    setIsJoining(true);
+    localStorage.setItem('msp_username', joinUsername.trim());
+    getSocketClient().joinLobby(lobbyCode, joinUsername.trim());
+  }, [joinUsername, lobbyCode]);
+
+  if (showJoinForm && !lobbyState) {
+    return (
+      <main className="app-shell flex items-center justify-center p-4">
+        <Card className="w-full max-w-lg" tone="default">
+          <SectionLabel index="04" label="Join Live Session" />
+          <h1 className="mt-3 font-display text-4xl uppercase tracking-tight">Lobby {lobbyCode}</h1>
+          <p className="mt-3 font-body text-sm text-[var(--color-muted-fg)]">
+            This session is already underway. Enter your driver name to join from this link.
+          </p>
+          <label className="mt-6 block">
+            <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
+              Driver Name
+            </span>
+            <input
+              value={joinUsername}
+              onChange={(event) => setJoinUsername(event.target.value)}
+              className="h-12 w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 font-display text-sm uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+              placeholder="Your name"
+            />
+          </label>
+          {error && (
+            <p className="mt-4 border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)] p-3 font-display text-xs uppercase tracking-[0.14em]">
+              {error}
+            </p>
+          )}
+          <Button onClick={handleJoinSession} disabled={isJoining} className="mt-6 w-full">
+            {isJoining ? 'Joining Session…' : 'Join Session'}
+          </Button>
+        </Card>
+      </main>
+    );
+  }
 
   if (!lobbyState) {
     return (
@@ -695,8 +803,9 @@ export default function GamePage() {
                       <CountdownTimer
                         deadline={
                           currentQuestion.answerDeadline
-                            ?? new Date(new Date(currentQuestion.triggeredAt).getTime() + 20_000).toISOString()
+                            ?? new Date(new Date(currentQuestion.triggeredAt).getTime() + 45_000).toISOString()
                         }
+                        totalDurationMs={45_000}
                         size="lg"
                       />
                     </div>

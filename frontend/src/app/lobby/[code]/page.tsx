@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { getSocketClient } from '@/lib/socket';
 import { SERVER_EVENTS, type LobbyState, type ServerErrorEvent, type SessionInfo } from '@/lib/types';
@@ -20,11 +20,23 @@ export default function LobbyPage() {
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [confirmSession, setConfirmSession] = useState<SessionInfo | null>(null);
+  const [joinUsername, setJoinUsername] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return localStorage.getItem('msp_username') ?? '';
+  });
+  const [showJoinForm, setShowJoinForm] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
+
+  useEffect(() => {
+    joinUsernameRef.current = joinUsername;
+  }, [joinUsername]);
 
   useEffect(() => {
     const socket = getSocketClient();
@@ -34,8 +46,18 @@ export default function LobbyPage() {
       socket.on('connected', () => {
         setIsReconnecting(false);
         setConnectionNotice(null);
-        if (currentUserId) {
-          socket.reconnectLobby(currentUserId);
+        const storedUserId = localStorage.getItem('msp_user_id');
+        if (storedUserId) {
+          socket.reconnectLobby(storedUserId);
+          return;
+        }
+
+        socket.lookupLobby(lobbyCode);
+      }),
+      socket.on(SERVER_EVENTS.LOBBY_LOOKUP, () => {
+        if (!localStorage.getItem('msp_user_id')) {
+          setShowJoinForm(true);
+          setIsLoading(false);
         }
       }),
       socket.on('disconnected', () => {
@@ -48,6 +70,17 @@ export default function LobbyPage() {
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);
         setIsLoading(false);
+        setShowJoinForm(false);
+        setIsJoining(false);
+
+        const storedUsername = localStorage.getItem('msp_username');
+        const joinedUser = state.players.find(
+          (player) => player.username === joinUsernameRef.current.trim() || player.username === storedUsername
+        );
+        if (joinedUser) {
+          localStorage.setItem('msp_user_id', joinedUser.id);
+          localStorage.setItem('msp_username', joinedUser.username);
+        }
 
         if (state.status === 'active') {
           router.push(`/game/${state.code}`);
@@ -112,7 +145,9 @@ export default function LobbyPage() {
 
         if (isSessionExpired) {
           localStorage.removeItem('msp_user_id');
-          router.push('/');
+          setShowJoinForm(true);
+          setIsLoading(false);
+          setConnectionNotice('Enter your driver name to join this lobby.');
           return;
         }
 
@@ -125,22 +160,20 @@ export default function LobbyPage() {
       }),
     ];
 
-    socket.getSessions(selectedYear);
-
-    const pollInterval = window.setInterval(() => {
-      socket.getSessions(selectedYear);
-    }, 15_000);
+    socket.startSessionsPolling(selectedYear, 60_000);
 
     const userId = localStorage.getItem('msp_user_id');
     if (userId) {
       socket.reconnectLobby(userId);
+    } else {
+      socket.lookupLobby(lobbyCode);
     }
 
     return () => {
-      window.clearInterval(pollInterval);
+      socket.stopSessionsPolling();
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [currentUserId, lobbyCode, router, selectedYear]);
+  }, [lobbyCode, router, selectedYear]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -151,7 +184,7 @@ export default function LobbyPage() {
     socket.sendPresencePing();
     const interval = window.setInterval(() => {
       socket.sendPresencePing();
-    }, 60_000);
+    }, 90_000);
 
     return () => {
       window.clearInterval(interval);
@@ -163,6 +196,25 @@ export default function LobbyPage() {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }, [lobbyCode]);
+
+  const handleCopyLink = useCallback(() => {
+    const shareUrl = `${window.location.origin}/game/${lobbyCode}`;
+    navigator.clipboard.writeText(shareUrl);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  }, [lobbyCode]);
+
+  const handleJoinLobby = useCallback(() => {
+    if (!joinUsername.trim()) {
+      setError('Please enter a username');
+      return;
+    }
+
+    setError(null);
+    setIsJoining(true);
+    localStorage.setItem('msp_username', joinUsername.trim());
+    getSocketClient().joinLobby(lobbyCode, joinUsername.trim());
+  }, [joinUsername, lobbyCode]);
 
   const handleLeaveLobby = useCallback(() => {
     localStorage.removeItem('msp_user_id');
@@ -244,6 +296,39 @@ export default function LobbyPage() {
     );
   }
 
+  if (showJoinForm && !lobbyState) {
+    return (
+      <main className="app-shell flex items-center justify-center p-4">
+        <Card className="w-full max-w-lg" tone="default">
+          <SectionLabel index="03" label="Join Lobby" />
+          <h1 className="mt-3 font-display text-4xl uppercase tracking-tight">Lobby {lobbyCode}</h1>
+          <p className="mt-3 font-body text-sm text-[var(--color-muted-fg)]">
+            Enter your driver name to join this lobby. If the session is already live, you will jump straight into the race.
+          </p>
+          <label className="mt-6 block">
+            <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
+              Driver Name
+            </span>
+            <input
+              value={joinUsername}
+              onChange={(event) => setJoinUsername(event.target.value)}
+              className="h-12 w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 font-display text-sm uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+              placeholder="Your name"
+            />
+          </label>
+          {error && (
+            <p className="mt-4 border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)] p-3 font-display text-xs uppercase tracking-[0.14em]">
+              {error}
+            </p>
+          )}
+          <Button onClick={handleJoinLobby} disabled={isJoining} className="mt-6 w-full">
+            {isJoining ? 'Joining Lobby…' : 'Join Lobby'}
+          </Button>
+        </Card>
+      </main>
+    );
+  }
+
   if (!lobbyState) {
     return (
       <main className="app-shell flex items-center justify-center p-4">
@@ -286,6 +371,9 @@ export default function LobbyPage() {
             <ThemeToggle />
             <Button variant="secondary" onClick={handleCopyCode}>
               {copied ? 'Code Copied' : 'Copy Code'}
+            </Button>
+            <Button variant="secondary" onClick={handleCopyLink}>
+              {copiedLink ? 'Link Copied' : 'Copy Invite Link'}
             </Button>
             <Button variant="ghost" onClick={handleLeaveLobby}>
               Leave Lobby

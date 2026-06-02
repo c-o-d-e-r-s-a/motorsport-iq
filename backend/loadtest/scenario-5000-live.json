@@ -1,0 +1,27 @@
+{
+  "name": "live-5000-concurrent",
+  "targets": {
+    "concurrentUsers": 5000,
+    "lobbies": 500,
+    "usersPerLobby": 10,
+    "durationMinutes": 45
+  },
+  "slo": {
+    "questionEventP95Ms": 500,
+    "submitAnswerAckP95Ms": 300,
+    "resolutionPublishP95Ms": 1000,
+    "reconnectRecoveryP95Ms": 3000,
+    "criticalEventDropRatePct": 0.1
+  },
+  "trafficProfile": {
+    "presencePingIntervalMs": 90000,
+    "answerWindowMs": 45000,
+    "questionCadencePerLobbyPerMinute": 0.4
+  },
+  "scalePlan": {
+    "socketNodes": "3-8",
+    "gameWorkers": "4-12",
+    "redisRequired": true,
+    "jobQueueRequired": true
+  }
+}

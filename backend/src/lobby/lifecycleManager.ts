@@ -9,13 +9,14 @@ import { recordResolution } from '../engine/questionEngine';
 import { calculateScore, dedupeAnswersByUser, updateLeaderboardEntry } from '../engine/scoringEngine';
 import { getQuestionById } from '../engine/questionBank';
 import { generateResolutionExplanation } from '../ai/explanationGenerator';
+import { enqueueScoringJob } from '../runtime/workQueue';
 
 /**
  * Lifecycle Manager - Question FSM and state transitions
  *
  * States: TRIGGERED → LIVE → LOCKED → ACTIVE → RESOLVED → EXPLAINED → CLOSED
  * - TRIGGERED: Question just created, waiting to go live
- * - LIVE: Players can answer (20 seconds)
+ * - LIVE: Players can answer (45 seconds)
  * - LOCKED: Answer period ended, waiting for resolution window
  * - ACTIVE: Question is active in race, waiting for outcome
  * - RESOLVED: Outcome determined, waiting for explanation
@@ -28,7 +29,7 @@ import { generateResolutionExplanation } from '../ai/explanationGenerator';
  */
 
 // Timers
-const ANSWER_WINDOW_MS = 20000; // 20 seconds to answer
+const ANSWER_WINDOW_MS = 45000; // 45 seconds to answer
 const EXPLANATION_DURATION_MS = 10000; // 10 seconds to show explanation
 const TRIGGER_TO_LIVE_MS = 1000; // 1 second between trigger and live
 
@@ -436,8 +437,33 @@ async function processAnswers(
       return;
     }
 
+    const dedupedAnswers = dedupeAnswersByUser(answers);
+    const scoreRows: Array<{ user_id: string; points_change: number; is_correct: boolean }> = [];
+
+    for (const answer of dedupedAnswers) {
+      const leaderboardEntry = lobbyState.leaderboard.find((lb) => lb.userId === answer.user_id);
+      const scoreResult = calculateScore(answer.answer, correctAnswer, leaderboardEntry?.streak ?? 0);
+      scoreRows.push({
+        user_id: answer.user_id,
+        points_change: scoreResult.pointsChange,
+        is_correct: scoreResult.isCorrect,
+      });
+    }
+
+    let usedBatchRpc = true;
+    const { error: batchError } = await supabase.rpc('update_leaderboard_batch', {
+      p_lobby_id: instance.lobbyId,
+      p_instance_id: instance.id,
+      p_rows: scoreRows,
+    });
+
+    if (batchError) {
+      usedBatchRpc = false;
+      console.warn(`[SCORING] Falling back to per-user RPC for instance ${instance.id}: ${batchError.message}`);
+    }
+
     // Process each answer exactly once per user.
-    for (const answer of dedupeAnswersByUser(answers)) {
+    for (const answer of dedupedAnswers) {
       const leaderboardEntry = lobbyState.leaderboard.find((lb) => lb.userId === answer.user_id);
       const currentEntry = leaderboardEntry
         ? {
@@ -463,14 +489,16 @@ async function processAnswers(
         scoreResult
       );
 
-      // Update leaderboard in database using the stored procedure (with idempotency)
-      await supabase.rpc('update_leaderboard', {
-        p_lobby_id: instance.lobbyId,
-        p_user_id: answer.user_id,
-        p_points_change: scoreResult.pointsChange,
-        p_is_correct: scoreResult.isCorrect,
-        p_instance_id: instance.id,
-      });
+      if (!usedBatchRpc) {
+        // Backward compatibility path while the batch RPC is being rolled out.
+        await supabase.rpc('update_leaderboard', {
+          p_lobby_id: instance.lobbyId,
+          p_user_id: answer.user_id,
+          p_points_change: scoreResult.pointsChange,
+          p_is_correct: scoreResult.isCorrect,
+          p_instance_id: instance.id,
+        });
+      }
 
       const user = lobbyState.players.find((player) => player.id === answer.user_id);
 
@@ -486,6 +514,12 @@ async function processAnswers(
         accuracy: updatedEntry.accuracy,
       });
     }
+
+    await enqueueScoringJob({
+      lobbyId: instance.lobbyId,
+      instanceId: instance.id,
+      enqueuedAt: new Date().toISOString(),
+    });
   } catch (processingError) {
     scoredQuestionInstances.delete(instance.id);
     throw processingError;

@@ -89,15 +89,10 @@ export default function Home() {
 
   useEffect(() => {
     const socket = getSocketClient();
-    socket.connect();
-    socket.getSessions(statusYear);
-
-    const interval = window.setInterval(() => {
-      socket.getSessions(statusYear);
-    }, 30_000);
+    socket.startSessionsPolling(statusYear, 60_000);
 
     return () => {
-      window.clearInterval(interval);
+      socket.stopSessionsPolling();
     };
   }, [statusYear]);
 
@@ -172,7 +167,7 @@ export default function Home() {
               Live Formula 1 Prediction Companion
             </p>
             <p className="mt-5 max-w-xl border-l-[3px] border-[var(--color-accent)] pl-4 font-body text-base leading-7 text-[var(--color-muted-fg)] md:text-lg">
-              Join a private lobby, answer live race prompts in 20 seconds, and climb the board as the session unfolds.
+              Join a private lobby, answer live race prompts in 45 seconds, and climb the board as the session unfolds.
             </p>
           </div>
 
@@ -189,7 +184,7 @@ export default function Home() {
                 </div>
                 <div className="hidden min-w-[88px] border border-[var(--color-border)] px-3 py-2 text-right md:block">
                   <p className="font-display text-[0.65rem] uppercase tracking-[0.24em] text-[var(--color-muted-fg)]">Window</p>
-                  <p className="mt-1 font-display text-3xl leading-none text-[var(--color-accent)]">20s</p>
+                  <p className="mt-1 font-display text-3xl leading-none text-[var(--color-accent)]">45s</p>
                 </div>
               </div>
 

@@ -220,6 +220,25 @@ describe('SnapshotStore race control updates', () => {
     expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('MEDIUM');
   });
 
+  it('uses completed lap numbers in replay mode and current lap in live mode', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const replayStore = new SnapshotStore(client);
+    await replayStore.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+    replayStore.processLapCompletion(createLap({ lap_number: 14 }));
+    expect(replayStore.getCurrentSnapshot()?.lapNumber).toBe(14);
+    replayStore.syncLapNumber(99);
+    expect(replayStore.getCurrentSnapshot()?.lapNumber).toBe(14);
+
+    const liveStore = new SnapshotStore(client);
+    await liveStore.initialize(1002, { sessionMode: 'live', skipDriverPreload: true });
+    liveStore.processLapCompletion(createLap({ lap_number: 14 }));
+    expect(liveStore.getCurrentSnapshot()?.lapNumber).toBe(15);
+  });
+
   it('emits HUD snapshot updates on telemetry changes with a 1s throttle', async () => {
     const onSnapshotUpdate = jest.fn();
     const client = {

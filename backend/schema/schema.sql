@@ -193,6 +193,39 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Batch leaderboard update for a resolved question.
+-- p_rows JSONB format:
+-- [
+--   { "user_id": "<uuid>", "points_change": 10, "is_correct": true },
+--   ...
+-- ]
+CREATE OR REPLACE FUNCTION update_leaderboard_batch(
+    p_lobby_id UUID,
+    p_instance_id UUID,
+    p_rows JSONB
+)
+RETURNS VOID AS $$
+DECLARE
+    row_data RECORD;
+BEGIN
+    FOR row_data IN
+        SELECT
+            (value->>'user_id')::UUID AS user_id,
+            (value->>'points_change')::INTEGER AS points_change,
+            (value->>'is_correct')::BOOLEAN AS is_correct
+        FROM jsonb_array_elements(COALESCE(p_rows, '[]'::JSONB))
+    LOOP
+        PERFORM update_leaderboard(
+            p_lobby_id,
+            row_data.user_id,
+            row_data.points_change,
+            row_data.is_correct,
+            p_instance_id
+        );
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Row Level Security (RLS) Policies
 ALTER TABLE lobbies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;

@@ -6,12 +6,14 @@ interface CountdownTimerProps {
   deadline: Date | string;
   onExpire?: () => void;
   size?: 'sm' | 'md' | 'lg';
+  totalDurationMs?: number;
 }
 
 export default function CountdownTimer({
   deadline,
   onExpire,
   size = 'md',
+  totalDurationMs = 45000,
 }: CountdownTimerProps) {
   const [timeRemaining, setTimeRemaining] = useState(0);
   const [isExpired, setIsExpired] = useState(false);
@@ -38,7 +40,7 @@ export default function CountdownTimer({
     return () => clearInterval(interval);
   }, [deadlineTime, onExpire]);
 
-  const totalDuration = 20000;
+  const totalDuration = totalDurationMs;
   const progress = Math.max(0, Math.min(1, timeRemaining / totalDuration));
   const seconds = Math.ceil(timeRemaining / 1000);
 

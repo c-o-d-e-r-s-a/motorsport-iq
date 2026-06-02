@@ -115,7 +115,9 @@ export class PresenceManager {
       }
 
       if (!entry.connected && entry.disconnectDeadline !== null && now >= entry.disconnectDeadline) {
+        entry.expiring = true;
         entry.disconnectDeadline = null;
+        await this.onExpire({ ...entry }, 'disconnected_timeout');
       }
     }
   }

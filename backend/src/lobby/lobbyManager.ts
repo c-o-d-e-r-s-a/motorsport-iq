@@ -20,6 +20,8 @@ import type {
 // In-memory lobby state cache (for fast access)
 const lobbyStates: Map<string, LobbyState> = new Map();
 const userLobbies: Map<string, string> = new Map(); // userId -> lobbyId
+const lastPersistedActivityAt: Map<string, number> = new Map();
+const DEFAULT_MAX_PLAYERS_PER_LOBBY = 50;
 
 interface LobbyRuntimeMeta {
   sessionMode: SessionMode | null;
@@ -163,8 +165,8 @@ export async function joinLobby(lobbyCode: string, username: string): Promise<{ 
     throw new Error('Lobby not found');
   }
 
-  if (lobby.status !== 'waiting') {
-    throw new Error('Game already in progress');
+  if (lobby.status === 'finished') {
+    throw new Error('This lobby has already finished');
   }
 
   // Check if username is taken
@@ -177,6 +179,21 @@ export async function joinLobby(lobbyCode: string, username: string): Promise<{ 
 
   if (existingUser) {
     throw new Error('Username already taken');
+  }
+
+  const maxPlayers = Number.parseInt(process.env.MAX_PLAYERS_PER_LOBBY ?? '', 10)
+    || DEFAULT_MAX_PLAYERS_PER_LOBBY;
+  const { count: playerCount, error: playerCountError } = await supabase
+    .from('users')
+    .select('*', { count: 'exact', head: true })
+    .eq('lobby_id', lobby.id);
+
+  if (playerCountError) {
+    throw new Error('Failed to validate lobby capacity');
+  }
+
+  if ((playerCount ?? 0) >= maxPlayers) {
+    throw new Error('Lobby is full');
   }
 
   // Create user
@@ -208,7 +225,10 @@ export async function joinLobby(lobbyCode: string, username: string): Promise<{ 
   });
 
   // Update in-memory state
-  const lobbyState = lobbyStates.get(lobby.id);
+  let lobbyState = lobbyStates.get(lobby.id);
+  if (!lobbyState) {
+    lobbyState = await getLobbyState(lobby.id);
+  }
   if (lobbyState) {
     lobbyState.players.push({
       id: user.id,
@@ -390,6 +410,17 @@ export async function touchUserActivity(userId: string): Promise<void> {
     .from('users')
     .update({ last_active_at: new Date().toISOString() })
     .eq('id', userId);
+  lastPersistedActivityAt.set(userId, Date.now());
+}
+
+export async function touchUserActivityThrottled(userId: string, minIntervalMs: number): Promise<void> {
+  const now = Date.now();
+  const lastPersisted = lastPersistedActivityAt.get(userId) ?? 0;
+  if (now - lastPersisted < minIntervalMs) {
+    return;
+  }
+
+  await touchUserActivity(userId);
 }
 
 /**
@@ -483,6 +514,7 @@ export async function removePlayer(userId: string): Promise<RemovePlayerResult |
   }
 
   userLobbies.delete(userId);
+  lastPersistedActivityAt.delete(userId);
 
   if (remainingPlayers.length === 0) {
     clearLobbyRuntimeMeta(lobbyId);
@@ -585,6 +617,7 @@ export function clearLobbyCache(lobbyId: string): void {
   if (lobbyState) {
     for (const player of lobbyState.players) {
       userLobbies.delete(player.id);
+      lastPersistedActivityAt.delete(player.id);
     }
     lobbyStates.delete(lobbyId);
   }

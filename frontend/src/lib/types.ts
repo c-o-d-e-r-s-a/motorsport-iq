@@ -246,12 +246,14 @@ export const SERVER_EVENTS = {
   SESSIONS_LIST: 'sessions_list',
   FEED_STATUS: 'feed_status',
   PRESENCE_EXPIRED: 'presence_expired',
+  LOBBY_LOOKUP: 'lobby_lookup',
   ERROR: 'error',
 } as const;
 
 export const CLIENT_EVENTS = {
   CREATE_LOBBY: 'create_lobby',
   JOIN_LOBBY: 'join_lobby',
+  LOOKUP_LOBBY: 'lookup_lobby',
   START_SESSION: 'start_session',
   SUBMIT_ANSWER: 'submit_answer',
   RECONNECT_LOBBY: 'reconnect_lobby',

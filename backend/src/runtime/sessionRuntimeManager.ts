@@ -176,6 +176,9 @@ class LiveSessionRuntime extends BaseRuntime {
       onTotalLaps: (totalLaps) => this.snapshotStore.setTotalLaps(totalLaps),
       onDriverList: (drivers) => this.snapshotStore.processDriverListUpdate(drivers),
       onStintUpdate: (stints) => this.snapshotStore.processStintUpdate(stints),
+      onCompoundUpdate: (driverNumber, compound) => {
+        this.snapshotStore.processCompoundUpdate(driverNumber, compound);
+      },
       onPitUpdate: (pits) => this.snapshotStore.processPitUpdate(pits),
       onConnectionLoss: () => {
         console.warn(`[Live Runtime] SignalR connection unstable for session ${this.sessionId}. Monitoring...`);

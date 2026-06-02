@@ -7,6 +7,7 @@ import supabase from './db/supabaseClient';
 import type {
   CreateProblemReportInput,
   Difficulty,
+  LobbyState,
   ProblemReportStatus,
   QuestionCategory,
   QuestionInstanceState,
@@ -18,6 +19,7 @@ import {
   createLobby,
   joinLobby,
   getLobbyState,
+  getLobbyByCode,
   updateLobbyStatus,
   setLobbySession,
   setLobbyRuntimeMeta,
@@ -28,6 +30,7 @@ import {
   getUserLobbyFromDatabase,
   registerUserLobby,
   touchUserActivity,
+  touchUserActivityThrottled,
 } from './lobby/lobbyManager';
 import {
   startQuestionLifecycle,
@@ -70,6 +73,9 @@ import {
 import { generateSuggestedStatKeys } from './ai/statHintGenerator';
 import { getQuestionById } from './engine/questionBank';
 import type { CorsOptions } from 'cors';
+import { metrics } from './observability/metrics';
+import { closeRedisRuntime, createRedisRuntime } from './runtime/redis';
+import { createDistributedLockManager } from './runtime/distributedLock';
 
 const app = express();
 const DEFAULT_ALLOWED_ORIGINS = [
@@ -114,6 +120,44 @@ const presenceDisconnectGraceMs = parsePositiveNumberEnv(
   process.env.PRESENCE_DISCONNECT_GRACE_MS,
   DEFAULT_PRESENCE_DISCONNECT_GRACE_MS
 );
+const presenceDbWriteMinIntervalMs = parsePositiveNumberEnv(
+  process.env.PRESENCE_DB_WRITE_MIN_INTERVAL_MS,
+  5 * 60 * 1000
+);
+const lapWorkConcurrency = parsePositiveNumberEnv(
+  process.env.LOBBY_LAP_CONCURRENCY,
+  20
+);
+const maxActiveLobbies = parsePositiveNumberEnv(
+  process.env.MAX_ACTIVE_LOBBIES,
+  500
+);
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) {
+    return;
+  }
+
+  const limit = Math.max(1, concurrency);
+  let cursor = 0;
+
+  const runners = Array.from({ length: Math.min(limit, items.length) }).map(async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) {
+        return;
+      }
+
+      await worker(items[index]);
+    }
+  });
+
+  await Promise.all(runners);
+}
 
 function isOriginAllowed(origin: string | undefined): boolean {
   if (!origin) {
@@ -151,6 +195,13 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: corsOptions,
 });
+const redisRuntime = process.env.FF_REDIS_ADAPTER === 'true'
+  ? createRedisRuntime()
+  : null;
+if (redisRuntime) {
+  io.adapter(redisRuntime.attachSocketIoAdapter);
+}
+const distributedLocks = createDistributedLockManager(redisRuntime?.pub);
 
 const PORT = process.env.PORT || 4000;
 
@@ -228,6 +279,22 @@ app.get('/health/supabase', async (req, res) => {
   } catch (err) {
     res.status(500).json({ status: 'error', error: (err as Error).message });
   }
+});
+
+app.get('/health/scaling', (_req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    targets: {
+      users500: true,
+      nextMilestoneUsers: 5000,
+    },
+    metrics: metrics.snapshot(),
+  });
+});
+
+app.get('/metrics', (_req, res) => {
+  res.json(metrics.snapshot());
 });
 
 app.post('/reports', async (req, res) => {
@@ -328,15 +395,32 @@ const sessionLookupClient = new OpenF1Client();
 const lifecycleQueue = new LobbyLifecycleQueue();
 const runtimeManager = new SessionRuntimeManager({
   onSnapshotUpdate: (snapshot, lobbyIds) => {
+    metrics.setGauge('runtime.live_lobbies', lobbyIds.size);
     broadcastRaceSnapshot(snapshot, lobbyIds);
   },
   onLapComplete: async (snapshot, lobbyIds) => {
-    for (const lobbyId of lobbyIds) {
-      await lifecycleQueue.enqueue(lobbyId, async () => {
-        await checkAndResolveQuestion(lobbyId, snapshot);
-        await checkAndTriggerQuestion(lobbyId, snapshot);
+    metrics.incrementCounter('runtime.lap_complete_events_total');
+    metrics.setGauge('runtime.lap_complete_lobby_count', lobbyIds.size);
+    const lobbyIdList = [...lobbyIds];
+    await metrics.trackAsync('runtime.lap_complete_processing_ms', async () => {
+      await runWithConcurrency(lobbyIdList, lapWorkConcurrency, async (lobbyId) => {
+        const lockKey = `lap:${lobbyId}:${snapshot.lapNumber}`;
+        const lockToken = await distributedLocks.acquire(lockKey, 20_000);
+        if (!lockToken) {
+          metrics.incrementCounter('runtime.lap_lock_skipped_total');
+          return;
+        }
+
+        await lifecycleQueue.enqueue(lobbyId, async () => {
+          await checkAndResolveQuestion(lobbyId, snapshot);
+          await checkAndTriggerQuestion(lobbyId, snapshot);
+          metrics.setGauge('runtime.lifecycle_active_lobbies', lifecycleQueue.getActiveLobbyCount());
+          metrics.setGauge('runtime.lifecycle_pending_tasks', lifecycleQueue.getPendingTaskCount());
+        }).finally(async () => {
+          await distributedLocks.release(lockKey, lockToken);
+        });
       });
-    }
+    });
   },
   onFeedStall: (stalled, lobbyIds) => {
     for (const lobbyId of lobbyIds) {
@@ -410,7 +494,8 @@ const presenceManager = new PresenceManager({
 
 async function markUserActive(userId: string): Promise<void> {
   presenceManager.markSeen(userId);
-  await touchUserActivity(userId);
+  await touchUserActivityThrottled(userId, presenceDbWriteMinIntervalMs);
+  metrics.incrementCounter('presence.ping_total');
 }
 
 /**
@@ -606,31 +691,36 @@ async function handleResolution(
     explanation: string;
   }
 ): Promise<void> {
-  // Get updated leaderboard
-  const lobbyState = await getLobbyState(lobbyId);
-  const resolutionPayload = {
-    instanceId: result.instance.id,
-    questionId: result.instance.questionId,
-    questionText: result.instance.questionText ?? '',
-    correctAnswer: result.correctAnswer,
-    outcome: result.outcome,
-    explanation: result.explanation,
-  };
-  setLatestResolution(lobbyId, resolutionPayload);
+  await metrics.trackAsync('socket.resolution_broadcast_ms', async () => {
+    // Get updated leaderboard
+    const lobbyState = await getLobbyState(lobbyId);
+    const resolutionPayload = {
+      instanceId: result.instance.id,
+      questionId: result.instance.questionId,
+      questionText: result.instance.questionText ?? '',
+      correctAnswer: result.correctAnswer,
+      outcome: result.outcome,
+      explanation: result.explanation,
+    };
+    setLatestResolution(lobbyId, resolutionPayload);
 
-  // Broadcast resolution
-  io.to(lobbyId).emit('resolution_event', resolutionPayload);
+    // Broadcast resolution
+    io.to(lobbyId).emit('resolution_event', resolutionPayload);
+    metrics.incrementCounter('socket.resolution_event_total');
 
-  // Broadcast updated leaderboard
-  if (lobbyState) {
-    io.to(lobbyId).emit('leaderboard_update', lobbyState.leaderboard);
-  }
+    // Broadcast updated leaderboard
+    if (lobbyState) {
+      io.to(lobbyId).emit('leaderboard_update', lobbyState.leaderboard);
+      metrics.incrementCounter('socket.leaderboard_update_total');
+    }
+  });
 }
 
 /**
  * Broadcast race snapshot to relevant lobbies
  */
 function broadcastRaceSnapshot(snapshot: RaceSnapshot, lobbyIds: Set<string>): void {
+  metrics.incrementCounter('socket.race_snapshot_update_total', lobbyIds.size);
   for (const lobbyId of lobbyIds) {
     io.to(lobbyId).emit('race_snapshot_update', toRaceSnapshotEvent(snapshot));
   }
@@ -652,9 +742,50 @@ function getQuestionDifficulty(questionId: string): Difficulty {
   return question?.difficulty ?? 'MEDIUM';
 }
 
+function emitSessionCatchUp(
+  socket: { emit: (event: string, payload: unknown) => void },
+  lobbyId: string,
+  lobbyState: LobbyState
+): void {
+  if (lobbyState.sessionId) {
+    const snapshot = runtimeManager.getRuntimeForLobby(lobbyId)?.getCurrentSnapshot();
+    if (snapshot) {
+      socket.emit('race_snapshot_update', toRaceSnapshotEvent(snapshot));
+    }
+  }
+
+  const activeQuestion = getActiveQuestion(lobbyId);
+  if (activeQuestion && isUnresolvedQuestionState(activeQuestion.state)) {
+    socket.emit('question_event', buildQuestionEventPayload(
+      activeQuestion,
+      getQuestionCategory(activeQuestion.questionId),
+      getQuestionDifficulty(activeQuestion.questionId),
+      {
+        answerDeadline: activeQuestion.state === 'LIVE' ? getAnswerDeadline(activeQuestion.id) : null,
+      }
+    ));
+
+    socket.emit('question_state', {
+      instanceId: activeQuestion.id,
+      state: activeQuestion.state,
+      cancelledReason: activeQuestion.cancelledReason,
+      answerDeadline: activeQuestion.state === 'LIVE'
+        ? getAnswerDeadline(activeQuestion.id)?.toISOString()
+        : undefined,
+    });
+    return;
+  }
+
+  if (lobbyState.latestResolution) {
+    socket.emit('resolution_event', lobbyState.latestResolution);
+  }
+}
+
 // Socket.io connection handling
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
+  metrics.incrementCounter('socket.connections_total');
+  metrics.setGauge('socket.active_connections', io.sockets.sockets.size);
 
   let currentUserId: string | null = null;
   let currentLobbyId: string | null = null;
@@ -664,6 +795,20 @@ io.on('connection', (socket) => {
    */
   socket.on('create_lobby', async (data: { username: string; sessionId?: string }) => {
     try {
+      const { count: activeLobbyCount, error: activeLobbyCountError } = await supabase
+        .from('lobbies')
+        .select('*', { count: 'exact', head: true })
+        .in('status', ['waiting', 'active']);
+
+      if (activeLobbyCountError) {
+        throw new Error('Unable to validate lobby capacity');
+      }
+
+      if ((activeLobbyCount ?? 0) >= maxActiveLobbies) {
+        emitSocketError(socket, 'Server is at active-lobby capacity. Try again shortly.', 'VALIDATION_ERROR');
+        return;
+      }
+
       const { lobby, user } = await createLobby(data.username, data.sessionId);
       currentUserId = user.id;
       currentLobbyId = lobby.id;
@@ -676,6 +821,28 @@ io.on('connection', (socket) => {
       socket.emit('lobby_state', lobbyState);
 
       console.log(`Lobby created: ${lobby.code} by ${data.username}`);
+      metrics.incrementCounter('lobby.created_total');
+    } catch (error) {
+      emitSocketError(socket, (error as Error).message);
+    }
+  });
+
+  /**
+   * Look up a lobby by code without joining (for share-link flows)
+   */
+  socket.on('lookup_lobby', async (data: { lobbyCode: string }) => {
+    try {
+      const lobby = await getLobbyByCode(data.lobbyCode);
+      if (!lobby) {
+        emitSocketError(socket, 'Lobby not found', 'VALIDATION_ERROR');
+        return;
+      }
+
+      socket.emit('lobby_lookup', {
+        code: lobby.code,
+        status: lobby.status,
+        id: lobby.id,
+      });
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
     }
@@ -697,6 +864,10 @@ io.on('connection', (socket) => {
       const lobbyState = await getLobbyState(lobby.id);
       socket.emit('lobby_state', lobbyState);
 
+      if (lobby.status === 'active' && lobbyState) {
+        emitSessionCatchUp(socket, lobby.id, lobbyState);
+      }
+
       // Notify others in the lobby
       socket.to(lobby.id).emit('player_joined', {
         userId: user.id,
@@ -704,6 +875,7 @@ io.on('connection', (socket) => {
       });
 
       console.log(`${data.username} joined lobby ${lobby.code}`);
+      metrics.incrementCounter('lobby.joined_total');
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
     }
@@ -816,7 +988,9 @@ io.on('connection', (socket) => {
 
       await markUserActive(currentUserId);
 
-      const result = await submitAnswer(data.instanceId, currentUserId, data.answer);
+      const result = await metrics.trackAsync('socket.submit_answer_ms', async () =>
+        submitAnswer(data.instanceId, currentUserId!, data.answer)
+      );
       console.log(
         `[ANSWER_SUBMIT] user=${currentUserId} instance=${data.instanceId} answer=${data.answer} success=${result.success}`
         + (result.error ? ` error="${result.error}"` : '')
@@ -861,43 +1035,13 @@ io.on('connection', (socket) => {
       // Send current state
       const refreshedLobbyState = await getLobbyState(lobbyId);
       socket.emit('lobby_state', refreshedLobbyState ?? lobbyState);
-      if (refreshedLobbyState) {
-        io.to(lobbyId).emit('lobby_state', refreshedLobbyState);
-      }
 
       if (lobbyState.sessionId) {
-        const snapshot = runtimeManager.getRuntimeForLobby(lobbyId)?.getCurrentSnapshot();
-        if (snapshot) {
-          socket.emit('race_snapshot_update', toRaceSnapshotEvent(snapshot));
-        }
-      }
-
-      // Send active question if any
-      const activeQuestion = getActiveQuestion(lobbyId);
-      if (activeQuestion && isUnresolvedQuestionState(activeQuestion.state)) {
-        socket.emit('question_event', buildQuestionEventPayload(
-          activeQuestion,
-          getQuestionCategory(activeQuestion.questionId),
-          getQuestionDifficulty(activeQuestion.questionId),
-          {
-            answerDeadline: activeQuestion.state === 'LIVE' ? getAnswerDeadline(activeQuestion.id) : null,
-          }
-        ));
-
-        if (activeQuestion.state !== 'LIVE') {
-          socket.emit('question_state', {
-            instanceId: activeQuestion.id,
-            state: activeQuestion.state,
-            cancelledReason: activeQuestion.cancelledReason,
-          });
-        }
-      }
-
-      if (lobbyState.latestResolution) {
-        socket.emit('resolution_event', lobbyState.latestResolution);
+        emitSessionCatchUp(socket, lobbyId, refreshedLobbyState ?? lobbyState);
       }
 
       console.log(`User ${data.userId} reconnected to lobby ${lobbyId}`);
+      metrics.incrementCounter('lobby.reconnect_total');
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
     }
@@ -924,6 +1068,7 @@ io.on('connection', (socket) => {
    */
   socket.on('get_sessions', async (data: { year?: number }) => {
     try {
+      metrics.incrementCounter('socket.get_sessions_total');
       const year = data?.year || new Date().getFullYear();
 
       const activeLiveSession = getActiveLiveCalendarSession();
@@ -970,6 +1115,8 @@ io.on('connection', (socket) => {
    */
   socket.on('disconnect', async () => {
     console.log(`Client disconnected: ${socket.id}`);
+    metrics.incrementCounter('socket.disconnect_total');
+    metrics.setGauge('socket.active_connections', io.sockets.sockets.size);
 
     const disconnectedPresence = presenceManager.markDisconnectedBySocket(socket.id);
     if (currentUserId && currentLobbyId && disconnectedPresence) {
@@ -1000,9 +1147,11 @@ process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully...');
   presenceManager.stop();
   clearAllTimers();
-  httpServer.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+  void closeRedisRuntime(redisRuntime).finally(() => {
+    httpServer.close(() => {
+      console.log('Server closed');
+      process.exit(0);
+    });
   });
 });
 
@@ -1010,9 +1159,11 @@ process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully...');
   presenceManager.stop();
   clearAllTimers();
-  httpServer.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+  void closeRedisRuntime(redisRuntime).finally(() => {
+    httpServer.close(() => {
+      console.log('Server closed');
+      process.exit(0);
+    });
   });
 });
 
@@ -1020,6 +1171,8 @@ process.on('SIGINT', () => {
 httpServer.listen(PORT, () => {
   console.log(`Motorsport IQ server running on port ${PORT}`);
   console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
+  console.log(`[SCALING] Redis adapter: ${redisRuntime ? 'enabled' : 'disabled'}`);
+  console.log(`[SCALING] Lap concurrency: ${lapWorkConcurrency}`);
 });
 
 export { io, app, httpServer };
