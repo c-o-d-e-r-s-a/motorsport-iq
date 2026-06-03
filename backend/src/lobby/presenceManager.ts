@@ -115,7 +115,9 @@ export class PresenceManager {
       }
 
       if (!entry.connected && entry.disconnectDeadline !== null && now >= entry.disconnectDeadline) {
+        // Grace elapsed without reconnect — retain entry until inactivity timeout.
         entry.disconnectDeadline = null;
+        continue;
       }
     }
   }

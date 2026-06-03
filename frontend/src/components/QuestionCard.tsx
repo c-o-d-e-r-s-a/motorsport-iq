@@ -1,6 +1,7 @@
 'use client';
 
-import { Card, Button } from '@/components/ui';
+import { Chip } from '@/components/ui';
+import { cn } from '@/lib/cn';
 import { type Difficulty, type QuestionCategory } from '@/lib/types';
 
 interface QuestionCardProps {
@@ -20,6 +21,13 @@ const CATEGORY_LABELS: Record<QuestionCategory, string> = {
   FINISH_POSITION: 'Finish Position',
 };
 
+const CATEGORY_TONE: Record<QuestionCategory, 'accent' | 'info' | 'warn' | 'go'> = {
+  OVERTAKE: 'accent',
+  PIT_WINDOW: 'info',
+  GAP_CLOSING: 'warn',
+  FINISH_POSITION: 'go',
+};
+
 const DIFFICULTY_LABELS: Record<Difficulty, string> = {
   EASY: 'Easy',
   MEDIUM: 'Medium',
@@ -34,45 +42,61 @@ export default function QuestionCard({
   disabled = false,
   answered = null,
 }: QuestionCardProps) {
+  const locked = disabled || answered !== null;
+
   return (
-    <Card tone="default" className="w-full max-w-2xl p-6 md:p-8">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <span className="border-2 border-[var(--color-border)] bg-[var(--color-muted)] px-3 py-1 font-display text-xs uppercase tracking-[0.18em]">
-          {CATEGORY_LABELS[category]}
-        </span>
-        <span className="font-display text-xs uppercase tracking-[0.22em] text-[var(--color-muted-fg)]">
-          Difficulty: {DIFFICULTY_LABELS[difficulty]}
+    <div className="flex w-full flex-col">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <Chip tone={CATEGORY_TONE[category]}>{CATEGORY_LABELS[category]}</Chip>
+        <span className="text-xs font-medium uppercase tracking-wide text-[var(--color-faint-fg)]">
+          {DIFFICULTY_LABELS[difficulty]}
         </span>
       </div>
 
-      <h2 className="font-display text-3xl uppercase leading-tight tracking-tight md:text-4xl">{questionText}</h2>
+      <h2 className="font-display text-[1.9rem] font-semibold leading-[1.08] tracking-tight text-[var(--color-fg)] sm:text-4xl">
+        {questionText}
+      </h2>
 
-      <div className="mt-8 grid grid-cols-2 gap-3">
-        <Button
-          variant={answered === 'NO' ? 'ghost' : 'primary'}
-          size="lg"
-          className="w-full"
+      <div className="mt-7 grid grid-cols-2 gap-3">
+        <button
+          type="button"
           onClick={() => onSubmit('YES')}
-          disabled={disabled || answered !== null}
+          disabled={locked}
+          className={cn(
+            'flex h-[72px] items-center justify-center rounded-[var(--radius)] font-display text-2xl font-bold uppercase tracking-wide transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)] active:scale-[0.98]',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-go)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]',
+            answered === 'YES'
+              ? 'bg-[var(--color-go)] text-[#04130b] shadow-[0_8px_30px_var(--color-go-soft)]'
+              : answered === 'NO'
+                ? 'bg-[var(--color-muted)] text-[var(--color-faint-fg)] opacity-50'
+                : 'bg-[var(--color-go)] text-[#04130b] hover:brightness-110 disabled:opacity-60'
+          )}
         >
-          YES
-        </Button>
-        <Button
-          variant={answered === 'YES' ? 'ghost' : 'secondary'}
-          size="lg"
-          className="w-full"
+          Yes
+        </button>
+        <button
+          type="button"
           onClick={() => onSubmit('NO')}
-          disabled={disabled || answered !== null}
+          disabled={locked}
+          className={cn(
+            'flex h-[72px] items-center justify-center rounded-[var(--radius)] font-display text-2xl font-bold uppercase tracking-wide transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)] active:scale-[0.98]',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]',
+            answered === 'NO'
+              ? 'bg-[var(--color-accent)] text-white shadow-[var(--shadow-accent)]'
+              : answered === 'YES'
+                ? 'bg-[var(--color-muted)] text-[var(--color-faint-fg)] opacity-50'
+                : 'border border-[var(--color-border-strong)] bg-[var(--color-elevated)] text-[var(--color-fg)] hover:border-[var(--color-accent)] disabled:opacity-60'
+          )}
         >
-          NO
-        </Button>
+          No
+        </button>
       </div>
 
       {answered && (
-        <p className="mt-4 border-t-2 border-[var(--color-border)] pt-4 font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-          Submitted Answer: <span className="text-[var(--color-fg)]">{answered}</span>
+        <p className="mt-4 text-center text-sm text-[var(--color-muted-fg)]">
+          Locked in: <span className="font-semibold text-[var(--color-fg)]">{answered}</span>
         </p>
       )}
-    </Card>
+    </div>
   );
 }

@@ -25,6 +25,9 @@ class SocketClient {
   private socket: Socket | null = null;
   private listeners: Map<string, Set<Listener>> = new Map();
   private lastError: ConnectionError | null = null;
+  private lastReconnectLobby = { userId: '', at: 0 };
+  private sessionsPollInterval: number | null = null;
+  private sessionsPollYear: number | null = null;
 
   connect(): Socket {
     if (this.socket) {
@@ -152,6 +155,10 @@ class SocketClient {
       this.emit(SERVER_EVENTS.PLAYER_DISCONNECTED, data);
     });
 
+    this.socket.on(SERVER_EVENTS.PLAYER_RECONNECTED, (data: { userId: string }) => {
+      this.emit(SERVER_EVENTS.PLAYER_RECONNECTED, data);
+    });
+
     this.socket.on(SERVER_EVENTS.ANSWER_RECEIVED, (data: { instanceId: string }) => {
       this.emit(SERVER_EVENTS.ANSWER_RECEIVED, data);
     });
@@ -202,20 +209,64 @@ class SocketClient {
     this.socket?.emit(CLIENT_EVENTS.JOIN_LOBBY, { lobbyCode, username });
   }
 
-  startSession(lobbyId: string, sessionId: string, userId?: string | null): void {
-    this.socket?.emit(CLIENT_EVENTS.START_SESSION, { lobbyId, sessionId, userId });
+  lookupLobby(lobbyCode: string): void {
+    this.socket?.emit(CLIENT_EVENTS.LOOKUP_LOBBY, { lobbyCode });
+  }
+
+  startSession(
+    lobbyId: string,
+    sessionId: string,
+    userId?: string | null,
+    options?: { replaySpeed?: number | null }
+  ): void {
+    this.socket?.emit(CLIENT_EVENTS.START_SESSION, {
+      lobbyId,
+      sessionId,
+      userId,
+      replaySpeed: options?.replaySpeed ?? null,
+    });
+  }
+
+  startSimulation(data: { username: string; sessionKey?: number }): void {
+    this.socket?.emit(CLIENT_EVENTS.START_SIMULATION, data);
   }
 
   submitAnswer(instanceId: string, answer: 'YES' | 'NO'): void {
     this.socket?.emit(CLIENT_EVENTS.SUBMIT_ANSWER, { instanceId, answer });
   }
 
-  reconnectLobby(userId: string): void {
+  reconnectLobby(userId: string, options?: { dedupeWindowMs?: number }): void {
+    const dedupeWindowMs = options?.dedupeWindowMs ?? 2000;
+    const now = Date.now();
+    if (
+      this.lastReconnectLobby.userId === userId
+      && now - this.lastReconnectLobby.at < dedupeWindowMs
+    ) {
+      return;
+    }
+
+    this.lastReconnectLobby = { userId, at: now };
     this.socket?.emit(CLIENT_EVENTS.RECONNECT_LOBBY, { userId });
   }
 
   getSessions(year?: number): void {
     this.socket?.emit(CLIENT_EVENTS.GET_SESSIONS, { year });
+  }
+
+  startSessionsPolling(year: number, intervalMs = 60_000): void {
+    this.stopSessionsPolling();
+    this.sessionsPollYear = year;
+    this.getSessions(year);
+    this.sessionsPollInterval = window.setInterval(() => {
+      this.getSessions(this.sessionsPollYear ?? year);
+    }, intervalMs);
+  }
+
+  stopSessionsPolling(): void {
+    if (this.sessionsPollInterval) {
+      window.clearInterval(this.sessionsPollInterval);
+      this.sessionsPollInterval = null;
+    }
   }
 
   leaveLobby(): void {

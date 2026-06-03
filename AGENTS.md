@@ -133,10 +133,10 @@ motorsport-iq/
 ## 📡 Socket.io Events
 
 **Server → Client:**
-`lobby_state`, `question_event`, `question_text_update`, `question_state`, `question_locked`, `question_cancelled`, `resolution_event`, `leaderboard_update`, `race_snapshot_update`, `feed_status`, `presence_expired`, `sessions_list`, `error`
+`lobby_state`, `question_event`, `question_text_update`, `question_state`, `question_locked`, `question_cancelled`, `resolution_event`, `leaderboard_update`, `race_snapshot_update`, `feed_status`, `presence_expired`, `sessions_list`, `player_joined`, `player_left`, `player_disconnected`, `player_reconnected`, `error`
 
 **Client → Server:**
-`create_lobby`, `join_lobby`, `leave_lobby`, `start_session`, `submit_answer`, `reconnect_lobby`, `presence_ping`, `get_sessions`
+`create_lobby`, `join_lobby`, `leave_lobby`, `start_session`, `start_simulation`, `submit_answer`, `reconnect_lobby`, `presence_ping`, `get_sessions`
 
 ---
 

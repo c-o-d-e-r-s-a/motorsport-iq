@@ -258,6 +258,7 @@ export interface LobbyState {
   sessionMode: SessionMode | null;
   replaySpeed: number | null;
   isReplayComplete: boolean;
+  isSimulation: boolean;
   players: PlayerState[];
   currentQuestion: QuestionInstanceState | null;
   latestResolution: ResolutionEvent | null;
@@ -322,7 +323,7 @@ export interface QuestionStateEvent {
 
 export interface ServerErrorEvent {
   message: string;
-  code?: 'SESSION_EXPIRED' | 'TRANSIENT_CONNECTION' | 'VALIDATION_ERROR' | 'UNKNOWN';
+  code?: 'SESSION_EXPIRED' | 'TRANSIENT_CONNECTION' | 'VALIDATION_ERROR' | 'FORBIDDEN' | 'UNKNOWN';
 }
 
 export interface ResolutionEvent {

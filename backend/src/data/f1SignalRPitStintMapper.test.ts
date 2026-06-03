@@ -1,7 +1,9 @@
 import {
   detectPitStopsFromTimingLine,
+  extractActiveCompoundsFromTimingAppData,
   mapPitLaneTimeCollectionToPits,
   mapTimingAppDataToStints,
+  normalizeCompound,
 } from './f1SignalRPitStintMapper';
 
 describe('f1SignalRPitStintMapper', () => {
@@ -54,6 +56,24 @@ describe('f1SignalRPitStintMapper', () => {
       lap_start: 1,
       lap_end: null,
       compound: 'HARD',
+    });
+  });
+
+  it('maps carried-over tyres from StartLaps when New is false', () => {
+    const stints = mapTimingAppDataToStints(
+      {
+        '16': {
+          Stints: [{ Compound: 'MEDIUM', TotalLaps: 12, New: false, StartLaps: 7 }],
+        },
+      },
+      '2026-05-24T18:30:00.000Z'
+    );
+
+    expect(stints).toHaveLength(1);
+    expect(stints[0]).toMatchObject({
+      driver_number: 16,
+      compound: 'MEDIUM',
+      tyre_age_at_start: 7,
     });
   });
 
@@ -118,5 +138,30 @@ describe('f1SignalRPitStintMapper', () => {
       lap_number: 18,
       pit_duration: 2.4,
     });
+  });
+
+  it('normalizes C1/C2/C3 compound codes', () => {
+    expect(normalizeCompound('C1')).toBe('HARD');
+    expect(normalizeCompound('c2')).toBe('MEDIUM');
+    expect(normalizeCompound('C3')).toBe('SOFT');
+  });
+
+  it('extracts active stint compounds from TimingAppData lines', () => {
+    const compounds = extractActiveCompoundsFromTimingAppData({
+      '1': {
+        Stints: {
+          '0': { Compound: 'SOFT', TotalLaps: 18, New: true },
+          '1': { Compound: 'MEDIUM', TotalLaps: 6, New: true },
+        },
+      },
+      '44': {
+        Stints: [{ Compound: 'HARD', TotalLaps: 12, New: 'true' }],
+      },
+    });
+
+    expect(compounds).toEqual([
+      { driverNumber: 1, compound: 'MEDIUM' },
+      { driverNumber: 44, compound: 'HARD' },
+    ]);
   });
 });

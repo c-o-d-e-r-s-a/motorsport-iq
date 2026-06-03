@@ -1,99 +1,23 @@
 import type { OpenF1Session } from '../types';
+import { SCHEDULE_OVERRIDES } from './scheduleOverrides';
+import {
+  getActiveLivePlayableSession,
+  getCachedSeasonSession,
+  getCachedSeasonSessions,
+} from './seasonCalendarStore';
 
-// ─── Hardcoded F1 weekend calendar fallback ──────────────────────────────────
+// ─── Season schedule ─────────────────────────────────────────────────────────
 //
-// OpenF1's /sessions endpoint can return stale or partial data while a race
-// weekend is in progress, and its data endpoints are auth-gated during live
-// sessions (the OPENF1_API_KEY route we deliberately don't use). The calendar
-// below provides a stable list of sessions for the current weekend so the
-// home page can flip UPCOMING → LIVE → FINISHED on schedule even if OpenF1
-// is unreachable. Sessions exposed here also serve as `OpenF1Session` records
-// for `attachLobbyToSession` (LiveSessionRuntime hits the F1 SignalR feed for
-// real-time data, so the underlying `session_key` value doesn't need to map
-// to OpenF1).
+// The full F1 season is loaded from OpenF1 `/sessions` at startup and refreshed
+// every six hours (see seasonCalendarStore.ts). That cache drives live-window
+// detection so we never depend on OpenF1 telemetry endpoints during a race.
 //
-// ⚠️  Keep this short and rolling — bump it at the start of each weekend.
+// Add entries here only when OpenF1 times are wrong and you need an emergency
+// override for a specific session.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CANADIAN_GP_2026: OpenF1Session[] = [
-  // Sprint Qualifying — Friday 22 May 2026, 16:30-17:14 EDT (UTC-4)
-  {
-    session_key: 99001,
-    meeting_key: 99000,
-    location: 'Montréal',
-    session_type: 'Qualifying',
-    session_name: 'Sprint Qualifying',
-    date_start: '2026-05-22T20:30:00+00:00',
-    date_end: '2026-05-22T21:14:00+00:00',
-    country_key: 46,
-    country_code: 'CAN',
-    country_name: 'Canada',
-    circuit_key: 23,
-    circuit_short_name: 'Montréal',
-    year: 2026,
-  },
-  // Sprint Race — Saturday 23 May 2026, 12:00-13:00 EDT (16:00-17:00 UTC)
-  {
-    session_key: 99002,
-    meeting_key: 99000,
-    location: 'Montréal',
-    session_type: 'Race',
-    session_name: 'Sprint',
-    date_start: '2026-05-23T16:00:00+00:00',
-    date_end: '2026-05-23T17:00:00+00:00',
-    country_key: 46,
-    country_code: 'CAN',
-    country_name: 'Canada',
-    circuit_key: 23,
-    circuit_short_name: 'Montréal',
-    year: 2026,
-  },
-  // Qualifying — Saturday 23 May 2026, 16:00-17:00 EDT
-  {
-    session_key: 99003,
-    meeting_key: 99000,
-    location: 'Montréal',
-    session_type: 'Qualifying',
-    session_name: 'Qualifying',
-    date_start: '2026-05-23T20:00:00+00:00',
-    date_end: '2026-05-23T21:00:00+00:00',
-    country_key: 46,
-    country_code: 'CAN',
-    country_name: 'Canada',
-    circuit_key: 23,
-    circuit_short_name: 'Montréal',
-    year: 2026,
-  },
-  // Grand Prix — Sunday 24 May 2026, 16:00-18:00 EDT (20:00-22:00 UTC)
-  {
-    session_key: 99004,
-    meeting_key: 99000,
-    location: 'Montréal',
-    session_type: 'Race',
-    session_name: 'Race',
-    date_start: '2026-05-24T20:00:00+00:00',
-    date_end: '2026-05-24T22:00:00+00:00',
-    country_key: 46,
-    country_code: 'CAN',
-    country_name: 'Canada',
-    circuit_key: 23,
-    circuit_short_name: 'Montréal',
-    year: 2026,
-  },
-];
-
-const CALENDAR: OpenF1Session[] = [...CANADIAN_GP_2026];
-
-/** Calendar-only keys — valid for live SignalR, not for OpenF1 replay telemetry. */
-export const CALENDAR_PLACEHOLDER_SESSION_KEY_MIN = 99000;
-
-const SESSION_LOOKUP = new Map<number, OpenF1Session>(
-  CALENDAR.map((session) => [session.session_key, session])
-);
-
-export function isCalendarPlaceholderKey(sessionKey: number): boolean {
-  return sessionKey >= CALENDAR_PLACEHOLDER_SESSION_KEY_MIN;
-}
+/** Canadian GP 2026 Race — default dev simulation session when telemetry exists. */
+export const DEFAULT_SIMULATION_SESSION_KEY = 11291;
 
 function normalizeLabel(value: string): string {
   return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
@@ -124,49 +48,47 @@ export function findMatchingOpenF1Session(
   return openf1Sessions.find((session) => sessionsMatch(calendarSession, session)) ?? null;
 }
 
-/** Swap a calendar placeholder to the real OpenF1 session_key for replay fetches. */
 export function resolveSessionForReplay(
   session: OpenF1Session,
   openf1Sessions: OpenF1Session[]
 ): OpenF1Session {
-  if (!isCalendarPlaceholderKey(session.session_key)) {
-    return session;
-  }
-
   return findMatchingOpenF1Session(session, openf1Sessions) ?? session;
 }
 
-function pickPreferredWeekendSession(candidates: OpenF1Session[], now: number): OpenF1Session {
-  const placeholders = candidates.filter((session) => isCalendarPlaceholderKey(session.session_key));
-  const openf1Sessions = candidates.filter((session) => !isCalendarPlaceholderKey(session.session_key));
-
-  if (placeholders.length === 0) {
-    return candidates[0];
+function applyScheduleOverrides(sessions: OpenF1Session[]): OpenF1Session[] {
+  if (SCHEDULE_OVERRIDES.length === 0) {
+    return sessions.slice();
   }
 
-  const calendarSession = placeholders[0];
-  const start = new Date(calendarSession.date_start).getTime();
-  const end = new Date(calendarSession.date_end).getTime();
-  const isLive = start <= now && now < end;
-
-  // Live timing windows follow the hardcoded calendar; replays need OpenF1 keys.
-  if (isLive) {
-    return calendarSession;
+  const merged = sessions.slice();
+  for (const override of SCHEDULE_OVERRIDES) {
+    const index = merged.findIndex((session) => sessionsMatch(session, override));
+    if (index >= 0) {
+      merged[index] = override;
+    } else {
+      merged.push(override);
+    }
   }
 
-  const matched = findMatchingOpenF1Session(calendarSession, openf1Sessions);
-  if (matched) {
-    return matched;
-  }
-
-  return calendarSession;
+  return merged.sort(
+    (a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime()
+  );
 }
 
-/**
- * Collapse calendar + OpenF1 duplicates for the same weekend day. Calendar
- * metadata wins while a session is live; completed replays expose the real
- * OpenF1 session_key so telemetry fetches do not 404.
- */
+function pickPreferredWeekendSession(candidates: OpenF1Session[], now: number): OpenF1Session {
+  const liveCandidate = candidates.find((session) => {
+    const start = new Date(session.date_start).getTime();
+    const end = new Date(session.date_end).getTime();
+    return start <= now && now < end;
+  });
+
+  if (liveCandidate) {
+    return liveCandidate;
+  }
+
+  return candidates.sort((a, b) => a.session_key - b.session_key)[0];
+}
+
 export function dedupeWeekendSessions(
   sessions: OpenF1Session[],
   now: number = Date.now()
@@ -185,56 +107,84 @@ export function dedupeWeekendSessions(
 }
 
 export function getCalendarSessions(year?: number): OpenF1Session[] {
-  if (year === undefined) return CALENDAR.slice();
-  return CALENDAR.filter((session) => session.year === year);
+  const cached = getCachedSeasonSessions(year);
+  const filtered = year === undefined
+    ? cached
+    : cached.filter((session) => session.year === year);
+  const merged = applyScheduleOverrides(filtered);
+  return year === undefined
+    ? merged
+    : merged.filter((session) => session.year === year);
 }
 
 export function getCalendarSession(sessionKey: number): OpenF1Session | null {
-  return SESSION_LOOKUP.get(sessionKey) ?? null;
+  const override = SCHEDULE_OVERRIDES.find((session) => session.session_key === sessionKey);
+  if (override) {
+    return override;
+  }
+
+  return getCachedSeasonSession(sessionKey);
 }
 
 /**
- * Returns the calendar session whose start/end window contains `now`, if any.
- * Used to short-circuit OpenF1 calls during live race weekends (OpenF1's data
- * endpoints return 401 "Live F1 session in progress" until the chequered flag).
+ * Returns the Race/Sprint session whose start/end window contains `now`, if any.
+ * Reads from the in-memory season cache so live detection never calls OpenF1
+ * telemetry endpoints (they return 401 during live sessions).
  */
 export function getActiveLiveCalendarSession(now: number = Date.now()): OpenF1Session | null {
-  for (const session of CALENDAR) {
-    const start = new Date(session.date_start).getTime();
-    const end = new Date(session.date_end).getTime();
+  for (const override of SCHEDULE_OVERRIDES) {
+    if (!['Race', 'Sprint'].includes(override.session_name)) {
+      continue;
+    }
+
+    const start = new Date(override.date_start).getTime();
+    const end = new Date(override.date_end).getTime();
     if (start <= now && now < end) {
-      return session;
+      return override;
     }
   }
-  return null;
+
+  return getActiveLivePlayableSession(now);
 }
+
+const CIRCUIT_RACE_LAPS: Record<string, number> = {
+  montreal: 70,
+  montréal: 70,
+};
 
 /** Estimated scheduled distance until LapCount arrives from the live feed. */
 export function getScheduledLaps(session: OpenF1Session): number | null {
   if (session.session_name === 'Sprint') {
     return 20;
   }
+
   if (session.session_name === 'Race') {
-    if (session.circuit_short_name === 'Montréal') {
-      return 70;
-    }
-    return 57;
+    const circuit = normalizeLabel(session.circuit_short_name);
+    return CIRCUIT_RACE_LAPS[circuit] ?? 57;
   }
+
   return null;
 }
 
 /**
- * Merge OpenF1 sessions with the local calendar. Calendar entries win on
- * conflict (same session_key) so live-weekend metadata stays authoritative
- * even when OpenF1 returns a stale draft of the same session.
+ * Merge freshly fetched OpenF1 sessions with the cached season schedule.
+ * Cached entries win on session_key conflict so live-weekend metadata stays
+ * stable even when OpenF1 returns a stale draft of the same session.
  */
 export function mergeWithCalendar(openf1Sessions: OpenF1Session[], year?: number): OpenF1Session[] {
   const calendarForYear = getCalendarSessions(year);
+  if (calendarForYear.length === 0) {
+    return applyScheduleOverrides(openf1Sessions).sort(
+      (a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime()
+    );
+  }
+
   const calendarKeys = new Set(calendarForYear.map((session) => session.session_key));
   const merged = [
     ...calendarForYear,
     ...openf1Sessions.filter((session) => !calendarKeys.has(session.session_key)),
   ];
+
   return merged.sort(
     (a, b) => new Date(a.date_start).getTime() - new Date(b.date_start).getTime()
   );

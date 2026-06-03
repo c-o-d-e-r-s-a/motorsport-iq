@@ -5,11 +5,17 @@ import { useParams, useRouter } from 'next/navigation';
 import QuestionCard from '@/components/QuestionCard';
 import CountdownTimer from '@/components/CountdownTimer';
 import Leaderboard from '@/components/Leaderboard';
-
-import RaceConditionBadge from '@/components/RaceConditionBadge';
+import RaceHud from '@/components/RaceHud';
 import TireStats from '@/components/TireStats';
 import WinnerScreen from '@/components/WinnerScreen';
 import { getSocketClient } from '@/lib/socket';
+import {
+  applyPlayerDisconnected,
+  applyPlayerJoined,
+  applyPlayerLeft,
+  applyPlayerReconnected,
+} from '@/lib/lobbyPlayerDeltas';
+import { cn } from '@/lib/cn';
 import { apiFetch } from '@/lib/api';
 import { useQuestionSound } from '@/hooks/useQuestionSound';
 import { useAnswerOutcomeSounds } from '@/hooks/useAnswerOutcomeSounds';
@@ -28,7 +34,7 @@ import {
   type ServerErrorEvent,
   type StatHintKey,
 } from '@/lib/types';
-import { Button, Card, SectionLabel, ThemeToggle } from '@/components/ui';
+import { Button, Brand, Card, Chip, Input } from '@/components/ui';
 
 const REPORT_REASON_OPTIONS: Array<{ value: ProblemReportReason; label: string }> = [
   { value: 'WRONG_ANSWER', label: 'Wrong Answer' },
@@ -65,6 +71,12 @@ export default function GamePage() {
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [isLeaving, setIsLeaving] = useState(false);
   const [localCorrectAnswers, setLocalCorrectAnswers] = useState<number>(0);
+  const [joinUsername, setJoinUsername] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return localStorage.getItem('msp_username') ?? '';
+  });
+  const [showJoinForm, setShowJoinForm] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
 
   const { playSound } = useQuestionSound('/sounds/question-alert.mp3');
   const { playCorrectSound, playWrongSound } = useAnswerOutcomeSounds();
@@ -75,6 +87,7 @@ export default function GamePage() {
   const currentQuestionRef = useRef<QuestionEvent | null>(null);
   const questionStateRef = useRef<QuestionState | null>(null);
   const submittedAnswersRef = useRef<Record<string, 'YES' | 'NO'>>({});
+  const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
   useEffect(() => {
@@ -88,6 +101,10 @@ export default function GamePage() {
   useEffect(() => {
     submittedAnswersRef.current = submittedAnswers;
   }, [submittedAnswers]);
+
+  useEffect(() => {
+    joinUsernameRef.current = joinUsername;
+  }, [joinUsername]);
 
   const hydrateQuestionFromLobby = useEffectEvent((state: LobbyState) => {
     const question = state.currentQuestion;
@@ -142,8 +159,8 @@ export default function GamePage() {
 
     if (isSessionExpired) {
       localStorage.removeItem('msp_user_id');
-      setConnectionNotice('Session expired. Redirecting to lobby join.');
-      router.push('/');
+      setShowJoinForm(true);
+      setConnectionNotice('Enter your driver name to rejoin this session.');
       return;
     }
 
@@ -188,8 +205,17 @@ export default function GamePage() {
       socket.on('connected', () => {
         setIsSocketConnected(true);
         setConnectionNotice(null);
-        if (currentUserId) {
-          socket.reconnectLobby(currentUserId);
+        const storedUserId = localStorage.getItem('msp_user_id');
+        if (storedUserId) {
+          socket.reconnectLobby(storedUserId);
+          return;
+        }
+
+        socket.lookupLobby(lobbyCode);
+      }),
+      socket.on(SERVER_EVENTS.LOBBY_LOOKUP, () => {
+        if (!localStorage.getItem('msp_user_id')) {
+          setShowJoinForm(true);
         }
       }),
       socket.on('disconnected', () => {
@@ -205,6 +231,17 @@ export default function GamePage() {
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);
         setLeaderboard(state.leaderboard);
+        setShowJoinForm(false);
+        setIsJoining(false);
+
+        const storedUsername = localStorage.getItem('msp_username');
+        const joinedUser = state.players.find(
+          (player) => player.username === joinUsernameRef.current.trim() || player.username === storedUsername
+        );
+        if (joinedUser) {
+          localStorage.setItem('msp_user_id', joinedUser.id);
+          localStorage.setItem('msp_username', joinedUser.username);
+        }
         if (state.currentQuestion) {
           const current = currentQuestionRef.current;
           const currentState = questionStateRef.current;
@@ -318,6 +355,19 @@ export default function GamePage() {
         setSuggestedStatKeys(data.suggestedStatKeys ?? []);
       }),
       socket.on(SERVER_EVENTS.RESOLUTION_EVENT, (event: ResolutionEvent) => {
+        const activeQuestion = currentQuestionRef.current;
+        const activeState = questionStateRef.current;
+        const hasUnresolvedQuestion = Boolean(
+          activeQuestion
+          && activeState
+          && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(activeState)
+          && activeQuestion.instanceId !== event.instanceId
+        );
+
+        if (hasUnresolvedQuestion) {
+          return;
+        }
+
         // Deduplicate: skip if already processed this resolution
         if (processedResolutionIds.current.has(event.instanceId)) {
           console.log(`[RESOLUTION] Skipping duplicate for ${event.instanceId}`);
@@ -361,22 +411,44 @@ export default function GamePage() {
       socket.on(SERVER_EVENTS.FEED_STATUS, ({ stalled }: { stalled: boolean }) => {
         setFeedStalled(stalled);
       }),
-      socket.on(SERVER_EVENTS.ERROR, handleSocketError),
+      socket.on(SERVER_EVENTS.PLAYER_JOINED, (data: { userId: string; username: string }) => {
+        setLobbyState((prev) => (prev ? applyPlayerJoined(prev, data) : prev));
+      }),
+      socket.on(SERVER_EVENTS.PLAYER_LEFT, (data: { userId: string }) => {
+        setLobbyState((prev) => (prev ? applyPlayerLeft(prev, data) : prev));
+      }),
+      socket.on(SERVER_EVENTS.PLAYER_DISCONNECTED, (data: { userId: string }) => {
+        setLobbyState((prev) => (prev ? applyPlayerDisconnected(prev, data) : prev));
+      }),
+      socket.on(SERVER_EVENTS.PLAYER_RECONNECTED, (data: { userId: string }) => {
+        setLobbyState((prev) => (prev ? applyPlayerReconnected(prev, data) : prev));
+      }),
+      socket.on(SERVER_EVENTS.ERROR, (payload: ServerErrorEvent) => {
+        if (payload.code === 'VALIDATION_ERROR' && payload.message.toLowerCase().includes('lobby not found')) {
+          setError('Lobby not found');
+          return;
+        }
+        handleSocketError(payload);
+      }),
       socket.on(SERVER_EVENTS.PRESENCE_EXPIRED, () => {
         localStorage.removeItem('msp_user_id');
         router.push('/');
       }),
     ];
 
-    const userId = localStorage.getItem('msp_user_id');
-    if (userId) {
-      socket.reconnectLobby(userId);
+    if (socket.isConnected()) {
+      const userId = localStorage.getItem('msp_user_id');
+      if (userId) {
+        socket.reconnectLobby(userId);
+      } else {
+        socket.lookupLobby(lobbyCode);
+      }
     }
 
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [currentUserId, playCorrectSound, playSound, playWrongSound, router]);
+  }, [lobbyCode, playCorrectSound, playSound, playWrongSound, router]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -387,7 +459,7 @@ export default function GamePage() {
     socket.sendPresencePing();
     const interval = window.setInterval(() => {
       socket.sendPresencePing();
-    }, 60_000);
+    }, 90_000);
 
     return () => {
       window.clearInterval(interval);
@@ -479,7 +551,18 @@ export default function GamePage() {
   const resolvedAnswer = resolution ? submittedAnswers[resolution.instanceId] ?? null : null;
   const resolvedAnswerIsCorrect = resolvedAnswer !== null && resolvedAnswer === resolution?.correctAnswer;
   const hasRaceCompleted = raceCompletedLap !== null;
-  const showWinnerScreen = hasRaceCompleted && !currentQuestion && lobbyState?.status === 'finished';
+  const hasActiveQuestion = Boolean(
+    currentQuestion
+    && questionState
+    && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(questionState)
+  );
+  const raceHasEnded = Boolean(
+    hasRaceCompleted
+    || raceSnapshot?.trackStatus === 'CHEQUERED'
+    || raceSnapshot?.isReplayComplete
+    || lobbyState?.status === 'finished'
+  );
+  const showWinnerScreen = raceHasEnded && !hasActiveQuestion;
   const tireStatsHighlighted = suggestedStatKeys.some((key) => (
     key === 'TYRE_COMPOUND' || key === 'TYRE_AGE' || key === 'STINT_NUMBER'
   ));
@@ -487,315 +570,332 @@ export default function GamePage() {
     currentQuestion && ['TRIGGERED', 'LOCKED', 'ACTIVE'].includes(questionState ?? '')
   );
 
-  if (!lobbyState) {
+  const handleJoinSession = useCallback(() => {
+    if (!joinUsername.trim()) {
+      setError('Please enter a username');
+      return;
+    }
+
+    setError(null);
+    setIsJoining(true);
+    localStorage.setItem('msp_username', joinUsername.trim());
+    getSocketClient().joinLobby(lobbyCode, joinUsername.trim());
+  }, [joinUsername, lobbyCode]);
+
+  if (showJoinForm && !lobbyState) {
     return (
-      <main className="app-shell flex items-center justify-center">
-        <p className="font-display text-2xl uppercase tracking-[0.14em]">Connecting to Race…</p>
+      <main className="app-bg pad-safe-top pad-safe-bottom flex min-h-dvh items-center justify-center p-5">
+        <Card tone="elevated" className="w-full max-w-md animate-fade-up rounded-[var(--radius-lg)]">
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-accent)]">Join the race</p>
+          <h1 className="mt-2 font-display text-5xl font-bold uppercase tracking-tight">{lobbyCode}</h1>
+          <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
+            This race is already underway. Enter your driver name to jump in.
+          </p>
+          <Input
+            id="game-join-name"
+            label="Driver name"
+            value={joinUsername}
+            onChange={(event) => setJoinUsername(event.target.value)}
+            placeholder="Your name"
+            className="mt-5"
+          />
+          {error && (
+            <p className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-4 py-3 text-sm font-medium text-[var(--color-accent)]">
+              {error}
+            </p>
+          )}
+          <Button onClick={handleJoinSession} disabled={isJoining} size="lg" className="mt-6 w-full">
+            {isJoining ? 'Joining…' : 'Join race'}
+          </Button>
+        </Card>
       </main>
     );
   }
 
-  return (
-    <main className="app-shell swiss-noise relative">
-      <div className="mx-auto w-full max-w-[1400px] px-4 py-6 md:px-8">
-        <header className="mb-6 grid gap-4 border-2 border-[var(--color-border)] bg-[var(--color-muted)] p-5 md:grid-cols-[1fr_auto] md:p-6">
-          <div>
-            <SectionLabel
-              index="04"
-              label={lobbyState.sessionMode === 'replay' ? 'Replay Session' : 'Live Session'}
-            />
-            <h1 className="mt-2 font-display text-4xl uppercase leading-none tracking-tight md:text-6xl">
-              Lobby {lobbyCode}
-            </h1>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {!isSocketConnected && (
-                <span className="border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1 font-display text-xs uppercase tracking-[0.15em]">
-                  Reconnecting…
-                </span>
-              )}
-              {raceSnapshot && (
-                <>
-                  <span className="border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1 font-display text-xs uppercase tracking-[0.15em]">
-                    {hasRaceCompleted
-                      ? `LAP ${raceCompletedLap}: RACE COMPLETED :checkered_flag:`
-                      : `Lap ${raceSnapshot.lapNumber}${raceSnapshot.totalLaps ? ` / ${raceSnapshot.totalLaps}` : ''}`}
-                  </span>
-                  <RaceConditionBadge
-                    status={raceSnapshot.trackStatus}
-                    highlighted={suggestedStatKeys.includes('TRACK_STATUS')}
-                  />
-                  <span className="border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1 font-display text-xs uppercase tracking-[0.15em]">
-                    Leader {raceSnapshot.leader}
-                  </span>
-                  {raceSnapshot.sessionMode === 'replay' && (
-                    <span className="border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1 font-display text-xs uppercase tracking-[0.15em]">
-                      Replay {raceSnapshot.replaySpeed}x
-                    </span>
-                  )}
-                  {raceSnapshot.isReplayComplete && (
-                    <span className="border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)] px-3 py-1 font-display text-xs uppercase tracking-[0.15em]">
-                      Replay Complete
-                    </span>
-                  )}
-                </>
-              )}
-              {feedStalled && (
-                <span className="border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)] px-3 py-1 font-display text-xs uppercase tracking-[0.15em]">
-                  Feed Stalled
-                </span>
-              )}
-            </div>
-            <p className="mt-3 max-w-3xl font-body text-sm text-[var(--color-muted-fg)]">
-              {lobbyState.sessionMode === 'replay'
-                ? 'This session is running from OpenF1 historical telemetry at 10x speed. The server watches the replay for question-bank triggers, then Groq/Llama rewrites the prompt and explains each resolution.'
-                : 'This session follows live telemetry. Questions appear only when the server-side trigger engine finds a valid race situation.'}
-            </p>
-            {connectionNotice && (
-              <p className="mt-3 border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 font-display text-[11px] uppercase tracking-[0.14em]">
-                {connectionNotice}
-              </p>
-            )}
+  if (!lobbyState) {
+    return (
+      <main className="app-bg flex min-h-dvh flex-col items-center justify-center gap-4">
+        <span className="h-10 w-10 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+        <p className="font-display text-lg uppercase tracking-wide text-[var(--color-muted-fg)]">Connecting to race…</p>
+      </main>
+    );
+  }
 
-          </div>
-          <div className="flex flex-wrap gap-2 md:justify-end">
-            <ThemeToggle />
-            <Button variant="ghost" onClick={handleLeaveSession} disabled={isLeaving}>
-              {isLeaving ? 'Leaving…' : 'Leave Session'}
+  const myScore = resolution?.scores?.find((score) => score.userId === currentUserId) ?? null;
+  const leaderboardForDisplay = currentUserId
+    ? leaderboard.map((entry) =>
+        entry.userId === currentUserId ? { ...entry, correctAnswers: localCorrectAnswers } : entry
+      )
+    : leaderboard;
+
+  return (
+    <main className="app-bg relative min-h-dvh">
+      {/* Sticky HUD */}
+      <div
+        className="sticky top-0 z-30 border-b border-[var(--color-border)] bg-[var(--color-bg-2)]/85 backdrop-blur"
+        style={{ paddingTop: 'var(--safe-top)' }}
+      >
+        <div className="mx-auto w-full max-w-5xl px-4">
+          <div className="flex items-center justify-between gap-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <Brand variant="mark" className="h-8 w-8" />
+              {lobbyState.isSimulation && <Chip tone="info">Sim</Chip>}
+            </div>
+            <Button variant="ghost" size="sm" onClick={handleLeaveSession} disabled={isLeaving}>
+              {isLeaving ? 'Leaving…' : 'Leave'}
             </Button>
           </div>
-        </header>
+          <div className="pb-2.5">
+            <RaceHud
+              snapshot={raceSnapshot}
+              raceCompletedLap={raceCompletedLap}
+              feedStalled={feedStalled}
+              connected={isSocketConnected}
+              highlightTrackStatus={suggestedStatKeys.includes('TRACK_STATUS')}
+            />
+          </div>
+        </div>
+      </div>
 
-        <section className="grid gap-6 xl:grid-cols-[1fr_360px]">
-          <div>
-            {/* Priority order: Winner > Resolution > Question LIVE > Question Waiting > Waiting State */}
-            {(() => {
-              // 1. Winner screen (highest priority)
-              if (showWinnerScreen) {
-                return (
-                  <WinnerScreen
-                    key="winner-screen"
-                    entries={leaderboard}
-                    onBackToLobby={() => router.push(`/lobby/${lobbyCode}`)}
-                  />
-                );
-              }
+      {connectionNotice && (
+        <div className="mx-auto w-full max-w-5xl px-4 pt-3">
+          <p className="rounded-[var(--radius-sm)] bg-[var(--color-muted)] px-4 py-2.5 text-sm text-[var(--color-muted-fg)]">
+            {connectionNotice}
+          </p>
+        </div>
+      )}
 
-              // 2. Resolution display
-              if (resolution) {
-                return (
-                  <Card
-                    key={`resolution-${resolution.instanceId}`}
-                    tone="default"
-                    className="p-6 md:p-8"
-                  >
-                    <SectionLabel index="04A" label="Resolution" className="mb-4" />
-                    <h2 className="font-display text-4xl uppercase leading-tight md:text-5xl">{resolution.questionText}</h2>
-                    <p className="mt-3 font-display text-sm uppercase tracking-[0.16em] text-[var(--color-muted-fg)]">
-                      Correct Answer: <span className="text-[var(--color-accent)]">{resolution.correctAnswer}</span>
-                    </p>
-                    {resolvedAnswer && (
-                      <p
-                        className={`mt-2 font-display text-sm uppercase tracking-[0.16em] ${
-                          resolvedAnswerIsCorrect ? 'text-[#00C853]' : 'text-[#D50000]'
-                        }`}
-                      >
-                        Your Answer: <span>{resolvedAnswer}</span>
-                      </p>
-                    )}
-                    <div className="mt-5 border-2 border-[var(--color-border)] bg-[var(--color-muted)] p-4">
-                      <p className="font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">Explanation</p>
-                      <p className="mt-2 font-body text-sm leading-relaxed">{resolution.explanation}</p>
-                    </div>
-                    <div className="mt-5 border-2 border-[var(--color-border)] bg-[var(--color-bg)] p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">Problem Reporting</p>
-                          <p className="mt-2 font-body text-sm text-[var(--color-muted-fg)]">
-                            If the AI resolved this question incorrectly, send it to the admin review queue.
-                          </p>
-                        </div>
-                        <Button
-                          variant={reportSuccess ? 'secondary' : 'primary'}
-                          size="sm"
-                          disabled={reportSuccess}
-                          onClick={() => setIsReportFormOpen((current) => !current)}
-                        >
-                          {reportSuccess ? 'Reported' : isReportFormOpen ? 'Close Report' : 'Report a Problem'}
-                        </Button>
-                      </div>
-
-                      {isReportFormOpen && !reportSuccess && (
-                        <div className="mt-4 grid gap-4 border-t-2 border-[var(--color-border)] pt-4">
-                          <label className="block">
-                            <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                              Reason
-                            </span>
-                            <select
-                              value={reportReason}
-                              onChange={(event) => setReportReason(event.target.value as ProblemReportReason)}
-                              className="h-12 w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 font-display text-sm uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
-                            >
-                              {REPORT_REASON_OPTIONS.map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-
-                          <label className="block">
-                            <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                              Optional Note
-                            </span>
-                            <textarea
-                              value={reportNote}
-                              onChange={(event) => setReportNote(event.target.value)}
-                              rows={4}
-                              placeholder="Add the telemetry detail or answer mismatch you think is wrong."
-                              className="w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-3 font-body text-sm text-[var(--color-fg)] placeholder:text-[var(--color-muted-fg)] focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
-                            ></textarea>
-                          </label>
-
-                          <div className="flex flex-wrap items-center justify-between gap-3">
-                            <p className="font-body text-xs text-[var(--color-muted-fg)]">
-                              One report per player per question. Re-submitting updates your previous report.
-                            </p>
-                            <Button size="sm" onClick={handleSubmitReport} disabled={isSubmittingReport}>
-                              {isSubmittingReport ? 'Submitting…' : 'Send Report'}
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-
-                      {reportSuccess && (
-                        <p className="mt-4 font-display text-xs uppercase tracking-[0.16em] text-[var(--color-accent)]">
-                          Report submitted to admin review.
-                        </p>
-                      )}
-
-                      {reportError && (
-                        <p className="mt-4 font-display text-xs uppercase tracking-[0.16em] text-[var(--color-accent)]">
-                          {reportError}
-                        </p>
-                      )}
-                    </div>
-                  </Card>
-                );
-              }
-
-              // 3. Question LIVE state
-              if (currentQuestion && questionState === 'LIVE') {
-                return (
-                  <Card
-                    key={`question-live-${currentQuestion.instanceId}`}
-                    tone="muted"
-                    className="swiss-grid-pattern relative p-6 md:p-8"
-                  >
-                    <div className="mb-6 flex justify-center">
-                      <CountdownTimer
-                        deadline={
-                          currentQuestion.answerDeadline
-                            ?? new Date(new Date(currentQuestion.triggeredAt).getTime() + 20_000).toISOString()
-                        }
-                        size="lg"
-                      />
-                    </div>
-                  <QuestionCard
-                      questionText={currentQuestion.questionText}
-                      category={currentQuestion.category}
-                      difficulty={currentQuestion.difficulty}
-                      instanceId={currentQuestion.instanceId}
-                      onSubmit={handleSubmitAnswer}
-                      disabled={questionState !== 'LIVE'}
-                      answered={currentSubmittedAnswer}
-                    />
-
-                    {isProcessingAnswer && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-[color-mix(in_srgb,var(--color-bg),transparent_12%)] p-6 backdrop-blur-sm">
-                        <div className="w-full max-w-md border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-panel),transparent_6%)] p-6 text-center shadow-[0_0_0_2px_rgba(255,24,1,0.15)]">
-                          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border-4 border-[var(--color-border)] border-t-[var(--color-accent)] animate-spin" />
-                          <p className="mt-5 font-display text-2xl uppercase tracking-[0.14em]">Pit Wall Processing</p>
-                          <p className="mt-3 font-body text-sm text-[var(--color-muted-fg)]">
-                            Locking in your call and syncing it with the race control room.
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </Card>
-                );
-              }
-
-              // 4. Question waiting state (TRIGGERED, LOCKED, ACTIVE)
-              if (showQuestionWaitingState && currentQuestion) {
-                return (
-                  <Card
-                    key={`question-waiting-${currentQuestion.instanceId}`}
-                    tone="default"
-                    className="p-8 text-center"
-                  >
-                    <p className="font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                      {questionState === 'TRIGGERED'
-                        ? 'Question Incoming'
-                        : questionState === 'ACTIVE'
-                          ? 'Question Active'
-                          : 'Answers Locked'}
-                    </p>
-                    <p className="mt-4 font-display text-4xl uppercase leading-tight">{currentQuestion.questionText}</p>
-                    <p className="mt-3 font-body text-sm text-[var(--color-muted-fg)]">
-                      {questionState === 'TRIGGERED'
-                        ? 'The server has detected a valid race trigger. Answers open as soon as the question goes live.'
-                        : questionState === 'ACTIVE'
-                          ? 'Outcome is now tied to live race telemetry. Waiting for the next resolution signal.'
-                          : 'Awaiting lap completion and resolution.'}
-                    </p>
-                  </Card>
-                );
-              }
-
-              // 5. Default waiting state (lowest priority)
+      <div className="mx-auto grid w-full max-w-5xl gap-5 px-4 py-5 lg:grid-cols-[1fr_340px]">
+        {/* Main stage */}
+        <div className="min-w-0">
+          {(() => {
+            // 1. Winner screen
+            if (showWinnerScreen) {
               return (
-                <Card key="waiting-for-question" tone="default" className="swiss-dots p-10 text-center md:p-16">
-                  <p className="font-display text-4xl uppercase md:text-6xl">Waiting for Question</p>
-                  <p className="mt-3 font-body text-sm text-[var(--color-muted-fg)]">
-                    {lobbyState.isReplayComplete
-                      ? 'Replay finished. Final leaderboard is locked in.'
-                      : lobbyState.sessionMode === 'replay'
-                        ? 'Next trigger arrives from accelerated historical telemetry, not broadcast video.'
-                        : 'Next trigger arrives from live race telemetry.'}
+                <WinnerScreen
+                  key="winner-screen"
+                  entries={leaderboard}
+                  currentUserId={currentUserId ?? undefined}
+                  onBackToLobby={() => router.push(`/lobby/${lobbyCode}`)}
+                />
+              );
+            }
+
+            // 2. Resolution
+            if (resolution) {
+              return (
+                <Card
+                  key={`resolution-${resolution.instanceId}`}
+                  tone="elevated"
+                  className="animate-pop-in"
+                >
+                  <div
+                    className={cn(
+                      'flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-sm font-bold uppercase tracking-wide',
+                      resolvedAnswer === null
+                        ? 'bg-[var(--color-muted)] text-[var(--color-muted-fg)]'
+                        : resolvedAnswerIsCorrect
+                          ? 'bg-[var(--color-go-soft)] text-[var(--color-go)]'
+                          : 'bg-[rgba(255,59,59,0.14)] text-[var(--color-danger)]'
+                    )}
+                  >
+                    {resolvedAnswer === null
+                      ? '⏱ No answer locked in'
+                      : resolvedAnswerIsCorrect
+                        ? '✓ Nailed it'
+                        : '✕ Not this time'}
+                    {myScore && myScore.pointsChange > 0 && (
+                      <span className="ml-auto">+{myScore.pointsChange} pts</span>
+                    )}
+                  </div>
+
+                  <h2 className="mt-4 font-display text-3xl font-semibold leading-tight tracking-tight md:text-4xl">
+                    {resolution.questionText}
+                  </h2>
+
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    <Chip tone="go">Correct: {resolution.correctAnswer}</Chip>
+                    {resolvedAnswer && (
+                      <Chip tone={resolvedAnswerIsCorrect ? 'go' : 'danger'}>You: {resolvedAnswer}</Chip>
+                    )}
+                  </div>
+
+                  <div className="mt-5 rounded-[var(--radius-sm)] bg-[var(--color-muted)] p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
+                      Why
+                    </p>
+                    <p className="mt-1.5 text-sm leading-relaxed text-[var(--color-fg)]">
+                      {resolution.explanation}
+                    </p>
+                  </div>
+
+                  {/* Report — tucked away */}
+                  <div className="mt-4">
+                    {!reportSuccess ? (
+                      <button
+                        type="button"
+                        onClick={() => setIsReportFormOpen((current) => !current)}
+                        className="text-sm font-medium text-[var(--color-faint-fg)] underline-offset-2 transition-colors hover:text-[var(--color-fg)] hover:underline"
+                      >
+                        {isReportFormOpen ? 'Cancel report' : 'Something look wrong? Report it'}
+                      </button>
+                    ) : (
+                      <p className="text-sm font-medium text-[var(--color-go)]">Thanks — sent to review.</p>
+                    )}
+
+                    {isReportFormOpen && !reportSuccess && (
+                      <div className="mt-3 grid gap-3 rounded-[var(--radius-sm)] border border-[var(--color-border)] p-4">
+                        <label className="block">
+                          <span className="mb-1.5 block text-sm font-medium text-[var(--color-muted-fg)]">Reason</span>
+                          <select
+                            value={reportReason}
+                            onChange={(event) => setReportReason(event.target.value as ProblemReportReason)}
+                            className="h-12 w-full rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] bg-[var(--color-bg-2)] px-4 text-sm focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                          >
+                            {REPORT_REASON_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <textarea
+                          value={reportNote}
+                          onChange={(event) => setReportNote(event.target.value)}
+                          rows={3}
+                          placeholder="Optional: what looked off?"
+                          className="w-full rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] bg-[var(--color-bg-2)] px-4 py-3 text-sm text-[var(--color-fg)] placeholder:text-[var(--color-faint-fg)] focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                        />
+                        <Button size="sm" onClick={handleSubmitReport} disabled={isSubmittingReport} className="justify-self-start">
+                          {isSubmittingReport ? 'Sending…' : 'Send report'}
+                        </Button>
+                        {reportError && (
+                          <p className="text-sm font-medium text-[var(--color-accent)]">{reportError}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              );
+            }
+
+            // 3. Live question
+            if (currentQuestion && questionState === 'LIVE') {
+              return (
+                <Card
+                  key={`question-live-${currentQuestion.instanceId}`}
+                  tone="elevated"
+                  className="relative animate-pop-in"
+                >
+                  <div className="mb-5 flex justify-center">
+                    <CountdownTimer
+                      deadline={
+                        currentQuestion.answerDeadline
+                          ?? new Date(new Date(currentQuestion.triggeredAt).getTime() + 45_000).toISOString()
+                      }
+                      totalDurationMs={45_000}
+                      size="lg"
+                    />
+                  </div>
+                  <QuestionCard
+                    questionText={currentQuestion.questionText}
+                    category={currentQuestion.category}
+                    difficulty={currentQuestion.difficulty}
+                    instanceId={currentQuestion.instanceId}
+                    onSubmit={handleSubmitAnswer}
+                    disabled={questionState !== 'LIVE'}
+                    answered={currentSubmittedAnswer}
+                  />
+
+                  {isProcessingAnswer && (
+                    <div className="absolute inset-0 flex items-center justify-center rounded-[var(--radius)] bg-[var(--color-bg)]/80 p-6 backdrop-blur-sm">
+                      <div className="text-center">
+                        <span className="mx-auto block h-12 w-12 animate-spin-slow rounded-full border-[3px] border-[var(--color-border)] border-t-[var(--color-accent)]" />
+                        <p className="mt-4 font-display text-xl font-semibold uppercase tracking-wide">Locking in…</p>
+                      </div>
+                    </div>
+                  )}
+                </Card>
+              );
+            }
+
+            // 4. Question waiting (TRIGGERED, LOCKED, ACTIVE)
+            if (showQuestionWaitingState && currentQuestion) {
+              return (
+                <Card key={`question-waiting-${currentQuestion.instanceId}`} tone="elevated" className="text-center">
+                  <Chip tone="accent" className="mx-auto animate-flash">
+                    {questionState === 'TRIGGERED'
+                      ? 'Question incoming'
+                      : questionState === 'ACTIVE'
+                        ? 'In play'
+                        : 'Answers locked'}
+                  </Chip>
+                  <p className="mt-5 font-display text-2xl font-semibold leading-tight md:text-3xl">
+                    {currentQuestion.questionText}
                   </p>
-                  <p className="mt-4 font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                    Questions asked: {lobbyState.questionCount}/10
+                  <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
+                    {questionState === 'TRIGGERED'
+                      ? 'Get ready — answers open in a moment.'
+                      : questionState === 'ACTIVE'
+                        ? 'Watching the race to settle this one.'
+                        : 'Waiting for the lap to resolve.'}
                   </p>
                 </Card>
               );
-            })()}
-          </div>
+            }
 
-          <aside>
+            // 5. Idle waiting
+            return (
+              <Card key="waiting-for-question" tone="elevated" className="py-14 text-center md:py-20">
+                <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
+                  <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+                </span>
+                <p className="font-display text-3xl font-bold uppercase md:text-4xl">Waiting for the next call</p>
+                <p className="mx-auto mt-3 max-w-sm text-sm text-[var(--color-muted-fg)]">
+                  {lobbyState.isReplayComplete
+                    ? 'Replay finished — final standings are locked in.'
+                    : 'Questions appear as the race throws up the right moments. Stay sharp.'}
+                </p>
+                <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
+                  {lobbyState.questionCount}/10 questions
+                </p>
+              </Card>
+            );
+          })()}
+
+          {/* Race leader / tyre stats below the stage */}
+          <div className="mt-5 lg:hidden">
             <TireStats
               leaderStats={raceSnapshot?.leaderStats ?? null}
+              lapNumber={raceSnapshot?.lapNumber ?? null}
               highlighted={tireStatsHighlighted}
             />
-            {/* Enhance leaderboard with local correct answers for current user */}
-            {currentUserId ? (
-              <Leaderboard 
-                entries={leaderboard.map(entry => 
-                  entry.userId === currentUserId 
-                    ? {...entry, correctAnswers: localCorrectAnswers} 
-                    : entry
-                )}
-                currentUserId={currentUserId}
-              />
-            ) : (
-              <Leaderboard entries={leaderboard} currentUserId={currentUserId ?? undefined} />
-            )}
-          </aside>
-        </section>
+          </div>
+
+          {/* Leaderboard on mobile */}
+          <div className="mt-5 lg:hidden">
+            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} />
+          </div>
+        </div>
+
+        {/* Desktop sidebar */}
+        <aside className="hidden flex-col gap-5 lg:flex">
+          <TireStats
+            leaderStats={raceSnapshot?.leaderStats ?? null}
+            lapNumber={raceSnapshot?.lapNumber ?? null}
+            highlighted={tireStatsHighlighted}
+          />
+          <div className="sticky top-[150px]">
+            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} />
+          </div>
+        </aside>
       </div>
 
       {error && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 border-2 border-[var(--color-accent)] bg-[var(--color-bg)] px-6 py-3 font-display text-xs uppercase tracking-[0.14em] text-[var(--color-fg)]">
-          {error}
+        <div className="pad-safe-bottom fixed inset-x-0 bottom-0 z-40 flex justify-center px-4">
+          <p className="animate-fade-up mb-4 rounded-[var(--radius-pill)] border border-[var(--color-accent)]/50 bg-[var(--color-bg-2)] px-5 py-3 text-sm font-medium text-[var(--color-fg)] shadow-[var(--shadow-lg)]">
+            {error}
+          </p>
         </div>
       )}
     </main>

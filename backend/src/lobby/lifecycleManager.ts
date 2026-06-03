@@ -1,5 +1,4 @@
 // @ts-nocheck - Supabase type inference issues with generic client
-// @ts-nocheck - Supabase type inference issues with generic client
 import type { QuestionInstanceState, RaceSnapshot } from '../types';
 import type { QuestionInstance, Answer } from '../db/types';
 import supabase from '../db/supabaseClient';
@@ -9,13 +8,16 @@ import { recordResolution } from '../engine/questionEngine';
 import { calculateScore, dedupeAnswersByUser, updateLeaderboardEntry } from '../engine/scoringEngine';
 import { getQuestionById } from '../engine/questionBank';
 import { generateResolutionExplanation } from '../ai/explanationGenerator';
+import { enqueueScoringJob } from '../runtime/workQueue';
+import { FF_BATCH_SCORING } from '../runtime/featureFlags';
+import { trackDbQuery, trackDbWrite } from '../observability/dbMetrics';
 
 /**
  * Lifecycle Manager - Question FSM and state transitions
  *
  * States: TRIGGERED → LIVE → LOCKED → ACTIVE → RESOLVED → EXPLAINED → CLOSED
  * - TRIGGERED: Question just created, waiting to go live
- * - LIVE: Players can answer (20 seconds)
+ * - LIVE: Players can answer (45 seconds)
  * - LOCKED: Answer period ended, waiting for resolution window
  * - ACTIVE: Question is active in race, waiting for outcome
  * - RESOLVED: Outcome determined, waiting for explanation
@@ -28,7 +30,7 @@ import { generateResolutionExplanation } from '../ai/explanationGenerator';
  */
 
 // Timers
-const ANSWER_WINDOW_MS = 20000; // 20 seconds to answer
+const ANSWER_WINDOW_MS = 45000; // 45 seconds to answer
 const EXPLANATION_DURATION_MS = 10000; // 10 seconds to show explanation
 const TRIGGER_TO_LIVE_MS = 1000; // 1 second between trigger and live
 
@@ -72,7 +74,11 @@ function scheduleLobbyTimer(
 ): NodeJS.Timeout {
   const timer = setTimeout(async () => {
     untrackLobbyTimer(lobbyId, timer);
-    await callback();
+    try {
+      await callback();
+    } catch (error) {
+      console.error(`[Lifecycle] Timer callback failed for lobby ${lobbyId}:`, (error as Error).message);
+    }
   }, delayMs);
   trackLobbyTimer(lobbyId, timer);
   return timer;
@@ -84,6 +90,7 @@ function scheduleLobbyTimer(
 export async function createQuestionInstance(
   instance: QuestionInstanceState
 ): Promise<QuestionInstance> {
+  trackDbWrite('question_instances.insert');
   const { data, error } = await supabase
     .from('question_instances')
     .insert({
@@ -130,10 +137,8 @@ export async function updateQuestionState(
     updateData.closed_at = new Date().toISOString();
   }
 
+  trackDbWrite('question_instances.update');
   await supabase
-    .from('question_instances')
-    .update(updateData)
-    .eq('id', instanceId);
 }
 
 /**
@@ -436,8 +441,37 @@ async function processAnswers(
       return;
     }
 
+    const dedupedAnswers = dedupeAnswersByUser(answers);
+    const scoreRows: Array<{ user_id: string; points_change: number; is_correct: boolean }> = [];
+
+    for (const answer of dedupedAnswers) {
+      const leaderboardEntry = lobbyState.leaderboard.find((lb) => lb.userId === answer.user_id);
+      const scoreResult = calculateScore(answer.answer, correctAnswer, leaderboardEntry?.streak ?? 0);
+      scoreRows.push({
+        user_id: answer.user_id,
+        points_change: scoreResult.pointsChange,
+        is_correct: scoreResult.isCorrect,
+      });
+    }
+
+    let usedBatchRpc = false;
+    if (FF_BATCH_SCORING) {
+      trackDbWrite('leaderboard.batch_update');
+      const { error: batchError } = await supabase.rpc('update_leaderboard_batch', {
+        p_lobby_id: instance.lobbyId,
+        p_instance_id: instance.id,
+        p_rows: scoreRows,
+      });
+
+      if (batchError) {
+        console.warn(`[SCORING] Falling back to per-user RPC for instance ${instance.id}: ${batchError.message}`);
+      } else {
+        usedBatchRpc = true;
+      }
+    }
+
     // Process each answer exactly once per user.
-    for (const answer of dedupeAnswersByUser(answers)) {
+    for (const answer of dedupedAnswers) {
       const leaderboardEntry = lobbyState.leaderboard.find((lb) => lb.userId === answer.user_id);
       const currentEntry = leaderboardEntry
         ? {
@@ -463,14 +497,17 @@ async function processAnswers(
         scoreResult
       );
 
-      // Update leaderboard in database using the stored procedure (with idempotency)
-      await supabase.rpc('update_leaderboard', {
-        p_lobby_id: instance.lobbyId,
-        p_user_id: answer.user_id,
-        p_points_change: scoreResult.pointsChange,
-        p_is_correct: scoreResult.isCorrect,
-        p_instance_id: instance.id,
-      });
+      if (!usedBatchRpc) {
+        trackDbWrite('leaderboard.update');
+        // Backward compatibility path while the batch RPC is being rolled out.
+        await supabase.rpc('update_leaderboard', {
+          p_lobby_id: instance.lobbyId,
+          p_user_id: answer.user_id,
+          p_points_change: scoreResult.pointsChange,
+          p_is_correct: scoreResult.isCorrect,
+          p_instance_id: instance.id,
+        });
+      }
 
       const user = lobbyState.players.find((player) => player.id === answer.user_id);
 
@@ -486,6 +523,12 @@ async function processAnswers(
         accuracy: updatedEntry.accuracy,
       });
     }
+
+    await enqueueScoringJob({
+      lobbyId: instance.lobbyId,
+      instanceId: instance.id,
+      enqueuedAt: new Date().toISOString(),
+    });
   } catch (processingError) {
     scoredQuestionInstances.delete(instance.id);
     throw processingError;
@@ -501,6 +544,7 @@ export async function submitAnswer(
   answer: 'YES' | 'NO'
 ): Promise<{ success: boolean; error?: string }> {
   // Check if already answered
+  trackDbQuery('answers.lookup_existing');
   const { data: existingAnswer } = await supabase
     .from('answers')
     .select()
@@ -555,6 +599,7 @@ export async function submitAnswer(
   const responseTimeMs = Math.max(0, Date.now() - instance.triggeredAt.getTime());
 
   // Save answer
+  trackDbWrite('answers.insert');
   const { error } = await supabase.from('answers').insert({
     instance_id: instanceId,
     user_id: userId,

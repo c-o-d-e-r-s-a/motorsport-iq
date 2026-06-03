@@ -1,11 +1,18 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { getSocketClient } from '@/lib/socket';
+import {
+  applyPlayerDisconnected,
+  applyPlayerJoined,
+  applyPlayerLeft,
+  applyPlayerReconnected,
+} from '@/lib/lobbyPlayerDeltas';
 import { SERVER_EVENTS, type LobbyState, type ServerErrorEvent, type SessionInfo } from '@/lib/types';
-import { filterSessionsForDisplay, isLiveCanadianGrandPrixWindow } from '@/lib/sessionDisplay';
-import { Button, Card, Dialog, SectionLabel, ThemeToggle } from '@/components/ui';
+import { filterSessionsForDisplay, isLivePlayableWindow } from '@/lib/sessionDisplay';
+import { Button, Brand, Card, Chip, Dialog, Input } from '@/components/ui';
+import { cn } from '@/lib/cn';
 
 export default function LobbyPage() {
   const params = useParams();
@@ -20,11 +27,24 @@ export default function LobbyPage() {
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [confirmSession, setConfirmSession] = useState<SessionInfo | null>(null);
+  const [replaySpeed, setReplaySpeed] = useState<1 | 10>(10);
+  const [joinUsername, setJoinUsername] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return localStorage.getItem('msp_username') ?? '';
+  });
+  const [showJoinForm, setShowJoinForm] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
+
+  useEffect(() => {
+    joinUsernameRef.current = joinUsername;
+  }, [joinUsername]);
 
   useEffect(() => {
     const socket = getSocketClient();
@@ -34,8 +54,18 @@ export default function LobbyPage() {
       socket.on('connected', () => {
         setIsReconnecting(false);
         setConnectionNotice(null);
-        if (currentUserId) {
-          socket.reconnectLobby(currentUserId);
+        const storedUserId = localStorage.getItem('msp_user_id');
+        if (storedUserId) {
+          socket.reconnectLobby(storedUserId);
+          return;
+        }
+
+        socket.lookupLobby(lobbyCode);
+      }),
+      socket.on(SERVER_EVENTS.LOBBY_LOOKUP, () => {
+        if (!localStorage.getItem('msp_user_id')) {
+          setShowJoinForm(true);
+          setIsLoading(false);
         }
       }),
       socket.on('disconnected', () => {
@@ -48,39 +78,33 @@ export default function LobbyPage() {
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);
         setIsLoading(false);
+        setShowJoinForm(false);
+        setIsJoining(false);
+
+        const storedUsername = localStorage.getItem('msp_username');
+        const joinedUser = state.players.find(
+          (player) => player.username === joinUsernameRef.current.trim() || player.username === storedUsername
+        );
+        if (joinedUser) {
+          localStorage.setItem('msp_user_id', joinedUser.id);
+          localStorage.setItem('msp_username', joinedUser.username);
+        }
 
         if (state.status === 'active') {
           router.push(`/game/${state.code}`);
         }
       }),
       socket.on(SERVER_EVENTS.PLAYER_JOINED, (data: { userId: string; username: string }) => {
-        setLobbyState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            players: [...prev.players, { id: data.userId, username: data.username, isHost: false, connected: true }],
-          };
-        });
+        setLobbyState((prev) => (prev ? applyPlayerJoined(prev, data) : prev));
       }),
       socket.on(SERVER_EVENTS.PLAYER_LEFT, (data: { userId: string }) => {
-        setLobbyState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            players: prev.players.filter((player) => player.id !== data.userId),
-          };
-        });
+        setLobbyState((prev) => (prev ? applyPlayerLeft(prev, data) : prev));
       }),
       socket.on(SERVER_EVENTS.PLAYER_DISCONNECTED, (data: { userId: string }) => {
-        setLobbyState((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            players: prev.players.map((player) =>
-              player.id === data.userId ? { ...player, connected: false } : player
-            ),
-          };
-        });
+        setLobbyState((prev) => (prev ? applyPlayerDisconnected(prev, data) : prev));
+      }),
+      socket.on(SERVER_EVENTS.PLAYER_RECONNECTED, (data: { userId: string }) => {
+        setLobbyState((prev) => (prev ? applyPlayerReconnected(prev, data) : prev));
       }),
       socket.on(SERVER_EVENTS.SESSION_STARTED, () => {
         router.push(`/game/${lobbyCode}`);
@@ -112,7 +136,9 @@ export default function LobbyPage() {
 
         if (isSessionExpired) {
           localStorage.removeItem('msp_user_id');
-          router.push('/');
+          setShowJoinForm(true);
+          setIsLoading(false);
+          setConnectionNotice('Enter your driver name to join this lobby.');
           return;
         }
 
@@ -125,22 +151,22 @@ export default function LobbyPage() {
       }),
     ];
 
-    socket.getSessions(selectedYear);
+    socket.startSessionsPolling(selectedYear, 60_000);
 
-    const pollInterval = window.setInterval(() => {
-      socket.getSessions(selectedYear);
-    }, 15_000);
-
-    const userId = localStorage.getItem('msp_user_id');
-    if (userId) {
-      socket.reconnectLobby(userId);
+    if (socket.isConnected()) {
+      const userId = localStorage.getItem('msp_user_id');
+      if (userId) {
+        socket.reconnectLobby(userId);
+      } else {
+        socket.lookupLobby(lobbyCode);
+      }
     }
 
     return () => {
-      window.clearInterval(pollInterval);
+      socket.stopSessionsPolling();
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [currentUserId, lobbyCode, router, selectedYear]);
+  }, [lobbyCode, router, selectedYear]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -151,7 +177,7 @@ export default function LobbyPage() {
     socket.sendPresencePing();
     const interval = window.setInterval(() => {
       socket.sendPresencePing();
-    }, 60_000);
+    }, 90_000);
 
     return () => {
       window.clearInterval(interval);
@@ -163,6 +189,25 @@ export default function LobbyPage() {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }, [lobbyCode]);
+
+  const handleCopyLink = useCallback(() => {
+    const shareUrl = `${window.location.origin}/game/${lobbyCode}`;
+    navigator.clipboard.writeText(shareUrl);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  }, [lobbyCode]);
+
+  const handleJoinLobby = useCallback(() => {
+    if (!joinUsername.trim()) {
+      setError('Please enter a username');
+      return;
+    }
+
+    setError(null);
+    setIsJoining(true);
+    localStorage.setItem('msp_username', joinUsername.trim());
+    getSocketClient().joinLobby(lobbyCode, joinUsername.trim());
+  }, [joinUsername, lobbyCode]);
 
   const handleLeaveLobby = useCallback(() => {
     localStorage.removeItem('msp_user_id');
@@ -191,8 +236,9 @@ export default function LobbyPage() {
 
     setConfirmSession(null);
     setIsStarting(true);
-    getSocketClient().startSession(lobbyState.id, key, currentUserId);
-  }, [currentUserId, lobbyState, selectedSession, sessions]);
+    const replayOptions = sessionInfo?.isCompleted ? { replaySpeed } : undefined;
+    getSocketClient().startSession(lobbyState.id, key, currentUserId, replayOptions);
+  }, [currentUserId, lobbyState, selectedSession, sessions, replaySpeed]);
 
   const handleSessionClick = useCallback((session: SessionInfo) => {
     const isSelectable = session.isLive || session.isCompleted;
@@ -228,7 +274,7 @@ export default function LobbyPage() {
     }
   }, [canStartSession, selectedSessionInfo]);
   const liveSessionInList = displaySessions.find((session) => session.isLive) ?? null;
-  const liveOnlyMode = isLiveCanadianGrandPrixWindow(sessions)
+  const liveOnlyMode = isLivePlayableWindow(sessions)
     || (Boolean(liveSessionInList) && displaySessions.length === 1);
 
   const years = useMemo(() => {
@@ -238,19 +284,51 @@ export default function LobbyPage() {
 
   if (isLoading) {
     return (
-      <main className="app-shell flex items-center justify-center">
-        <p className="font-display text-2xl uppercase tracking-[0.14em]">Loading Lobby…</p>
+      <main className="app-bg flex min-h-dvh flex-col items-center justify-center gap-4">
+        <span className="h-10 w-10 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+        <p className="font-display text-lg uppercase tracking-wide text-[var(--color-muted-fg)]">Loading lobby…</p>
+      </main>
+    );
+  }
+
+  if (showJoinForm && !lobbyState) {
+    return (
+      <main className="app-bg pad-safe-top pad-safe-bottom flex min-h-dvh items-center justify-center p-5">
+        <Card tone="elevated" className="w-full max-w-md animate-fade-up rounded-[var(--radius-lg)]">
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-accent)]">Join lobby</p>
+          <h1 className="mt-2 font-display text-5xl font-bold uppercase tracking-tight">{lobbyCode}</h1>
+          <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
+            Enter your driver name to join. If the race is already live, you&apos;ll jump straight in.
+          </p>
+          <Input
+            id="join-name"
+            label="Driver name"
+            value={joinUsername}
+            onChange={(event) => setJoinUsername(event.target.value)}
+            placeholder="Your name"
+            className="mt-5"
+          />
+          {error && (
+            <p className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-4 py-3 text-sm font-medium text-[var(--color-accent)]">
+              {error}
+            </p>
+          )}
+          <Button onClick={handleJoinLobby} disabled={isJoining} size="lg" className="mt-6 w-full">
+            {isJoining ? 'Joining…' : 'Join lobby'}
+          </Button>
+        </Card>
       </main>
     );
   }
 
   if (!lobbyState) {
     return (
-      <main className="app-shell flex items-center justify-center p-4">
-        <Card className="w-full max-w-lg text-center" tone="default">
-          <p className="font-display text-4xl uppercase">Lobby Not Found</p>
-          <Button onClick={() => router.push('/')} className="mt-6 w-full">
-            Back to Home
+      <main className="app-bg pad-safe-top flex min-h-dvh items-center justify-center p-5">
+        <Card tone="elevated" className="w-full max-w-md rounded-[var(--radius-lg)] text-center">
+          <p className="font-display text-4xl font-bold uppercase">Lobby not found</p>
+          <p className="mt-2 text-sm text-[var(--color-muted-fg)]">This code may have expired or been entered incorrectly.</p>
+          <Button onClick={() => router.push('/')} size="lg" className="mt-6 w-full">
+            Back to home
           </Button>
         </Card>
       </main>
@@ -258,212 +336,184 @@ export default function LobbyPage() {
   }
 
   return (
-    <main className="app-shell swiss-noise relative">
-      <div className="mx-auto w-full max-w-7xl px-4 py-6 md:px-8 md:py-8">
-        <header className="mb-6 grid gap-4 border-2 border-[var(--color-border)] bg-[var(--color-muted)] p-5 md:grid-cols-[1fr_auto] md:items-start md:p-6">
-          <div>
-            <SectionLabel index="03" label="Lobby Control" />
-            <h1 className="mt-2 font-display text-5xl uppercase tracking-tight md:text-7xl">{lobbyCode}</h1>
-            <p className="mt-2 font-body text-sm text-[var(--color-muted-fg)]">
-              Host controls race session. Players receive synchronized state updates on reconnect.
-            </p>
-            {(isReconnecting || connectionNotice) && (
-              <p className="mt-3 border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 font-display text-[11px] uppercase tracking-[0.14em]">
-                {connectionNotice ?? 'Reconnecting to live race server…'}
-              </p>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center gap-2 md:justify-end">
-            {isHost && (
-              <Button
-                onClick={openStartConfirm}
-                disabled={isStarting || !canStartSession}
-                size="md"
-              >
-                {isStarting ? 'Starting Session...' : 'Start Session'}
-              </Button>
-            )}
-            <ThemeToggle />
-            <Button variant="secondary" onClick={handleCopyCode}>
-              {copied ? 'Code Copied' : 'Copy Code'}
-            </Button>
-            <Button variant="ghost" onClick={handleLeaveLobby}>
-              Leave Lobby
-            </Button>
-          </div>
+    <main className="app-bg pad-safe-top relative min-h-dvh">
+      <div className="mx-auto w-full max-w-3xl px-5 pb-40">
+        <header className="flex items-center justify-between py-4">
+          <Brand variant="mark" />
+          <Button variant="ghost" size="sm" onClick={handleLeaveLobby}>
+            Leave
+          </Button>
         </header>
 
-        <section className="grid gap-6 lg:grid-cols-12">
-          <Card className="lg:col-span-5" tone="default">
-            <SectionLabel index="03A" label="Players" className="mb-4" />
-            <div className="space-y-2">
-              {lobbyState.players.map((player) => (
-                <div
-                  key={player.id}
-                  className="grid grid-cols-[auto_1fr_auto] items-center gap-3 border-2 border-[var(--color-border)] p-3"
-                >
-                  <div
-                    className="h-3 w-3 border-2 border-[var(--color-border)]"
-                    style={{
-                      backgroundColor: player.connected ? 'var(--color-accent)' : 'transparent',
-                    }}
-                  />
-                  <p className="font-display text-lg uppercase">
-                    {player.username}
-                    {player.isHost ? ' · HOST' : ''}
-                    {player.id === currentUserId ? ' · YOU' : ''}
-                  </p>
-                  <p className="font-display text-xs uppercase tracking-[0.15em] text-[var(--color-muted-fg)]">
-                    {player.connected ? 'Online' : 'Offline'}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </Card>
+        {/* Lobby code + invite */}
+        <section className="surface-elevated animate-fade-up rounded-[var(--radius-lg)] p-6 text-center">
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-faint-fg)]">
+            Lobby code
+          </p>
+          <p className="mt-1 font-display text-6xl font-bold uppercase tracking-[0.1em] text-[var(--color-fg)]">
+            {lobbyCode}
+          </p>
+          <p className="mt-2 text-sm text-[var(--color-muted-fg)]">Share this code so friends can join.</p>
+          <div className="mt-5 grid grid-cols-2 gap-2.5">
+            <Button variant="secondary" onClick={handleCopyCode}>
+              {copied ? 'Copied ✓' : 'Copy code'}
+            </Button>
+            <Button variant="secondary" onClick={handleCopyLink}>
+              {copiedLink ? 'Copied ✓' : 'Copy link'}
+            </Button>
+          </div>
+          {(isReconnecting || connectionNotice) && (
+            <p className="mt-4 rounded-[var(--radius-sm)] bg-[var(--color-muted)] px-4 py-2.5 text-sm text-[var(--color-muted-fg)]">
+              {connectionNotice ?? 'Reconnecting to the race server…'}
+            </p>
+          )}
+        </section>
 
-          <Card className="swiss-grid-pattern lg:col-span-7" tone="muted">
-            {isHost ? (
-              <>
-                <SectionLabel index="03B" label="Session Setup" className="mb-4" />
+        {/* Players */}
+        <section className="animate-fade-up delay-1 mt-5">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="font-display text-lg font-semibold uppercase tracking-wide">
+              Grid · {lobbyState.players.length}
+            </h2>
+          </div>
+          <div className="space-y-2">
+            {lobbyState.players.map((player) => (
+              <div
+                key={player.id}
+                className="flex items-center gap-3 rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-3"
+              >
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: player.connected ? 'var(--color-go)' : 'var(--color-faint-fg)' }}
+                />
+                <p className="flex-1 truncate font-display text-lg font-semibold uppercase">{player.username}</p>
+                <div className="flex gap-1.5">
+                  {player.isHost && <Chip tone="accent">Host</Chip>}
+                  {player.id === currentUserId && <Chip tone="neutral">You</Chip>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Session setup / standby */}
+        <section className="animate-fade-up delay-2 mt-6">
+          {isHost ? (
+            <>
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="font-display text-lg font-semibold uppercase tracking-wide">Pick a session</h2>
                 {!liveOnlyMode && (
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <label className="block">
-                      <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                        Season Year
-                      </span>
-                      <select
-                        value={selectedYear}
-                        onChange={(event) => {
-                          setSelectedYear(Number(event.target.value));
-                          setSelectedSession('');
-                        }}
-                        className="h-12 w-full border-2 border-[var(--color-border)] bg-[var(--color-bg)] px-4 font-display text-sm uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                  <select
+                    value={selectedYear}
+                    onChange={(event) => {
+                      setSelectedYear(Number(event.target.value));
+                      setSelectedSession('');
+                    }}
+                    className="h-10 rounded-[var(--radius-pill)] border border-[var(--color-border-strong)] bg-[var(--color-elevated)] px-4 font-display text-sm font-semibold uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                  >
+                    {years.map((year) => (
+                      <option key={year} value={year}>
+                        {year}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {liveOnlyMode && (
+                <p className="mb-3 rounded-[var(--radius)] border border-[var(--color-accent)]/40 bg-[var(--color-accent-soft)] p-4 text-sm text-[var(--color-fg)]">
+                  <span className="font-semibold text-[var(--color-accent)]">Race is live.</span> Start the
+                  live session whenever your lobby is ready.
+                </p>
+              )}
+
+              <div className="space-y-2.5">
+                {displaySessions.length > 0 ? (
+                  displaySessions.map((session) => {
+                    const isSelected = String(session.session_key) === selectedSession;
+                    const isLive = session.isLive;
+                    const isCompleted = session.isCompleted;
+                    const isSelectable = isLive || isCompleted;
+
+                    return (
+                      <button
+                        key={session.session_key}
+                        type="button"
+                        disabled={!isSelectable}
+                        onClick={() => handleSessionClick(session)}
+                        className={cn(
+                          'w-full rounded-[var(--radius)] border p-4 text-left transition-all duration-[var(--dur-fast)]',
+                          isSelected && isSelectable
+                            ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] shadow-[var(--shadow-accent)]'
+                            : 'border-[var(--color-border)] bg-[var(--color-panel)]',
+                          isSelectable ? 'active:scale-[0.99]' : 'cursor-not-allowed opacity-50'
+                        )}
                       >
-                        {years.map((year) => (
-                          <option key={year} value={year}>
-                            {year}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="block">
-                      <span className="mb-2 block font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-                        Race Session
-                      </span>
-                      <p className="font-body text-sm text-[var(--color-muted-fg)]">
-                        Select a live session during the race window, or a completed session for 10x replay.
-                      </p>
-                    </label>
-                  </div>
-                )}
-
-                {liveOnlyMode && (
-                  <p className="mb-4 border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_90%)] p-4 font-body text-sm text-[var(--color-fg)]">
-                    The Canadian Grand Prix is live. Only the live race session is available — start when your lobby is ready.
-                  </p>
-                )}
-
-                <div className={`space-y-3 ${liveOnlyMode ? '' : 'mt-4'}`}>
-                  {displaySessions.length > 0 ? (
-                    displaySessions.map((session) => {
-                      const isSelected = String(session.session_key) === selectedSession;
-                      const isLive = session.isLive;
-                      const isCompleted = session.isCompleted;
-                      const isSelectable = isLive || isCompleted;
-
-                      return (
-                        <button
-                          key={session.session_key}
-                          type="button"
-                          disabled={!isSelectable}
-                          onClick={() => handleSessionClick(session)}
-                          className={`w-full border-2 p-4 text-left transition-colors ${
-                            isSelected && isSelectable
-                              ? 'border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_90%)]'
-                              : 'border-[var(--color-border)] bg-[var(--color-bg)]'
-                          } ${
-                            isSelectable
-                              ? 'cursor-pointer hover:border-[var(--color-accent)]'
-                              : 'cursor-not-allowed opacity-55'
-                          }`}
-                        >
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div>
-                              <p className="font-display text-lg uppercase leading-tight">
-                                {session.session_name} · {session.location}
-                              </p>
-                              <p className="mt-1 font-body text-sm text-[var(--color-muted-fg)]">
-                                {session.circuit_short_name}, {session.country_name}
-                              </p>
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                              <span className="border-2 border-[var(--color-border)] px-2 py-1 font-display text-[10px] uppercase tracking-[0.18em]">
-                                {isLive ? 'Live' : isCompleted ? 'Replay' : 'Upcoming'}
-                              </span>
-                              <span
-                                className={`border-2 px-2 py-1 font-display text-[10px] uppercase tracking-[0.18em] ${
-                                  isLive || isCompleted
-                                    ? 'border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)]'
-                                    : 'border-[var(--color-border)]'
-                                }`}
-                              >
-                                {isLive ? 'Live Now' : isCompleted ? 'Replay Ready' : 'Not Started'}
-                              </span>
-                            </div>
-                          </div>
-                          <p className="mt-3 font-display text-xs uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">
-                            {isLive
-                              ? 'This session follows live telemetry. Questions appear only when the server-side trigger engine finds a valid race situation.'
-                              : isCompleted
-                                ? 'Replay ready. Telemetry replay runs at 10x and triggers AI-written questions from the server question bank.'
-                                : 'Unavailable until the session start time. Check back when the session goes live.'}
-                          </p>
-                          {isSelected && isSelectable && (
-                            <p className="mt-2 font-display text-[10px] uppercase tracking-[0.18em] text-[var(--color-accent)]">
-                              Click again to start
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate font-display text-lg font-semibold uppercase leading-tight">
+                              {session.location}
                             </p>
-                          )}
-                        </button>
-                      );
-                    })
-                  ) : (
-                    <p className="border-2 border-[var(--color-border)] bg-[var(--color-bg)] p-3 font-display text-xs uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">
-                      No race or sprint sessions found for this season.
-                    </p>
-                  )}
-                </div>
-
-                {selectedSessionInfo && (
-                  <p className="mt-4 border-2 border-[var(--color-border)] bg-[var(--color-bg)] p-3 font-display text-xs uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">
-                    {selectedSessionInfo.isLive
-                      ? 'Live session connects to real-time F1 SignalR telemetry stream. Questions appear when server-side race signals match valid triggers.'
-                      : selectedSessionInfo.isCompleted
-                        ? 'Historical telemetry replay starts at 10x speed. Questions appear when server-side race signals match the curated question bank, then Groq/Llama rewrites the prompt and explanation.'
-                        : 'This session has not started yet and cannot be started.'}
+                            <p className="mt-0.5 truncate text-sm text-[var(--color-muted-fg)]">
+                              {session.session_name} · {session.country_name}
+                            </p>
+                          </div>
+                          <Chip tone={isLive ? 'go' : isCompleted ? 'accent' : 'neutral'}>
+                            {isLive ? 'Live' : isCompleted ? 'Replay' : 'Soon'}
+                          </Chip>
+                        </div>
+                        {isSelected && isSelectable && (
+                          <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-accent)]">
+                            Tap again to start →
+                          </p>
+                        )}
+                      </button>
+                    );
+                  })
+                ) : (
+                  <p className="rounded-[var(--radius)] border border-dashed border-[var(--color-border)] p-4 text-center text-sm text-[var(--color-muted-fg)]">
+                    No race sessions found for this season.
                   </p>
                 )}
-              </>
-            ) : (
-              <>
-                <SectionLabel index="03B" label="Standby" className="mb-4" />
-                <div className="swiss-dots border-2 border-[var(--color-border)] bg-[var(--color-bg)] p-8 text-center">
-                  <p className="font-display text-3xl uppercase">Waiting for Host</p>
-                  <p className="mt-2 font-body text-sm text-[var(--color-muted-fg)]">
-                    Session configuration is controlled by the host.
-                  </p>
-                </div>
-              </>
-            )}
-
-            {error && (
-              <p className="mt-4 border-2 border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent),transparent_88%)] p-3 font-display text-xs uppercase tracking-[0.14em]">
-                {error}
+              </div>
+            </>
+          ) : (
+            <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--color-border)] bg-[var(--color-panel)] p-8 text-center">
+              <span className="mx-auto mb-3 block h-8 w-8 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+              <p className="font-display text-2xl font-semibold uppercase">Waiting for host</p>
+              <p className="mt-2 text-sm text-[var(--color-muted-fg)]">
+                The host is choosing a session. You&apos;ll drop into the race automatically.
               </p>
-            )}
-          </Card>
+            </div>
+          )}
+
+          {error && (
+            <p className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-4 py-3 text-sm font-medium text-[var(--color-accent)]">
+              {error}
+            </p>
+          )}
         </section>
       </div>
+
+      {/* Sticky start bar (host) */}
+      {isHost && (
+        <div className="pad-safe-bottom fixed inset-x-0 bottom-0 z-20 border-t border-[var(--color-border)] bg-[var(--color-bg-2)]/90 px-5 pt-3 backdrop-blur">
+          <div className="mx-auto max-w-3xl">
+            <Button
+              onClick={openStartConfirm}
+              disabled={isStarting || !canStartSession}
+              size="lg"
+              className="w-full"
+            >
+              {isStarting
+                ? 'Starting…'
+                : canStartSession
+                  ? `Start ${selectedSessionInfo?.location ?? 'session'}`
+                  : 'Select a session'}
+            </Button>
+          </div>
+        </div>
+      )}
 
       <Dialog
         open={Boolean(confirmSession)}
@@ -472,33 +522,91 @@ export default function LobbyPage() {
             setConfirmSession(null);
           }
         }}
-        title="Start Session"
+        title="Start session?"
       >
         {confirmSession && (
           <>
-            <p className="mt-3 font-display text-lg uppercase leading-tight">
-              {confirmSession.session_name} · {confirmSession.location}
+            <p className="mt-3 font-display text-xl font-semibold uppercase leading-tight">
+              {confirmSession.location}
             </p>
-            <p className="mt-1 font-body text-sm text-[var(--color-muted-fg)]">
-              {confirmSession.circuit_short_name}, {confirmSession.country_name}
+            <p className="mt-1 text-sm text-[var(--color-muted-fg)]">
+              {confirmSession.session_name} · {confirmSession.country_name}
             </p>
-            <p className="mt-4 font-body text-sm text-[var(--color-muted-fg)]">
+            <p className="mt-4 text-sm text-[var(--color-muted-fg)]">
               {confirmSession.isLive
-                ? 'All players will join the live race feed. Questions trigger from real-time telemetry.'
-                : 'All players will join a 10x telemetry replay with server-triggered prediction questions.'}
+                ? 'Everyone joins the live race. Questions appear as the action unfolds.'
+                : replaySpeed === 1
+                  ? 'Everyone joins a real-time replay. Watch alongside your F1 TV broadcast — questions appear as the race plays out.'
+                  : 'Everyone joins a fast replay (10× speed). Questions appear as the race plays out.'}
             </p>
-            <div className="mt-6 flex flex-wrap gap-2">
+
+            {confirmSession.isCompleted && !confirmSession.isLive && (
+              <div className="mt-5">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--color-faint-fg)]">
+                  Playback speed
+                </p>
+                <div
+                  role="radiogroup"
+                  aria-label="Replay playback speed"
+                  className="grid grid-cols-2 gap-2"
+                >
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={replaySpeed === 1}
+                    disabled={isStarting}
+                    onClick={() => setReplaySpeed(1)}
+                    className={cn(
+                      'rounded-[var(--radius)] border p-3.5 text-left transition-all duration-[var(--dur-fast)]',
+                      replaySpeed === 1
+                        ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] shadow-[var(--shadow-accent)]'
+                        : 'border-[var(--color-border)] bg-[var(--color-panel)]',
+                      isStarting ? 'cursor-not-allowed opacity-60' : 'active:scale-[0.99]'
+                    )}
+                  >
+                    <p className="font-display text-lg font-bold uppercase leading-none">1×</p>
+                    <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-fg)]">
+                      Real-time
+                    </p>
+                    <p className="mt-1.5 text-[11px] leading-tight text-[var(--color-faint-fg)]">
+                      Sync with F1 TV broadcast
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={replaySpeed === 10}
+                    disabled={isStarting}
+                    onClick={() => setReplaySpeed(10)}
+                    className={cn(
+                      'rounded-[var(--radius)] border p-3.5 text-left transition-all duration-[var(--dur-fast)]',
+                      replaySpeed === 10
+                        ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] shadow-[var(--shadow-accent)]'
+                        : 'border-[var(--color-border)] bg-[var(--color-panel)]',
+                      isStarting ? 'cursor-not-allowed opacity-60' : 'active:scale-[0.99]'
+                    )}
+                  >
+                    <p className="font-display text-lg font-bold uppercase leading-none">10×</p>
+                    <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-fg)]">
+                      Fast replay
+                    </p>
+                    <p className="mt-1.5 text-[11px] leading-tight text-[var(--color-faint-fg)]">
+                      Full race in ~10 minutes
+                    </p>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="mt-6 flex flex-col gap-2.5">
               <Button
                 onClick={() => handleStartGame(String(confirmSession.session_key))}
                 disabled={isStarting}
+                size="lg"
               >
-                {isStarting ? 'Starting Session...' : 'Start Session'}
+                {isStarting ? 'Starting…' : 'Lights out'}
               </Button>
-              <Button
-                variant="secondary"
-                onClick={() => setConfirmSession(null)}
-                disabled={isStarting}
-              >
+              <Button variant="ghost" onClick={() => setConfirmSession(null)} disabled={isStarting}>
                 Cancel
               </Button>
             </div>

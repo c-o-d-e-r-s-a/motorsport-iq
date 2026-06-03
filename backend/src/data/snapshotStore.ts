@@ -13,6 +13,7 @@ import type {
   SessionMode,
 } from '../types';
 import type { OpenF1Client } from './openf1Client';
+import { mergeStintRecords, resolveTyreCompound } from './tyreCompoundResolver';
 
 interface SnapshotStoreOptions {
   onSnapshotUpdate?: (snapshot: RaceSnapshot) => void;
@@ -26,9 +27,11 @@ interface DriverData {
   latestLap: OpenF1Lap | null;
   pits: OpenF1Pit[];
   stints: OpenF1Stint[];
+  latestCompound: string | null;
 }
 
 const DEBUG_DRIVER_PROVENANCE = process.env.DEBUG_DRIVER_PROVENANCE === 'true';
+const DEBUG_MISSING_COMPOUND = process.env.DEBUG_MISSING_COMPOUND === 'true';
 const HUD_SNAPSHOT_THROTTLE_MS = 1_000;
 
 function toTimestamp(value: string | null | undefined): number {
@@ -55,6 +58,8 @@ export class SnapshotStore {
   private options: SnapshotStoreOptions;
   private previousGaps: Map<number, number> = new Map();
   private sessionMode: SessionMode = 'live';
+  /** Live mode + OpenF1 replay feed: lap_number is current lap, not SignalR completed-lap. */
+  private openF1LapNumbering = false;
   private replaySpeed: number | null = null;
   private isReplayComplete = false;
   private client: OpenF1Client;
@@ -68,7 +73,12 @@ export class SnapshotStore {
 
   async initialize(
     sessionId: number,
-    config?: { sessionMode?: SessionMode; replaySpeed?: number | null; skipDriverPreload?: boolean }
+    config?: {
+      sessionMode?: SessionMode;
+      replaySpeed?: number | null;
+      skipDriverPreload?: boolean;
+      openF1LapNumbering?: boolean;
+    }
   ): Promise<void> {
     this.sessionId = String(sessionId);
     this.drivers.clear();
@@ -79,6 +89,7 @@ export class SnapshotStore {
     this.trackStatus = 'GREEN';
     this.isReplayComplete = false;
     this.sessionMode = config?.sessionMode ?? 'live';
+    this.openF1LapNumbering = config?.openF1LapNumbering ?? false;
     this.replaySpeed = config?.replaySpeed ?? null;
     this.lastHudSnapshotAt = 0;
     if (this.hudSnapshotTimer) {
@@ -102,6 +113,7 @@ export class SnapshotStore {
             latestLap: null,
             pits: [],
             stints: [],
+            latestCompound: null,
           });
         }
         console.log(`[SnapshotStore] Pre-loaded ${driverData.length} drivers from OpenF1 API`);
@@ -136,7 +148,10 @@ export class SnapshotStore {
     for (const driver of drivers) {
       const existing = this.drivers.get(driver.driver_number);
       if (existing) {
-        existing.driver = driver;
+        const hasRealName = !/^Driver \d+$/.test(driver.full_name);
+        const existingIsPlaceholder = !existing.driver
+          || /^Driver \d+$/.test(existing.driver.full_name);
+        existing.driver = (hasRealName || existingIsPlaceholder) ? driver : existing.driver;
       } else {
         this.drivers.set(driver.driver_number, {
           driver,
@@ -145,10 +160,51 @@ export class SnapshotStore {
           latestLap: null,
           pits: [],
           stints: [],
+          latestCompound: null,
         });
       }
     }
     this.scheduleHudSnapshotUpdate();
+  }
+
+  processCompoundUpdate(driverNumber: number, compound: string): void {
+    const normalizedCompound = compound.trim();
+    if (!normalizedCompound) {
+      return;
+    }
+
+    const driverData = this.ensureDriverEntry(driverNumber);
+    driverData.latestCompound = normalizedCompound;
+
+    const activeStint = this.getActiveStintForCurrentLap(driverData);
+    if (activeStint) {
+      activeStint.compound = normalizedCompound;
+    } else {
+      driverData.stints.push({
+        date: new Date().toISOString(),
+        session_key: 0,
+        meeting_key: 0,
+        driver_number: driverNumber,
+        stint_number: driverData.pits.length + 1,
+        lap_start: this.lapNumber > 0 ? this.lapNumber : 1,
+        lap_end: null,
+        compound: normalizedCompound,
+        tyre_age_at_start: 0,
+      });
+    }
+
+    this.scheduleHudSnapshotUpdate();
+  }
+
+  /** Seed compounds and emit an initial HUD snapshot after replay/sim stint preload. */
+  bootstrapAfterStintPreload(): void {
+    for (const data of this.drivers.values()) {
+      this.refreshLatestCompound(data);
+    }
+
+    if (this.sessionId) {
+      this.buildSnapshot();
+    }
   }
 
   setSessionContext(config: { sessionMode: SessionMode; replaySpeed?: number | null }): void {
@@ -191,6 +247,7 @@ export class SnapshotStore {
       latestLap: null,
       pits: [],
       stints: [],
+      latestCompound: null,
     };
     this.drivers.set(driverNumber, driverData);
     console.log(`[SnapshotStore] Auto-created driver entry for #${driverNumber} from live data`);
@@ -201,8 +258,12 @@ export class SnapshotStore {
     const driverData = this.ensureDriverEntry(lap.driver_number, lap.session_key, lap.meeting_key);
     driverData.latestLap = lap;
 
-    if (lap.lap_number > this.lapNumber) {
-      this.lapNumber = lap.lap_number;
+    // SignalR live timing reports completed laps (+1). OpenF1 replay/sim feeds use lap_number as-is.
+    const nextLap = this.sessionMode === 'live' && !this.openF1LapNumbering
+      ? lap.lap_number + 1
+      : lap.lap_number;
+    if (nextLap > this.lapNumber) {
+      this.lapNumber = nextLap;
     }
 
     this.buildSnapshot();
@@ -212,6 +273,10 @@ export class SnapshotStore {
   }
 
   syncLapNumber(lapNumber: number): void {
+    if (this.sessionMode !== 'live') {
+      return;
+    }
+
     if (lapNumber > this.lapNumber) {
       this.lapNumber = lapNumber;
       this.scheduleHudSnapshotUpdate();
@@ -256,8 +321,11 @@ export class SnapshotStore {
   }
 
   processStintUpdate(stints: OpenF1Stint[]): void {
+    const touchedDrivers = new Set<number>();
+
     for (const stint of stints) {
       const driverData = this.ensureDriverEntry(stint.driver_number, stint.session_key, stint.meeting_key);
+      touchedDrivers.add(stint.driver_number);
 
       const existingIndex = driverData.stints.findIndex((entry) => entry.stint_number === stint.stint_number);
       if (existingIndex === -1) {
@@ -281,10 +349,18 @@ export class SnapshotStore {
         );
 
         if (shouldReplace) {
-          driverData.stints[existingIndex] = stint;
+          driverData.stints[existingIndex] = mergeStintRecords(existing, stint);
         }
       }
     }
+
+    for (const driverNumber of touchedDrivers) {
+      const driverData = this.drivers.get(driverNumber);
+      if (driverData) {
+        this.refreshLatestCompound(driverData);
+      }
+    }
+
     this.scheduleHudSnapshotUpdate();
   }
 
@@ -328,6 +404,8 @@ export class SnapshotStore {
 
       const tyreAge = this.calculateTyreAge(data);
       const activeStint = this.getActiveStintForCurrentLap(data);
+      const stintNumber = activeStint?.stint_number ?? data.pits.length + 1;
+      const tyreCompound = resolveTyreCompound(data, activeStint);
       const name = data.driver.full_name || data.driver.broadcast_name || `Driver ${driverNumber}`;
       const nameSource = data.driver.full_name
         ? 'full_name'
@@ -344,15 +422,27 @@ export class SnapshotStore {
         position: data.latestPosition?.position ?? 0,
         gap: data.latestInterval?.gap_to_leader ?? null,
         interval: data.latestInterval?.interval ?? null,
-        tyreCompound: activeStint?.compound ?? null,
+        tyreCompound,
         tyreAge: this.calculateCurrentTyreAge(activeStint, tyreAge),
-        stintNumber: activeStint?.stint_number ?? null,
+        stintNumber,
         drsEnabled: false,
         pitCount: data.pits.length,
         lastLapTime: data.latestLap?.lap_duration ?? null,
         inPit: false,
         retired: false,
       });
+
+      if (
+        DEBUG_MISSING_COMPOUND
+        && !tyreCompound
+        && this.lapNumber >= 3
+        && (data.latestPosition?.position ?? 0) === 1
+      ) {
+        console.warn(
+          `[SnapshotStore] Missing compound for leader #${driverNumber} at lap ${this.lapNumber} ` +
+          `(stints=${data.stints.length}, latestCompound=${data.latestCompound ?? 'null'})`
+        );
+      }
     }
 
     const normalizedPosition = (value: number): number => (value > 0 ? value : Number.MAX_SAFE_INTEGER);
@@ -420,11 +510,28 @@ export class SnapshotStore {
     }, waitMs);
   }
 
+  private refreshLatestCompound(data: DriverData): void {
+    const activeStint = this.getActiveStintForCurrentLap(data);
+    const resolved = resolveTyreCompound(data, activeStint);
+    if (resolved) {
+      data.latestCompound = resolved;
+    }
+  }
+
   private calculateTyreAge(data: DriverData): number {
     const lastPitLap = data.pits.length > 0
       ? Math.max(...data.pits.map((pit) => pit.lap_number))
       : 0;
-    return this.lapNumber - lastPitLap;
+
+    if (this.lapNumber <= 0) {
+      return 0;
+    }
+
+    if (lastPitLap <= 0) {
+      return Math.max(0, this.lapNumber - 1);
+    }
+
+    return Math.max(0, this.lapNumber - lastPitLap - 1);
   }
 
   private calculateCurrentTyreAge(stint: OpenF1Stint | null, fallbackTyreAge: number): number {

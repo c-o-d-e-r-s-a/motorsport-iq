@@ -186,7 +186,6 @@ export class OpenF1Client {
       Object.entries(params).map(([key, value]) => [key, String(value)])
     )}`;
 
-    const __fetchT0 = Date.now();
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       try {
         const headers: Record<string, string> = {};
@@ -194,11 +193,7 @@ export class OpenF1Client {
           headers['Authorization'] = `Bearer ${OPENF1_API_KEY}`;
         }
 
-        const __attemptT0 = Date.now();
         const response = await this.fetchImpl(url, { headers });
-        // #region agent log
-        fetch('http://127.0.0.1:7872/ingest/ea1b051c-aa7e-4ed0-a900-48054fe3ab82',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f8159b'},body:JSON.stringify({sessionId:'f8159b',hypothesisId:'H6',location:'openf1Client.ts:fetchWithCache:attempt',message:'http response received',data:{endpoint,attempt,maxRetries:MAX_RETRIES,httpStatus:response.status,attemptElapsedMs:Date.now()-__attemptT0,totalElapsedMs:Date.now()-__fetchT0},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
 
         if (response.status === 429 || response.status >= 500) {
           const retryAfterHeader = response.headers.get('retry-after');
@@ -233,10 +228,6 @@ export class OpenF1Client {
         this.cache.set(cacheKey, { data, timestamp: Date.now() });
         return data;
       } catch (error) {
-        // #region agent log
-        const __willRetry = attempt < MAX_RETRIES;
-        fetch('http://127.0.0.1:7872/ingest/ea1b051c-aa7e-4ed0-a900-48054fe3ab82',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f8159b'},body:JSON.stringify({sessionId:'f8159b',hypothesisId:'H6',location:'openf1Client.ts:fetchWithCache:catch',message:'catch block reached',data:{endpoint,attempt,maxRetries:MAX_RETRIES,errorMessage:(error as Error).message,willRetry:__willRetry,nextBackoffMs:__willRetry?BASE_BACKOFF * 2 ** attempt:null,totalElapsedMs:Date.now()-__fetchT0,hasCached:Boolean(cached)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         if (attempt < MAX_RETRIES) {
           await sleep(BASE_BACKOFF * 2 ** attempt);
           continue;

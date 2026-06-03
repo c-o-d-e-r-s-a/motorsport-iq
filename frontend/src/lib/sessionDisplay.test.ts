@@ -2,29 +2,29 @@ import { describe, expect, it } from '@jest/globals';
 import type { SessionInfo } from './types';
 import {
   filterSessionsForDisplay,
-  isCanadianGrandPrixSession,
-  isLiveCanadianGrandPrixWindow,
+  isLivePlayableWindow,
+  isPlayableLiveSession,
 } from './sessionDisplay';
 
-const canadianGpRace: SessionInfo = {
-  session_key: 99004,
-  meeting_key: 99000,
+const liveRace: SessionInfo = {
+  session_key: 11291,
+  meeting_key: 1285,
   location: 'Montréal',
   session_type: 'Race',
   session_name: 'Race',
   date_start: '2026-05-24T20:00:00+00:00',
   date_end: '2026-05-24T22:00:00+00:00',
   country_name: 'Canada',
-  circuit_short_name: 'Montréal',
+  circuit_short_name: 'Montreal',
   year: 2026,
   isCompleted: false,
   isLive: true,
   mode: 'live',
 };
 
-const canadianSprint: SessionInfo = {
-  ...canadianGpRace,
-  session_key: 99002,
+const completedSprint: SessionInfo = {
+  ...liveRace,
+  session_key: 11286,
   session_name: 'Sprint',
   date_start: '2026-05-23T16:00:00+00:00',
   date_end: '2026-05-23T17:00:00+00:00',
@@ -34,13 +34,13 @@ const canadianSprint: SessionInfo = {
 };
 
 const monacoRace: SessionInfo = {
-  session_key: 12345,
-  meeting_key: 12000,
+  session_key: 11295,
+  meeting_key: 1286,
   location: 'Monaco',
   session_type: 'Race',
   session_name: 'Race',
-  date_start: '2026-05-10T13:00:00+00:00',
-  date_end: '2026-05-10T15:00:00+00:00',
+  date_start: '2026-06-07T13:00:00+00:00',
+  date_end: '2026-06-07T15:00:00+00:00',
   country_name: 'Monaco',
   circuit_short_name: 'Monte Carlo',
   year: 2026,
@@ -50,29 +50,29 @@ const monacoRace: SessionInfo = {
 };
 
 describe('sessionDisplay', () => {
-  it('identifies the Canadian Grand Prix race session', () => {
-    expect(isCanadianGrandPrixSession(canadianGpRace)).toBe(true);
-    expect(isCanadianGrandPrixSession(canadianSprint)).toBe(false);
-    expect(isCanadianGrandPrixSession(monacoRace)).toBe(false);
+  it('identifies live Race and Sprint sessions', () => {
+    expect(isPlayableLiveSession(liveRace)).toBe(true);
+    expect(isPlayableLiveSession(completedSprint)).toBe(false);
+    expect(isPlayableLiveSession(monacoRace)).toBe(false);
   });
 
-  it('returns only the live Canadian Grand Prix when the race is live', () => {
+  it('returns only the live playable session when one is live', () => {
     const filtered = filterSessionsForDisplay([
-      canadianGpRace,
-      canadianSprint,
+      liveRace,
+      completedSprint,
       monacoRace,
     ]);
 
-    expect(filtered).toEqual([canadianGpRace]);
+    expect(filtered).toEqual([liveRace]);
   });
 
-  it('leaves the session list unchanged when the Canadian GP is not live', () => {
-    const sessions = [canadianSprint, monacoRace];
+  it('leaves the session list unchanged when no Race/Sprint is live', () => {
+    const sessions = [completedSprint, monacoRace];
     expect(filterSessionsForDisplay(sessions)).toEqual(sessions);
   });
 
-  it('detects the live Canadian Grand Prix window', () => {
-    expect(isLiveCanadianGrandPrixWindow([canadianGpRace, monacoRace])).toBe(true);
-    expect(isLiveCanadianGrandPrixWindow([canadianSprint, monacoRace])).toBe(false);
+  it('detects a live playable window', () => {
+    expect(isLivePlayableWindow([liveRace, monacoRace])).toBe(true);
+    expect(isLivePlayableWindow([completedSprint, monacoRace])).toBe(false);
   });
 });
