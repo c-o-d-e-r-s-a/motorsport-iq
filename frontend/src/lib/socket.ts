@@ -155,6 +155,10 @@ class SocketClient {
       this.emit(SERVER_EVENTS.PLAYER_DISCONNECTED, data);
     });
 
+    this.socket.on(SERVER_EVENTS.PLAYER_RECONNECTED, (data: { userId: string }) => {
+      this.emit(SERVER_EVENTS.PLAYER_RECONNECTED, data);
+    });
+
     this.socket.on(SERVER_EVENTS.ANSWER_RECEIVED, (data: { instanceId: string }) => {
       this.emit(SERVER_EVENTS.ANSWER_RECEIVED, data);
     });
@@ -209,8 +213,22 @@ class SocketClient {
     this.socket?.emit(CLIENT_EVENTS.LOOKUP_LOBBY, { lobbyCode });
   }
 
-  startSession(lobbyId: string, sessionId: string, userId?: string | null): void {
-    this.socket?.emit(CLIENT_EVENTS.START_SESSION, { lobbyId, sessionId, userId });
+  startSession(
+    lobbyId: string,
+    sessionId: string,
+    userId?: string | null,
+    options?: { replaySpeed?: number | null }
+  ): void {
+    this.socket?.emit(CLIENT_EVENTS.START_SESSION, {
+      lobbyId,
+      sessionId,
+      userId,
+      replaySpeed: options?.replaySpeed ?? null,
+    });
+  }
+
+  startSimulation(data: { username: string; sessionKey?: number }): void {
+    this.socket?.emit(CLIENT_EVENTS.START_SIMULATION, data);
   }
 
   submitAnswer(instanceId: string, answer: 'YES' | 'NO'): void {

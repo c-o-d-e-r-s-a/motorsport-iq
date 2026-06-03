@@ -220,6 +220,25 @@ describe('SnapshotStore race control updates', () => {
     expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('MEDIUM');
   });
 
+  it('includes prior-session tyre age when stint starts on used tyres', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processStintUpdate([
+      createStint({ stint_number: 1, lap_start: 1, lap_end: null, compound: 'MEDIUM', tyre_age_at_start: 8 }),
+    ]);
+    store.processLapCompletion(createLap({ lap_number: 3 }));
+
+    const leader = store.getCurrentSnapshot()?.drivers[0];
+    expect(leader?.tyreAge).toBe(10);
+    expect(leader?.tyreAge).toBeGreaterThan(store.getCurrentSnapshot()?.lapNumber ?? 0);
+  });
+
   it('uses completed lap numbers in replay mode and current lap in live mode', async () => {
     const client = {
       getDrivers: jest.fn(async () => [createDriver()]),
@@ -237,6 +256,15 @@ describe('SnapshotStore race control updates', () => {
     await liveStore.initialize(1002, { sessionMode: 'live', skipDriverPreload: true });
     liveStore.processLapCompletion(createLap({ lap_number: 14 }));
     expect(liveStore.getCurrentSnapshot()?.lapNumber).toBe(15);
+
+    const simLiveStore = new SnapshotStore(client);
+    await simLiveStore.initialize(1003, {
+      sessionMode: 'live',
+      skipDriverPreload: true,
+      openF1LapNumbering: true,
+    });
+    simLiveStore.processLapCompletion(createLap({ lap_number: 1 }));
+    expect(simLiveStore.getCurrentSnapshot()?.lapNumber).toBe(1);
   });
 
   it('emits HUD snapshot updates on telemetry changes with a 1s throttle', async () => {
@@ -283,5 +311,68 @@ describe('SnapshotStore race control updates', () => {
     await jest.advanceTimersByTimeAsync(1_000);
 
     expect(store.getCurrentSnapshot()?.drivers[0]?.name).toBe('Driver Two');
+  });
+
+  it('preserves compound when a stint update arrives without compound data', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processStintUpdate([
+      createStint({ stint_number: 1, lap_start: 1, lap_end: null, compound: 'SOFT' }),
+    ]);
+    store.processStintUpdate([
+      createStint({
+        date: '2025-09-01T13:06:00Z',
+        stint_number: 1,
+        lap_start: 1,
+        lap_end: 19,
+        compound: null,
+      }),
+    ]);
+    store.processLapCompletion(createLap({ lap_number: 10 }));
+
+    expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('SOFT');
+  });
+
+  it('falls back to the previous stint compound after a pit stop with missing compound', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processStintUpdate([
+      createStint({ stint_number: 1, lap_start: 1, lap_end: 19, compound: 'SOFT' }),
+      createStint({ stint_number: 2, lap_start: 20, lap_end: null, compound: null }),
+    ]);
+    store.processLapCompletion(createLap({ lap_number: 22 }));
+
+    expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('SOFT');
+  });
+
+  it('bootstraps leader compound before the first lap completes', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processStintUpdate([
+      createStint({ stint_number: 1, lap_start: 1, lap_end: null, compound: 'MEDIUM' }),
+    ]);
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+    store.bootstrapAfterStintPreload();
+
+    expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('MEDIUM');
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(0);
   });
 });

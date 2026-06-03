@@ -5,10 +5,21 @@ const VALID_COMPOUNDS = new Set(['SOFT', 'MEDIUM', 'HARD', 'INTERMEDIATE', 'WET'
 const COMPOUND_ALIASES: Record<string, string> = {
   S: 'SOFT',
   SOFT: 'SOFT',
+  SS: 'SOFT',
+  SUPERSOFT: 'SOFT',
+  US: 'SOFT',
+  ULTRASOFT: 'SOFT',
+  HS: 'SOFT',
+  HYPERSOFT: 'SOFT',
   M: 'MEDIUM',
   MEDIUM: 'MEDIUM',
   H: 'HARD',
   HARD: 'HARD',
+  C1: 'HARD',
+  C2: 'MEDIUM',
+  C3: 'SOFT',
+  C4: 'SOFT',
+  C5: 'SOFT',
   I: 'INTERMEDIATE',
   INTER: 'INTERMEDIATE',
   INTERMEDIATE: 'INTERMEDIATE',
@@ -144,6 +155,36 @@ export function mapTimingAppDataToStints(
   }
 
   return stints;
+}
+
+export function extractActiveCompoundsFromTimingAppData(
+  lines: Record<string, { Stints?: unknown }> | undefined
+): Array<{ driverNumber: number; compound: string }> {
+  if (!lines) {
+    return [];
+  }
+
+  const compounds: Array<{ driverNumber: number; compound: string }> = [];
+
+  for (const [driverNumberStr, lineData] of Object.entries(lines)) {
+    const driverNumber = parseInt(driverNumberStr, 10);
+    if (!Number.isFinite(driverNumber)) {
+      continue;
+    }
+
+    const stintEntries = normalizeStintEntries(lineData?.Stints);
+    if (stintEntries.length === 0) {
+      continue;
+    }
+
+    const [, activeStintData] = stintEntries[stintEntries.length - 1];
+    const compound = normalizeCompound(activeStintData.Compound);
+    if (compound) {
+      compounds.push({ driverNumber, compound });
+    }
+  }
+
+  return compounds;
 }
 
 export interface PitStopDetectionInput {

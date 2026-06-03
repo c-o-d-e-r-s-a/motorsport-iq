@@ -11,8 +11,12 @@
     "test": "jest",
     "test:e2e": "jest --config jest.e2e.config.js",
     "lint": "eslint src/**/*.ts",
+    "loadtest:100": "node loadtest/runSummary.js loadtest/scenario-100-live.json",
+    "loadtest:250": "node loadtest/runSummary.js loadtest/scenario-250-live.json",
     "loadtest:500": "node loadtest/runSummary.js loadtest/scenario-500-live.json",
-    "loadtest:5000": "node loadtest/runSummary.js loadtest/scenario-5000-live.json"
+    "loadtest:5000": "node loadtest/runSummary.js loadtest/scenario-5000-live.json",
+    "loadtest:smoke": "node loadtest/harness.js --mode lobbies --target 100 --users-per-lobby 10",
+    "loadtest:smoke:players": "node loadtest/harness.js --mode players --target 100"
   },
   "keywords": [
     "f1",

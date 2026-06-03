@@ -1,5 +1,4 @@
 // @ts-nocheck - Supabase type inference issues with generic client
-// @ts-nocheck - Supabase type inference issues with generic client
 import type { QuestionInstanceState, RaceSnapshot } from '../types';
 import type { QuestionInstance, Answer } from '../db/types';
 import supabase from '../db/supabaseClient';
@@ -10,6 +9,8 @@ import { calculateScore, dedupeAnswersByUser, updateLeaderboardEntry } from '../
 import { getQuestionById } from '../engine/questionBank';
 import { generateResolutionExplanation } from '../ai/explanationGenerator';
 import { enqueueScoringJob } from '../runtime/workQueue';
+import { FF_BATCH_SCORING } from '../runtime/featureFlags';
+import { trackDbQuery, trackDbWrite } from '../observability/dbMetrics';
 
 /**
  * Lifecycle Manager - Question FSM and state transitions
@@ -73,7 +74,11 @@ function scheduleLobbyTimer(
 ): NodeJS.Timeout {
   const timer = setTimeout(async () => {
     untrackLobbyTimer(lobbyId, timer);
-    await callback();
+    try {
+      await callback();
+    } catch (error) {
+      console.error(`[Lifecycle] Timer callback failed for lobby ${lobbyId}:`, (error as Error).message);
+    }
   }, delayMs);
   trackLobbyTimer(lobbyId, timer);
   return timer;
@@ -85,6 +90,7 @@ function scheduleLobbyTimer(
 export async function createQuestionInstance(
   instance: QuestionInstanceState
 ): Promise<QuestionInstance> {
+  trackDbWrite('question_instances.insert');
   const { data, error } = await supabase
     .from('question_instances')
     .insert({
@@ -131,10 +137,8 @@ export async function updateQuestionState(
     updateData.closed_at = new Date().toISOString();
   }
 
+  trackDbWrite('question_instances.update');
   await supabase
-    .from('question_instances')
-    .update(updateData)
-    .eq('id', instanceId);
 }
 
 /**
@@ -450,16 +454,20 @@ async function processAnswers(
       });
     }
 
-    let usedBatchRpc = true;
-    const { error: batchError } = await supabase.rpc('update_leaderboard_batch', {
-      p_lobby_id: instance.lobbyId,
-      p_instance_id: instance.id,
-      p_rows: scoreRows,
-    });
+    let usedBatchRpc = false;
+    if (FF_BATCH_SCORING) {
+      trackDbWrite('leaderboard.batch_update');
+      const { error: batchError } = await supabase.rpc('update_leaderboard_batch', {
+        p_lobby_id: instance.lobbyId,
+        p_instance_id: instance.id,
+        p_rows: scoreRows,
+      });
 
-    if (batchError) {
-      usedBatchRpc = false;
-      console.warn(`[SCORING] Falling back to per-user RPC for instance ${instance.id}: ${batchError.message}`);
+      if (batchError) {
+        console.warn(`[SCORING] Falling back to per-user RPC for instance ${instance.id}: ${batchError.message}`);
+      } else {
+        usedBatchRpc = true;
+      }
     }
 
     // Process each answer exactly once per user.
@@ -490,6 +498,7 @@ async function processAnswers(
       );
 
       if (!usedBatchRpc) {
+        trackDbWrite('leaderboard.update');
         // Backward compatibility path while the batch RPC is being rolled out.
         await supabase.rpc('update_leaderboard', {
           p_lobby_id: instance.lobbyId,
@@ -535,6 +544,7 @@ export async function submitAnswer(
   answer: 'YES' | 'NO'
 ): Promise<{ success: boolean; error?: string }> {
   // Check if already answered
+  trackDbQuery('answers.lookup_existing');
   const { data: existingAnswer } = await supabase
     .from('answers')
     .select()
@@ -589,6 +599,7 @@ export async function submitAnswer(
   const responseTimeMs = Math.max(0, Date.now() - instance.triggeredAt.getTime());
 
   // Save answer
+  trackDbWrite('answers.insert');
   const { error } = await supabase.from('answers').insert({
     instance_id: instanceId,
     user_id: userId,

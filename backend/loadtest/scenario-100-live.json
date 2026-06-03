@@ -1,0 +1,21 @@
+{
+  "name": "live-100-concurrent",
+  "targets": {
+    "concurrentUsers": 100,
+    "lobbies": 10,
+    "usersPerLobby": 10,
+    "durationMinutes": 20
+  },
+  "slo": {
+    "questionEventP95Ms": 500,
+    "submitAnswerAckP95Ms": 300,
+    "resolutionPublishP95Ms": 1000,
+    "reconnectRecoveryP95Ms": 3000,
+    "criticalEventDropRatePct": 0.1
+  },
+  "trafficProfile": {
+    "presencePingIntervalMs": 90000,
+    "answerWindowMs": 45000,
+    "questionCadencePerLobbyPerMinute": 0.4
+  }
+}

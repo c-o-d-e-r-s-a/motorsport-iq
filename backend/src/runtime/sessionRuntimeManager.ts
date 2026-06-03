@@ -1,120 +1,30 @@
-import { OpenF1Client } from '../data/openf1Client';
 import { getScheduledLaps } from '../data/f1Calendar';
-import { SnapshotStore } from '../data/snapshotStore';
 import { F1SignalRClient } from '../data/f1SignalRClient';
-import type {
-  OpenF1Interval,
-  OpenF1Lap,
-  OpenF1Pit,
-  OpenF1Position,
-  OpenF1RaceControl,
-  OpenF1Session,
-  RaceSnapshot,
-  SessionMode,
-} from '../types';
-import { buildReplayTimeline, type ReplayEvent } from './replayTimeline';
+import type { OpenF1Session, SessionMode } from '../types';
+import {
+  applyReplayEvent,
+  buildReplayTimeline,
+  type ReplayEvent,
+} from './replayTimeline';
+import {
+  BaseRuntime,
+  cloneLobbyIds,
+  computeReplayEventDelayMs,
+  type RuntimeCallbacks,
+  type SessionRuntime,
+} from './sessionRuntimeBase';
+import { SimulatedLiveSessionRuntime } from './simulatedLiveSessionRuntime';
+import { toSessionInfo } from './sessionRuntimeInfo';
 
-const REPLAY_SPEED = 10;
+export const SUPPORTED_REPLAY_SPEEDS = [1, 10] as const;
+export type ReplaySpeed = (typeof SUPPORTED_REPLAY_SPEEDS)[number];
+export const DEFAULT_REPLAY_SPEED: ReplaySpeed = 10;
 
-interface RuntimeCallbacks {
-  onSnapshotUpdate: (snapshot: RaceSnapshot, lobbyIds: Set<string>) => void;
-  onLapComplete: (snapshot: RaceSnapshot, lobbyIds: Set<string>) => Promise<void>;
-  onFeedStall: (stalled: boolean, lobbyIds: Set<string>) => void;
-  onReplayComplete: (snapshot: RaceSnapshot | null, lobbyIds: Set<string>) => Promise<void>;
-  onError: (error: Error) => void;
-}
-
-export interface SessionRuntime {
-  sessionId: string;
-  mode: SessionMode;
-  replaySpeed: number | null;
-  addLobby(lobbyId: string): void;
-  removeLobby(lobbyId: string): void;
-  getLobbyIds(): Set<string>;
-  getCurrentSnapshot(): RaceSnapshot | null;
-  getPreviousSnapshot(): RaceSnapshot | null;
-  start(): Promise<void>;
-  stop(): void;
-  pause?(): void;
-  resume?(): void;
-  isPausedState?(): boolean;
-}
-
-function cloneLobbyIds(source: Set<string>): Set<string> {
-  return new Set(source);
-}
-
-abstract class BaseRuntime implements SessionRuntime {
-  readonly sessionId: string;
-  readonly mode: SessionMode;
-  readonly replaySpeed: number | null;
-  protected readonly session: OpenF1Session;
-  protected readonly callbacks: RuntimeCallbacks;
-  protected readonly lobbyIds = new Set<string>();
-  protected readonly client: OpenF1Client;
-  protected readonly snapshotStore: SnapshotStore;
-  protected started = false;
-
-  constructor(session: OpenF1Session, mode: SessionMode, replaySpeed: number | null, callbacks: RuntimeCallbacks) {
-    this.session = session;
-    this.sessionId = String(session.session_key);
-    this.mode = mode;
-    this.replaySpeed = replaySpeed;
-    this.callbacks = callbacks;
-
-    this.client = new OpenF1Client({
-      onLapCompletion: (lap) => this.handleLapCompletion(lap),
-      onPositionUpdate: (positions) => this.snapshotStore.processPositionUpdate(positions),
-      onIntervalUpdate: (intervals) => this.snapshotStore.processIntervalUpdate(intervals),
-      onPitUpdate: (pits) => this.snapshotStore.processPitUpdate(pits),
-      onStintUpdate: (stints) => this.snapshotStore.processStintUpdate(stints),
-      onRaceControlUpdate: (messages) => this.snapshotStore.processRaceControlUpdate(messages),
-      onFeedStall: (stalled) => {
-        this.snapshotStore.handleFeedStall(stalled);
-        this.callbacks.onFeedStall(stalled, cloneLobbyIds(this.lobbyIds));
-      },
-      onError: (error) => this.callbacks.onError(error),
-    });
-
-    this.snapshotStore = new SnapshotStore(this.client, {
-      onSnapshotUpdate: (snapshot) => {
-        this.callbacks.onSnapshotUpdate(snapshot, cloneLobbyIds(this.lobbyIds));
-      },
-      onLapComplete: async (snapshot) => {
-        await this.callbacks.onLapComplete(snapshot, cloneLobbyIds(this.lobbyIds));
-      },
-    });
+export function normalizeReplaySpeed(value: unknown): ReplaySpeed {
+  if (typeof value === 'number' && (SUPPORTED_REPLAY_SPEEDS as readonly number[]).includes(value)) {
+    return value as ReplaySpeed;
   }
-
-  addLobby(lobbyId: string): void {
-    this.lobbyIds.add(lobbyId);
-  }
-
-  removeLobby(lobbyId: string): void {
-    this.lobbyIds.delete(lobbyId);
-    if (this.lobbyIds.size === 0) {
-      this.stop();
-    }
-  }
-
-  getLobbyIds(): Set<string> {
-    return cloneLobbyIds(this.lobbyIds);
-  }
-
-  getCurrentSnapshot(): RaceSnapshot | null {
-    return this.snapshotStore.getCurrentSnapshot();
-  }
-
-  getPreviousSnapshot(): RaceSnapshot | null {
-    return this.snapshotStore.getPreviousSnapshot();
-  }
-
-  protected async handleLapCompletion(lap: OpenF1Lap): Promise<void> {
-    this.snapshotStore.processLapCompletion(lap);
-  }
-
-  abstract start(): Promise<void>;
-  abstract stop(): void;
+  return DEFAULT_REPLAY_SPEED;
 }
 
 class LiveSessionRuntime extends BaseRuntime {
@@ -130,10 +40,6 @@ class LiveSessionRuntime extends BaseRuntime {
     this.started = true;
     this.raceFinished = false;
 
-    // We intentionally do NOT call client.setSession or any OpenF1 data
-    // endpoint here. While a live session is in progress OpenF1 returns
-    // 401 "Live F1 session in progress" on every data route, so the
-    // entire live pipeline is fed by the F1 SignalR feed.
     await this.snapshotStore.initialize(this.session.session_key, {
       sessionMode: 'live',
       replaySpeed: null,
@@ -154,19 +60,11 @@ class LiveSessionRuntime extends BaseRuntime {
       onTimingProgress: (maxLap) => this.snapshotStore.syncLapNumber(maxLap),
       onTrackStatusChange: (status) => {
         this.snapshotStore.setTrackStatus(status);
-        
-        // Auto-finish live sessions when chequered flag appears. This handles
-        // the edge case where SignalR keeps streaming cooldown lap data after
-        // the race ends but before the calendar's scheduled date_end. Without
-        // this, users joining a "live" session 5-10 minutes after the flag
-        // would see telemetry updates but zero questions (all blocked by
-        // CHEQUERED guard in the question engine).
+
         if (status === 'CHEQUERED' && !this.raceFinished) {
           this.raceFinished = true;
           console.log(`[Live Runtime] Chequered flag detected for session ${this.sessionId}. Marking all attached lobbies as finished.`);
-          
-          // Reuse the replay completion flow — marks lobbies finished, clears
-          // timers, broadcasts final state, and stops accepting new questions.
+
           void this.callbacks.onReplayComplete(
             this.snapshotStore.getCurrentSnapshot(),
             cloneLobbyIds(this.lobbyIds)
@@ -189,9 +87,6 @@ class LiveSessionRuntime extends BaseRuntime {
         this.snapshotStore.handleFeedStall(false);
       },
       onConnectionClosedPermanently: () => {
-        // OpenF1 is unusable while the live session is in progress, so we
-        // surface a feed-stall instead of attempting a REST fallback that
-        // would 401. Operators will see the stall banner on the client.
         console.error(`[Live Runtime] SignalR closed permanently for session ${this.sessionId}. Feed marked stalled (no REST fallback during live window).`);
         this.snapshotStore.handleFeedStall(true);
         this.callbacks.onFeedStall(true, cloneLobbyIds(this.lobbyIds));
@@ -225,9 +120,11 @@ class ReplaySessionRuntime extends BaseRuntime {
   private complete = false;
   private isPaused = false;
   private pauseTimer: NodeJS.Timeout | null = null;
+  private readonly playbackSpeed: ReplaySpeed;
 
-  constructor(session: OpenF1Session, callbacks: RuntimeCallbacks) {
-    super(session, 'replay', REPLAY_SPEED, callbacks);
+  constructor(session: OpenF1Session, callbacks: RuntimeCallbacks, replaySpeed: ReplaySpeed = DEFAULT_REPLAY_SPEED) {
+    super(session, 'replay', replaySpeed, callbacks);
+    this.playbackSpeed = replaySpeed;
   }
 
   async start(): Promise<void> {
@@ -240,7 +137,7 @@ class ReplaySessionRuntime extends BaseRuntime {
     this.client.setSession(this.session.session_key);
     await this.snapshotStore.initialize(this.session.session_key, {
       sessionMode: 'replay',
-      replaySpeed: REPLAY_SPEED,
+      replaySpeed: this.playbackSpeed,
     });
 
     const laps = await this.client.fetchLaps();
@@ -253,6 +150,7 @@ class ReplaySessionRuntime extends BaseRuntime {
 
     this.snapshotStore.setTotalLaps(totalLaps > 0 ? totalLaps : null);
     this.snapshotStore.processStintUpdate(stints ?? []);
+    this.snapshotStore.bootstrapAfterStintPreload();
 
     this.events = buildReplayTimeline({
       laps: laps ?? [],
@@ -309,7 +207,7 @@ class ReplaySessionRuntime extends BaseRuntime {
       return;
     }
 
-    this.applyEvent(currentEvent);
+    applyReplayEvent(this.snapshotStore, currentEvent);
     this.currentIndex += 1;
 
     const nextEvent = this.events[this.currentIndex];
@@ -318,30 +216,8 @@ class ReplaySessionRuntime extends BaseRuntime {
       return;
     }
 
-    const delayMs = Math.max(0, Math.round((nextEvent.timestamp - currentEvent.timestamp) / REPLAY_SPEED));
+    const delayMs = computeReplayEventDelayMs(currentEvent, nextEvent, this.playbackSpeed);
     this.timer = setTimeout(() => this.runNext(), delayMs);
-  }
-
-  private applyEvent(event: ReplayEvent): void {
-    switch (event.type) {
-      case 'race_control':
-        this.snapshotStore.processRaceControlUpdate([event.data as OpenF1RaceControl]);
-        break;
-      case 'position':
-        this.snapshotStore.processPositionUpdate([event.data as OpenF1Position]);
-        break;
-      case 'interval':
-        this.snapshotStore.processIntervalUpdate([event.data as OpenF1Interval]);
-        break;
-      case 'pit':
-        this.snapshotStore.processPitUpdate([event.data as OpenF1Pit]);
-        break;
-      case 'lap':
-        this.snapshotStore.processLapCompletion(event.data as OpenF1Lap);
-        break;
-      default:
-        break;
-    }
   }
 }
 
@@ -359,23 +235,53 @@ export class SessionRuntimeManager {
     return endDate < Date.now() ? 'replay' : 'live';
   }
 
-  private getRuntimeKey(lobbyId: string, session: OpenF1Session): string {
+  private getRuntimeKey(
+    lobbyId: string,
+    session: OpenF1Session,
+    replaySpeed?: ReplaySpeed
+  ): string {
     const mode = this.getSessionMode(session);
     if (mode === 'replay') {
-      return `replay:${lobbyId}:${session.session_key}`;
+      const speed = replaySpeed ?? DEFAULT_REPLAY_SPEED;
+      return `replay:${lobbyId}:${session.session_key}:${speed}x`;
     }
 
     return `live:${session.session_key}`;
   }
 
-  async attachLobbyToSession(lobbyId: string, session: OpenF1Session): Promise<SessionRuntime> {
-    const runtimeKey = this.getRuntimeKey(lobbyId, session);
+  private getSimulationRuntimeKey(session: OpenF1Session): string {
+    return `sim-live:${session.session_key}`;
+  }
+
+  async attachLobbyToSession(
+    lobbyId: string,
+    session: OpenF1Session,
+    options?: { replaySpeed?: ReplaySpeed }
+  ): Promise<SessionRuntime> {
+    const mode = this.getSessionMode(session);
+    const replaySpeed = mode === 'replay'
+      ? normalizeReplaySpeed(options?.replaySpeed)
+      : undefined;
+    const runtimeKey = this.getRuntimeKey(lobbyId, session, replaySpeed);
     let runtime = this.runtimes.get(runtimeKey);
     if (!runtime) {
-      const mode = this.getSessionMode(session);
       runtime = mode === 'replay'
-        ? new ReplaySessionRuntime(session, this.callbacks)
+        ? new ReplaySessionRuntime(session, this.callbacks, replaySpeed)
         : new LiveSessionRuntime(session, this.callbacks);
+      this.runtimes.set(runtimeKey, runtime);
+    }
+
+    runtime.addLobby(lobbyId);
+    this.lobbyRuntimeKeys.set(lobbyId, runtimeKey);
+    await runtime.start();
+    return runtime;
+  }
+
+  async attachLobbyToSimulation(lobbyId: string, session: OpenF1Session): Promise<SessionRuntime> {
+    const runtimeKey = this.getSimulationRuntimeKey(session);
+    let runtime = this.runtimes.get(runtimeKey);
+    if (!runtime) {
+      runtime = new SimulatedLiveSessionRuntime(session, this.callbacks);
       this.runtimes.set(runtimeKey, runtime);
     }
 
@@ -413,16 +319,5 @@ export class SessionRuntimeManager {
   }
 }
 
-export function toSessionInfo(session: OpenF1Session): OpenF1Session & { isCompleted: boolean; isLive: boolean; mode: SessionMode } {
-  const now = Date.now();
-  const start = new Date(session.date_start).getTime();
-  const end = new Date(session.date_end).getTime();
-  const isCompleted = end < now;
-  const isLive = start <= now && now < end;
-  return {
-    ...session,
-    isCompleted,
-    isLive,
-    mode: isLive ? 'live' : 'replay',
-  };
-}
+export type { RuntimeCallbacks, SessionRuntime };
+export { toSessionInfo };

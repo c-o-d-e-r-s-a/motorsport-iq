@@ -1,3 +1,4 @@
+import type { SnapshotStore } from '../data/snapshotStore';
 import type {
   OpenF1Interval,
   OpenF1Lap,
@@ -103,4 +104,39 @@ export function buildReplayTimeline(input: ReplayTimelineInput): ReplayEvent[] {
     });
 
   return events;
+}
+
+/** Shift timeline so the first event starts at t=0 (preserves inter-event deltas). */
+export function normalizeTimelineToZero(events: ReplayEvent[]): ReplayEvent[] {
+  if (events.length === 0) {
+    return events;
+  }
+
+  const origin = events[0].timestamp;
+  return events.map((event) => ({
+    ...event,
+    timestamp: event.timestamp - origin,
+  }));
+}
+
+export function applyReplayEvent(snapshotStore: SnapshotStore, event: ReplayEvent): void {
+  switch (event.type) {
+    case 'race_control':
+      snapshotStore.processRaceControlUpdate([event.data as OpenF1RaceControl]);
+      break;
+    case 'position':
+      snapshotStore.processPositionUpdate([event.data as OpenF1Position]);
+      break;
+    case 'interval':
+      snapshotStore.processIntervalUpdate([event.data as OpenF1Interval]);
+      break;
+    case 'pit':
+      snapshotStore.processPitUpdate([event.data as OpenF1Pit]);
+      break;
+    case 'lap':
+      snapshotStore.processLapCompletion(event.data as OpenF1Lap);
+      break;
+    default:
+      break;
+  }
 }

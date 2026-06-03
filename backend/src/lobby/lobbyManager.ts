@@ -4,6 +4,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Lobby, User, QuestionInstance } from '../db/types';
 import supabase from '../db/supabaseClient';
+import { trackDbQuery, trackDbWrite } from '../observability/dbMetrics';
 import type {
   LobbyState,
   PlayerState,
@@ -21,18 +22,20 @@ import type {
 const lobbyStates: Map<string, LobbyState> = new Map();
 const userLobbies: Map<string, string> = new Map(); // userId -> lobbyId
 const lastPersistedActivityAt: Map<string, number> = new Map();
-const DEFAULT_MAX_PLAYERS_PER_LOBBY = 50;
+const DEFAULT_MAX_PLAYERS_PER_LOBBY = 75;
 
 interface LobbyRuntimeMeta {
   sessionMode: SessionMode | null;
   replaySpeed: number | null;
   isReplayComplete: boolean;
+  isSimulation: boolean;
 }
 
 const defaultRuntimeMeta = (): LobbyRuntimeMeta => ({
   sessionMode: null,
   replaySpeed: null,
   isReplayComplete: false,
+  isSimulation: false,
 });
 
 const lobbyRuntimeMeta: Map<string, LobbyRuntimeMeta> = new Map();
@@ -76,7 +79,7 @@ export async function createLobby(username: string, sessionId?: string): Promise
     attempts++;
   }
 
-  // Create lobby in database
+  trackDbWrite('lobbies.insert');
   const { data: lobby, error: lobbyError } = await supabase
     .from('lobbies')
     .insert({
@@ -138,6 +141,7 @@ export async function createLobby(username: string, sessionId?: string): Promise
     sessionMode: null,
     replaySpeed: null,
     isReplayComplete: false,
+    isSimulation: false,
     players: [{ id: user.id, username, isHost: true, connected: true }],
     currentQuestion: null,
     latestResolution: null,
@@ -183,6 +187,7 @@ export async function joinLobby(lobbyCode: string, username: string): Promise<{ 
 
   const maxPlayers = Number.parseInt(process.env.MAX_PLAYERS_PER_LOBBY ?? '', 10)
     || DEFAULT_MAX_PLAYERS_PER_LOBBY;
+  trackDbQuery('users.count_by_lobby');
   const { count: playerCount, error: playerCountError } = await supabase
     .from('users')
     .select('*', { count: 'exact', head: true })
@@ -280,7 +285,7 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
     return cached;
   }
 
-  // Fetch from database
+  trackDbQuery('lobby_state.load');
   const { data: lobby, error: lobbyError } = await supabase
     .from('lobbies')
     .select()
@@ -315,6 +320,7 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
     sessionMode: lobbyRuntimeMeta.get(lobbyId)?.sessionMode ?? null,
     replaySpeed: lobbyRuntimeMeta.get(lobbyId)?.replaySpeed ?? null,
     isReplayComplete: lobbyRuntimeMeta.get(lobbyId)?.isReplayComplete ?? false,
+    isSimulation: lobbyRuntimeMeta.get(lobbyId)?.isSimulation ?? false,
     players: (users ?? []).map((u) => ({
       id: u.id,
       username: u.username,
@@ -398,6 +404,7 @@ export function setLobbyRuntimeMeta(
     lobbyState.sessionMode = next.sessionMode;
     lobbyState.replaySpeed = next.replaySpeed;
     lobbyState.isReplayComplete = next.isReplayComplete;
+    lobbyState.isSimulation = next.isSimulation;
   }
 }
 
@@ -406,11 +413,16 @@ export function clearLobbyRuntimeMeta(lobbyId: string): void {
 }
 
 export async function touchUserActivity(userId: string): Promise<void> {
+  trackDbWrite('users.last_active_at');
   await supabase
     .from('users')
     .update({ last_active_at: new Date().toISOString() })
     .eq('id', userId);
   lastPersistedActivityAt.set(userId, Date.now());
+}
+
+export async function flushUserActivity(userId: string): Promise<void> {
+  await touchUserActivity(userId);
 }
 
 export async function touchUserActivityThrottled(userId: string, minIntervalMs: number): Promise<void> {

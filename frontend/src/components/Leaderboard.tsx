@@ -10,11 +10,9 @@ interface LeaderboardProps {
   maxEntries?: number;
 }
 
-export default function Leaderboard({
-  entries,
-  currentUserId,
-  maxEntries = 10,
-}: LeaderboardProps) {
+const RANK_ACCENT = ['#ffd400', '#cfd6e0', '#d98a4a'];
+
+export default function Leaderboard({ entries, currentUserId, maxEntries = 10 }: LeaderboardProps) {
   const sortedEntries = [...entries]
     .sort((a, b) => {
       if (b.points !== a.points) return b.points - a.points;
@@ -23,65 +21,64 @@ export default function Leaderboard({
     })
     .slice(0, maxEntries);
 
-  const me = currentUserId ? entries.find((entry) => entry.userId === currentUserId) : undefined;
-
   return (
-    <Card tone="default" className="h-full p-5 md:p-6">
-      <h3 className="font-display text-2xl uppercase tracking-tight">Leaderboard</h3>
+    <Card tone="default" className="h-full">
+      <div className="flex items-center justify-between">
+        <h3 className="font-display text-xl font-semibold uppercase tracking-tight">Leaderboard</h3>
+        <span className="text-xs font-medium uppercase tracking-wide text-[var(--color-faint-fg)]">
+          {sortedEntries.length} {sortedEntries.length === 1 ? 'driver' : 'drivers'}
+        </span>
+      </div>
 
       {sortedEntries.length === 0 ? (
-        <p className="mt-5 border-2 border-[var(--color-border)] p-4 text-center font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">
-          No Players Yet
+        <p className="mt-4 rounded-[var(--radius-sm)] border border-dashed border-[var(--color-border)] p-5 text-center text-sm text-[var(--color-muted-fg)]">
+          No scores yet — answer a question to get on the board.
         </p>
       ) : (
-        <div className="mt-4 space-y-2">
+        <ol className="mt-3 space-y-1.5">
           {sortedEntries.map((entry, index) => {
             const rank = index + 1;
             const isCurrentUser = entry.userId === currentUserId;
+            const medal = rank <= 3 ? RANK_ACCENT[rank - 1] : null;
 
             return (
-              <div
+              <li
                 key={entry.userId}
                 className={cn(
-                  'grid grid-cols-[40px_1fr_auto] items-center gap-3 border-2 border-[var(--color-border)] p-3',
-                  isCurrentUser && 'border-[var(--color-accent)]'
+                  'flex items-center gap-3 rounded-[var(--radius-sm)] px-3 py-2.5 transition-colors',
+                  isCurrentUser
+                    ? 'bg-[var(--color-accent-soft)] ring-1 ring-[var(--color-accent)]/50'
+                    : 'bg-[var(--color-muted)]'
                 )}
               >
-                <p className="font-display text-sm uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">#{rank}</p>
-                <div className="min-w-0">
-                  <p className="truncate font-display text-lg uppercase leading-none">{entry.username}</p>
-                  <p className="font-body text-xs text-[var(--color-muted-fg)]">
-                    {entry.accuracy.toFixed(0)}% accuracy {entry.streak > 0 ? `· streak ${entry.streak}` : ''}
+                <span
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full font-display text-sm font-bold"
+                  style={
+                    medal
+                      ? { backgroundColor: medal, color: '#0a0d12' }
+                      : { color: 'var(--color-faint-fg)' }
+                  }
+                >
+                  {rank}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-display text-base font-semibold uppercase leading-tight">
+                    {entry.username}
+                    {isCurrentUser && <span className="ml-1.5 text-[var(--color-accent)]">· you</span>}
+                  </p>
+                  <p className="text-xs text-[var(--color-muted-fg)]">
+                    {entry.accuracy.toFixed(0)}% accuracy
+                    {entry.streak > 1 ? ` · ${entry.streak} streak` : ''}
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="font-display text-2xl leading-none">{entry.points}</p>
-                  <p className="font-display text-[10px] uppercase tracking-[0.16em] text-[var(--color-muted-fg)]">pts</p>
+                  <span className="font-display text-xl font-bold leading-none">{entry.points}</span>
+                  <span className="ml-1 text-[0.65rem] font-medium uppercase text-[var(--color-faint-fg)]">pts</span>
                 </div>
-              </div>
+              </li>
             );
           })}
-        </div>
-      )}
-
-      {me && (
-        <div className="mt-5 border-t-2 border-[var(--color-border)] pt-4">
-          <p className="mb-3 font-display text-xs uppercase tracking-[0.2em] text-[var(--color-muted-fg)]">Your Summary</p>
-          <div className="grid grid-cols-3 gap-2">
-            <div className="border-2 border-[var(--color-border)] p-2 text-center">
-              <p className="font-display text-2xl leading-none">{me.correctAnswers}</p>
-              <p className="font-display text-[10px] uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">Correct</p>
-            </div>
-            <div className="border-2 border-[var(--color-border)] p-2 text-center">
-              <p className="font-display text-2xl leading-none">{me.maxStreak}</p>
-              <p className="font-display text-[10px] uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">Best Streak</p>
-            </div>
-            <div className="border-2 border-[var(--color-border)] p-2 text-center">
-              <p className="font-display text-2xl leading-none">{me.accuracy.toFixed(0)}%</p>
-              <p className="font-display text-[10px] uppercase tracking-[0.14em] text-[var(--color-muted-fg)]">Accuracy</p>
-            </div>
-          </div>
-        </div>
+        </ol>
       )}
     </Card>
   );

@@ -12,6 +12,7 @@ import type {
 } from '../types';
 import {
   detectPitStopsFromTimingLine,
+  extractActiveCompoundsFromTimingAppData,
   mapPitLaneTimeCollectionToPits,
   mapTimingAppDataToStints,
   normalizeCompound,
@@ -502,6 +503,10 @@ export class F1SignalRClient {
     const stints = mapTimingAppDataToStints(lines, timestamp);
     if (stints.length > 0) {
       this.options.onStintUpdate?.(stints);
+    }
+
+    for (const { driverNumber, compound } of extractActiveCompoundsFromTimingAppData(lines)) {
+      this.options.onCompoundUpdate?.(driverNumber, compound);
     }
   }
 

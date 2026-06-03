@@ -1,41 +1,23 @@
 import type { SessionInfo } from './types';
 
-function normalizeLabel(value: string): string {
-  return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-}
-
-export function isCanadianGrandPrixSession(session: SessionInfo): boolean {
-  if (session.session_name !== 'Race') return false;
-
-  const country = normalizeLabel(session.country_name);
-  const location = normalizeLabel(session.location);
-  const circuit = normalizeLabel(session.circuit_short_name);
-
-  return (
-    country === 'canada'
-    && (location.includes('montreal') || circuit.includes('montreal'))
-  );
+export function isPlayableLiveSession(session: SessionInfo): boolean {
+  return session.isLive && (session.session_name === 'Race' || session.session_name === 'Sprint');
 }
 
 /**
- * When the Canadian Grand Prix is live, the lobby should surface exactly one
- * session card — the live race — so hosts cannot pick stale replays or other
- * meetings while the test window is open.
+ * When a Race or Sprint is live, the lobby should surface exactly one session
+ * card so hosts cannot pick stale replays or other meetings mid-race.
  */
 export function filterSessionsForDisplay(sessions: SessionInfo[]): SessionInfo[] {
-  const liveCanadianGp = sessions.find(
-    (session) => session.isLive && isCanadianGrandPrixSession(session)
-  );
+  const livePlayable = sessions.find(isPlayableLiveSession);
 
-  if (liveCanadianGp) {
-    return [liveCanadianGp];
+  if (livePlayable) {
+    return [livePlayable];
   }
 
   return sessions;
 }
 
-export function isLiveCanadianGrandPrixWindow(sessions: SessionInfo[]): boolean {
-  return sessions.some(
-    (session) => session.isLive && isCanadianGrandPrixSession(session)
-  );
+export function isLivePlayableWindow(sessions: SessionInfo[]): boolean {
+  return sessions.some(isPlayableLiveSession);
 }

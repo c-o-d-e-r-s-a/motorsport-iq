@@ -31,6 +31,7 @@ import {
   registerUserLobby,
   touchUserActivity,
   touchUserActivityThrottled,
+  flushUserActivity,
 } from './lobby/lobbyManager';
 import {
   startQuestionLifecycle,
@@ -47,14 +48,20 @@ import { generateQuestionText } from './ai/explanationGenerator';
 import { OpenF1Client } from './data/openf1Client';
 import {
   dedupeWeekendSessions,
+  DEFAULT_SIMULATION_SESSION_KEY,
   getActiveLiveCalendarSession,
   getCalendarSession,
-  isCalendarPlaceholderKey,
+  getCalendarSessions,
   mergeWithCalendar,
-  resolveSessionForReplay,
 } from './data/f1Calendar';
+import {
+  ensureSeasonCalendar,
+  seedSeasonCalendar,
+  startSeasonCalendarRefresh,
+  stopSeasonCalendarRefresh,
+} from './data/seasonCalendarStore';
 import { selectQuestion, clearCooldowns, formatQuestionText } from './engine/questionEngine';
-import { SessionRuntimeManager, toSessionInfo } from './runtime/sessionRuntimeManager';
+import { SessionRuntimeManager, toSessionInfo, normalizeReplaySpeed } from './runtime/sessionRuntimeManager';
 import { PresenceManager, type PresenceExpiryReason } from './lobby/presenceManager';
 import { buildQuestionEventPayload, isUnresolvedQuestionState } from './lobby/questionPayload';
 import {
@@ -76,6 +83,12 @@ import type { CorsOptions } from 'cors';
 import { metrics } from './observability/metrics';
 import { closeRedisRuntime, createRedisRuntime } from './runtime/redis';
 import { createDistributedLockManager } from './runtime/distributedLock';
+import {
+  FF_BATCH_SCORING,
+  FF_DELTA_LOBBY_STATE,
+  FF_PRESENCE_WRITE_THROTTLE,
+  SIMULATION_ENABLED,
+} from './runtime/featureFlags';
 
 const app = express();
 const DEFAULT_ALLOWED_ORIGINS = [
@@ -132,6 +145,21 @@ const maxActiveLobbies = parsePositiveNumberEnv(
   process.env.MAX_ACTIVE_LOBBIES,
   500
 );
+
+async function assertActiveLobbyCapacity(): Promise<void> {
+  const { count: activeLobbyCount, error } = await supabase
+    .from('lobbies')
+    .select('*', { count: 'exact', head: true })
+    .in('status', ['waiting', 'active']);
+
+  if (error) {
+    throw new Error('Unable to validate lobby capacity');
+  }
+
+  if ((activeLobbyCount ?? 0) >= maxActiveLobbies) {
+    throw new Error('Server is at active-lobby capacity. Try again shortly.');
+  }
+}
 
 async function runWithConcurrency<T>(
   items: T[],
@@ -289,6 +317,19 @@ app.get('/health/scaling', (_req, res) => {
       users500: true,
       nextMilestoneUsers: 5000,
     },
+    limits: {
+      maxPlayersPerLobby: Number.parseInt(process.env.MAX_PLAYERS_PER_LOBBY ?? '', 10) || 75,
+      maxActiveLobbies,
+      lapWorkConcurrency,
+      presenceDbWriteMinIntervalMs,
+    },
+    featureFlags: {
+      FF_BATCH_SCORING,
+      FF_PRESENCE_WRITE_THROTTLE,
+      FF_DELTA_LOBBY_STATE,
+      FF_REDIS_ADAPTER: process.env.FF_REDIS_ADAPTER === 'true',
+      FF_JOB_QUEUE: process.env.FF_JOB_QUEUE === 'true',
+    },
     metrics: metrics.snapshot(),
   });
 });
@@ -392,6 +433,12 @@ app.patch('/admin/reports/:id', requireAdminSession, async (req, res) => {
 });
 
 const sessionLookupClient = new OpenF1Client();
+const bootYear = new Date().getFullYear();
+const bootstrapSessions = getCalendarSessions(bootYear);
+if (bootstrapSessions.length > 0) {
+  seedSeasonCalendar(bootYear, bootstrapSessions);
+}
+startSeasonCalendarRefresh(async (year) => sessionLookupClient.getSessions(year));
 const lifecycleQueue = new LobbyLifecycleQueue();
 const runtimeManager = new SessionRuntimeManager({
   onSnapshotUpdate: (snapshot, lobbyIds) => {
@@ -478,6 +525,10 @@ async function handleUserRemoval(
   }
 
   io.to(removal.lobbyId).emit('player_left', { userId });
+  if (FF_DELTA_LOBBY_STATE) {
+    return;
+  }
+
   const nextState = await getLobbyState(removal.lobbyId);
   if (nextState) {
     io.to(removal.lobbyId).emit('lobby_state', nextState);
@@ -494,8 +545,26 @@ const presenceManager = new PresenceManager({
 
 async function markUserActive(userId: string): Promise<void> {
   presenceManager.markSeen(userId);
-  await touchUserActivityThrottled(userId, presenceDbWriteMinIntervalMs);
+  if (FF_PRESENCE_WRITE_THROTTLE) {
+    await touchUserActivityThrottled(userId, presenceDbWriteMinIntervalMs);
+  } else {
+    await touchUserActivity(userId);
+  }
   metrics.incrementCounter('presence.ping_total');
+}
+
+function emitQuestionEvent(lobbyId: string, payload: unknown): void {
+  const startedAt = Date.now();
+  io.to(lobbyId).emit('question_event', payload);
+  metrics.recordDuration('socket.question_event_delivery_ms', Date.now() - startedAt);
+  metrics.incrementCounter('socket.question_event_total');
+}
+
+function emitQuestionState(lobbyId: string, payload: unknown): void {
+  const startedAt = Date.now();
+  io.to(lobbyId).emit('question_state', payload);
+  metrics.recordDuration('socket.question_state_delivery_ms', Date.now() - startedAt);
+  metrics.incrementCounter('socket.question_state_total');
 }
 
 /**
@@ -575,7 +644,7 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
       (result) => handleResolution(lobbyId, result)
     );
 
-    io.to(lobbyId).emit('question_event', {
+    emitQuestionEvent(lobbyId, {
       ...buildQuestionEventPayload(
         newQuestion,
         getQuestionCategory(newQuestion.questionId),
@@ -644,7 +713,7 @@ function handleStateChange(lobbyId: string, instance: QuestionInstanceState): vo
     + (answerDeadline ? ` deadline=${answerDeadline}` : '')
   );
 
-  io.to(lobbyId).emit('question_state', {
+  emitQuestionState(lobbyId, {
     instanceId: instance.id,
     state: instance.state,
     cancelledReason: instance.cancelledReason,
@@ -795,19 +864,7 @@ io.on('connection', (socket) => {
    */
   socket.on('create_lobby', async (data: { username: string; sessionId?: string }) => {
     try {
-      const { count: activeLobbyCount, error: activeLobbyCountError } = await supabase
-        .from('lobbies')
-        .select('*', { count: 'exact', head: true })
-        .in('status', ['waiting', 'active']);
-
-      if (activeLobbyCountError) {
-        throw new Error('Unable to validate lobby capacity');
-      }
-
-      if ((activeLobbyCount ?? 0) >= maxActiveLobbies) {
-        emitSocketError(socket, 'Server is at active-lobby capacity. Try again shortly.', 'VALIDATION_ERROR');
-        return;
-      }
+      await assertActiveLobbyCapacity();
 
       const { lobby, user } = await createLobby(data.username, data.sessionId);
       currentUserId = user.id;
@@ -823,7 +880,9 @@ io.on('connection', (socket) => {
       console.log(`Lobby created: ${lobby.code} by ${data.username}`);
       metrics.incrementCounter('lobby.created_total');
     } catch (error) {
-      emitSocketError(socket, (error as Error).message);
+      const message = (error as Error).message;
+      const code = message.includes('active-lobby capacity') ? 'VALIDATION_ERROR' : 'UNKNOWN';
+      emitSocketError(socket, message, code);
     }
   });
 
@@ -884,7 +943,7 @@ io.on('connection', (socket) => {
   /**
    * Start the session (host only)
    */
-  socket.on('start_session', async (data: { lobbyId: string; sessionId: string; userId?: string | null }) => {
+  socket.on('start_session', async (data: { lobbyId: string; sessionId: string; userId?: string | null; replaySpeed?: number | null }) => {
     try {
       const lobbyState = await getLobbyState(data.lobbyId);
       if (!lobbyState) {
@@ -922,32 +981,17 @@ io.on('connection', (socket) => {
         throw new Error('This session has not started yet');
       }
 
-      if (isCalendarPlaceholderKey(session.session_key) && !isLive) {
-        let openf1SessionsForReplay: Awaited<ReturnType<OpenF1Client['getSessions']>> = [];
-        if (!OpenF1Client.isLiveLocked()) {
-          try {
-            openf1SessionsForReplay = await sessionLookupClient.getSessions(session.year);
-          } catch (lookupError) {
-            console.warn(
-              `[start_session] OpenF1 lookup failed while resolving replay session ${session.session_key}:`,
-              (lookupError as Error).message
-            );
-          }
-        }
-
-        const resolvedSession = resolveSessionForReplay(session, openf1SessionsForReplay ?? []);
-        if (resolvedSession.session_key === session.session_key && isCompleted) {
-          throw new Error('Replay telemetry is not available yet for this session');
-        }
-        session = resolvedSession;
-      }
-
       // Update lobby status
       await updateLobbyStatus(data.lobbyId, 'active');
       await setLobbySession(data.lobbyId, String(session.session_key));
       setLatestResolution(data.lobbyId, null);
 
-      const runtime = await runtimeManager.attachLobbyToSession(data.lobbyId, session);
+      const requestedReplaySpeed = isCompleted && data.replaySpeed != null
+        ? normalizeReplaySpeed(data.replaySpeed)
+        : undefined;
+      const runtime = await runtimeManager.attachLobbyToSession(data.lobbyId, session, {
+        replaySpeed: requestedReplaySpeed,
+      });
       setLobbyRuntimeMeta(data.lobbyId, {
         sessionMode: runtime.mode,
         replaySpeed: runtime.replaySpeed,
@@ -974,6 +1018,72 @@ io.on('connection', (socket) => {
       console.log(`Session ${session.session_key} started for lobby ${lobbyState.code}`);
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
+    }
+  });
+
+  /**
+   * Start an on-demand live-race simulation (dev/QA only).
+   */
+  socket.on('start_simulation', async (data: { username: string; sessionKey?: number }) => {
+    try {
+      if (!SIMULATION_ENABLED) {
+        emitSocketError(socket, 'Simulation is disabled on this server', 'FORBIDDEN');
+        return;
+      }
+
+      await assertActiveLobbyCapacity();
+
+      const requestedKey = data.sessionKey ?? DEFAULT_SIMULATION_SESSION_KEY;
+      const calendarSession = getCalendarSession(requestedKey);
+      const resolvedSession = calendarSession
+        ?? (Number.isFinite(requestedKey) ? await sessionLookupClient.getSession(requestedKey) : null);
+      if (!resolvedSession) {
+        emitSocketError(socket, 'Simulation session not found in season calendar', 'VALIDATION_ERROR');
+        return;
+      }
+
+      const { lobby, user } = await createLobby(data.username, String(resolvedSession.session_key));
+      currentUserId = user.id;
+      currentLobbyId = lobby.id;
+
+      socket.join(lobby.id);
+      presenceManager.upsertConnection({ userId: user.id, lobbyId: lobby.id, socketId: socket.id });
+      await touchUserActivity(user.id);
+
+      await updateLobbyStatus(lobby.id, 'active');
+      await setLobbySession(lobby.id, String(resolvedSession.session_key));
+      setLatestResolution(lobby.id, null);
+
+      const runtime = await runtimeManager.attachLobbyToSimulation(lobby.id, resolvedSession);
+      setLobbyRuntimeMeta(lobby.id, {
+        sessionMode: 'live',
+        replaySpeed: null,
+        isReplayComplete: false,
+        isSimulation: true,
+      });
+
+      io.to(lobby.id).emit('session_started', {
+        sessionId: String(resolvedSession.session_key),
+        mode: runtime.mode,
+        replaySpeed: runtime.replaySpeed,
+      });
+
+      const lobbyState = await getLobbyState(lobby.id);
+      if (lobbyState) {
+        socket.emit('lobby_state', lobbyState);
+      }
+
+      const snapshot = runtime.getCurrentSnapshot();
+      if (snapshot) {
+        broadcastRaceSnapshot(snapshot, new Set([lobby.id]));
+      }
+
+      console.log(`[Simulation] Started sim for lobby ${lobby.code} (session ${resolvedSession.session_key})`);
+      metrics.incrementCounter('simulation.started_total');
+    } catch (error) {
+      const message = (error as Error).message;
+      const code = message.includes('active-lobby capacity') ? 'VALIDATION_ERROR' : 'UNKNOWN';
+      emitSocketError(socket, message, code);
     }
   });
 
@@ -1011,6 +1121,7 @@ io.on('connection', (socket) => {
    */
   socket.on('reconnect_lobby', async (data: { userId: string }) => {
     try {
+      const reconnectStartedAt = Date.now();
       const lobbyId = getUserLobby(data.userId) ?? await getUserLobbyFromDatabase(data.userId);
       if (!lobbyId) {
         emitSocketError(socket, 'Session expired. You are no longer in a lobby.', 'SESSION_EXPIRED');
@@ -1032,6 +1143,8 @@ io.on('connection', (socket) => {
       presenceManager.upsertConnection({ userId: data.userId, lobbyId, socketId: socket.id });
       await touchUserActivity(data.userId);
 
+      socket.to(lobbyId).emit('player_reconnected', { userId: data.userId });
+
       // Send current state
       const refreshedLobbyState = await getLobbyState(lobbyId);
       socket.emit('lobby_state', refreshedLobbyState ?? lobbyState);
@@ -1042,6 +1155,7 @@ io.on('connection', (socket) => {
 
       console.log(`User ${data.userId} reconnected to lobby ${lobbyId}`);
       metrics.incrementCounter('lobby.reconnect_total');
+      metrics.recordDuration('socket.reconnect_recovery_ms', Date.now() - reconnectStartedAt);
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
     }
@@ -1071,6 +1185,8 @@ io.on('connection', (socket) => {
       metrics.incrementCounter('socket.get_sessions_total');
       const year = data?.year || new Date().getFullYear();
 
+      await ensureSeasonCalendar(year, async (targetYear) => sessionLookupClient.getSessions(targetYear));
+
       const activeLiveSession = getActiveLiveCalendarSession();
       const liveIsPlayable = activeLiveSession
         && ['Race', 'Sprint'].includes(activeLiveSession.session_name);
@@ -1081,15 +1197,17 @@ io.on('connection', (socket) => {
       }
 
       let openf1Sessions: Awaited<ReturnType<OpenF1Client['getSessions']>> = [];
-      // Skip OpenF1 entirely while the API is live-locked — its data
-      // endpoints are gated and we already returned the live race above
-      // for the playable case. This also silences 401 noise in the logs.
-      if (!OpenF1Client.isLiveLocked()) {
+      // Prefer cached schedule (includes emergency overrides). Fall back to OpenF1
+      // /sessions listing — that endpoint stays available even when telemetry is live-locked.
+      const cachedSessions = getCalendarSessions(year);
+      if (cachedSessions.length > 0) {
+        openf1Sessions = cachedSessions;
+      } else {
         try {
           openf1Sessions = await sessionLookupClient.getSessions(year);
         } catch (lookupError) {
           console.warn(
-            `[get_sessions] OpenF1 lookup failed for year=${year}; falling back to calendar only:`,
+            `[get_sessions] OpenF1 lookup failed for year=${year}; falling back to cached calendar only:`,
             (lookupError as Error).message
           );
         }
@@ -1104,6 +1222,17 @@ io.on('connection', (socket) => {
         );
 
       const supportedSessions = dedupeWeekendSessions(filtered).map((session) => toSessionInfo(session));
+
+      if (SIMULATION_ENABLED) {
+        const simSession = getCalendarSession(DEFAULT_SIMULATION_SESSION_KEY);
+        if (
+          simSession
+          && !supportedSessions.some((session) => session.session_key === simSession.session_key)
+        ) {
+          supportedSessions.unshift(toSessionInfo(simSession));
+        }
+      }
+
       socket.emit('sessions_list', supportedSessions);
     } catch (error) {
       emitSocketError(socket, 'Failed to fetch sessions');
@@ -1121,7 +1250,14 @@ io.on('connection', (socket) => {
     const disconnectedPresence = presenceManager.markDisconnectedBySocket(socket.id);
     if (currentUserId && currentLobbyId && disconnectedPresence) {
       updatePlayerConnection(currentUserId, false);
+      if (FF_PRESENCE_WRITE_THROTTLE) {
+        void flushUserActivity(currentUserId);
+      }
       socket.to(currentLobbyId).emit('player_disconnected', { userId: currentUserId });
+      if (FF_DELTA_LOBBY_STATE) {
+        return;
+      }
+
       const nextState = await getLobbyState(currentLobbyId);
       if (nextState) {
         io.to(currentLobbyId).emit('lobby_state', nextState);
@@ -1146,6 +1282,7 @@ io.on('connection', (socket) => {
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully...');
   presenceManager.stop();
+  stopSeasonCalendarRefresh();
   clearAllTimers();
   void closeRedisRuntime(redisRuntime).finally(() => {
     httpServer.close(() => {
@@ -1158,6 +1295,7 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully...');
   presenceManager.stop();
+  stopSeasonCalendarRefresh();
   clearAllTimers();
   void closeRedisRuntime(redisRuntime).finally(() => {
     httpServer.close(() => {
@@ -1173,6 +1311,7 @@ httpServer.listen(PORT, () => {
   console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
   console.log(`[SCALING] Redis adapter: ${redisRuntime ? 'enabled' : 'disabled'}`);
   console.log(`[SCALING] Lap concurrency: ${lapWorkConcurrency}`);
+  console.log(`[SCALING] Feature flags: batchScoring=${FF_BATCH_SCORING}, presenceThrottle=${FF_PRESENCE_WRITE_THROTTLE}, deltaLobbyState=${FF_DELTA_LOBBY_STATE}`);
 });
 
 export { io, app, httpServer };

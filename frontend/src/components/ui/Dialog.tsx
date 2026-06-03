@@ -39,11 +39,11 @@ export default function Dialog({ open, onClose, title, children, className }: Di
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       <button
         type="button"
         aria-label="Close dialog"
-        className="absolute inset-0 bg-[color-mix(in_srgb,var(--color-bg),transparent_20%)] backdrop-blur-sm"
+        className="absolute inset-0 animate-fade-in bg-black/60 backdrop-blur-sm"
         onClick={onClose}
       />
       <div
@@ -51,11 +51,13 @@ export default function Dialog({ open, onClose, title, children, className }: Di
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn(
-          'relative z-10 w-full max-w-md border-2 border-[var(--color-border)] bg-[var(--color-panel)] p-6',
+          'relative z-10 w-full animate-slide-up rounded-t-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-panel)] p-6 pb-[max(1.5rem,var(--safe-bottom))] shadow-[var(--shadow-lg)]',
+          'sm:max-w-md sm:rounded-[var(--radius-lg)] sm:pb-6',
           className
         )}
       >
-        <h2 id={titleId} className="font-display text-2xl uppercase tracking-tight">
+        <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-[var(--color-border-strong)] sm:hidden" />
+        <h2 id={titleId} className="font-display text-2xl font-semibold uppercase tracking-tight">
           {title}
         </h2>
         {children}

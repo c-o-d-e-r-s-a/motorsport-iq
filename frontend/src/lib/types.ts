@@ -106,6 +106,7 @@ export interface LobbyState {
   sessionMode: SessionMode | null;
   replaySpeed: number | null;
   isReplayComplete: boolean;
+  isSimulation: boolean;
   players: PlayerState[];
   currentQuestion: QuestionInstanceState | null;
   latestResolution: ResolutionEvent | null;
@@ -141,7 +142,7 @@ export interface QuestionTextUpdateEvent {
 
 export interface ServerErrorEvent {
   message: string;
-  code?: 'SESSION_EXPIRED' | 'TRANSIENT_CONNECTION' | 'VALIDATION_ERROR' | 'UNKNOWN';
+  code?: 'SESSION_EXPIRED' | 'TRANSIENT_CONNECTION' | 'VALIDATION_ERROR' | 'FORBIDDEN' | 'UNKNOWN';
 }
 
 export interface ResolutionEvent {
@@ -242,6 +243,7 @@ export const SERVER_EVENTS = {
   PLAYER_JOINED: 'player_joined',
   PLAYER_LEFT: 'player_left',
   PLAYER_DISCONNECTED: 'player_disconnected',
+  PLAYER_RECONNECTED: 'player_reconnected',
   ANSWER_RECEIVED: 'answer_received',
   SESSIONS_LIST: 'sessions_list',
   FEED_STATUS: 'feed_status',
@@ -255,6 +257,7 @@ export const CLIENT_EVENTS = {
   JOIN_LOBBY: 'join_lobby',
   LOOKUP_LOBBY: 'lookup_lobby',
   START_SESSION: 'start_session',
+  START_SIMULATION: 'start_simulation',
   SUBMIT_ANSWER: 'submit_answer',
   RECONNECT_LOBBY: 'reconnect_lobby',
   GET_SESSIONS: 'get_sessions',
