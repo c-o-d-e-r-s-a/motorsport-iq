@@ -19,7 +19,7 @@ Anything outside these four categories is out of MVP scope.
 
 ## Global Guardrails
 - Maximum 1 active question per lobby.
-- Maximum 10 questions per race.
+- Minimum 8, maximum 15 questions per race (same for Sprint and GP).
 - No questions on laps `1-3`.
 - No questions while `SC`, `VSC`, or `RED` is active.
 - Enforce a 1-lap cooldown after restart.

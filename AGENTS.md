@@ -34,7 +34,8 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 ### Backend — Render
 - **URL**: `https://motorsport-iq-backend.onrender.com`
 - **Service ID**: `srv-d70utgnkijhs73c7q1a0`
-- **Plan**: Free tier (hibernates after inactivity — cold start ~30-60s)
+- **Plan**: Free tier (hibernates after ~15 min inactivity — cold start ~30-60s)
+- **Keep-alive**: GitHub Actions workflow `.github/workflows/keep-backend-warm.yml` pings `GET /health/scaling` every 10 minutes; the frontend also pings while a production tab is open (`BackendKeepAlive` in root layout). Override backend URL via repo variable `BACKEND_KEEP_ALIVE_URL` if needed.
 - **Auto-deploys**: on push to `main` (build: `cd backend && npm install --include=dev && npm run build`, start: `cd backend && node dist/server.js`)
 - **Region**: Oregon
 - **Dashboard**: `https://dashboard.render.com/web/srv-d70utgnkijhs73c7q1a0`
@@ -148,7 +149,7 @@ TRIGGERED (1s) → LIVE (20s answer window) → LOCKED → ACTIVE → RESOLVED �
 
 **Engine guardrails:**
 - One active question per lobby at a time
-- Max 8-10 questions per race
+- Min 8, max 15 questions per race (same for Sprint and GP)
 - No questions on laps 1-3
 - No triggers during SC/VSC/RED flag
 - 1-lap cooldown after restarts, 2-lap cooldown after resolution

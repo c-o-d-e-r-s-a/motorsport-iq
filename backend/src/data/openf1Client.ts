@@ -260,6 +260,16 @@ export class OpenF1Client {
     return sessions?.[0] ?? null;
   }
 
+  /** Lightweight probe — does not mutate the client's active session. */
+  async sessionHasTelemetry(sessionKey: number): Promise<boolean> {
+    const laps = await this.fetchWithCache<OpenF1Lap[]>(
+      '/laps',
+      { session_key: sessionKey },
+      60_000
+    );
+    return Array.isArray(laps) && laps.length > 0;
+  }
+
   async getDrivers(): Promise<OpenF1Driver[] | null> {
     if (!this.sessionId) return null;
     return this.fetchWithCache<OpenF1Driver[]>('/drivers', { session_key: this.sessionId }, 30000);

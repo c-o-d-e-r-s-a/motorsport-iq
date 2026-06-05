@@ -4,6 +4,8 @@ import {
   filterSessionsForDisplay,
   isLivePlayableWindow,
   isPlayableLiveSession,
+  isPreRacePlayableSession,
+  isPreRacePlayableWindow,
 } from './sessionDisplay';
 
 const liveRace: SessionInfo = {
@@ -19,6 +21,7 @@ const liveRace: SessionInfo = {
   year: 2026,
   isCompleted: false,
   isLive: true,
+  isPreRace: false,
   mode: 'live',
 };
 
@@ -29,7 +32,25 @@ const completedSprint: SessionInfo = {
   date_start: '2026-05-23T16:00:00+00:00',
   date_end: '2026-05-23T17:00:00+00:00',
   isLive: false,
+  isPreRace: false,
   isCompleted: true,
+  mode: 'replay',
+};
+
+const preRaceMonaco: SessionInfo = {
+  session_key: 11296,
+  meeting_key: 1286,
+  location: 'Monaco',
+  session_type: 'Race',
+  session_name: 'Race',
+  date_start: '2026-06-07T13:00:00+00:00',
+  date_end: '2026-06-07T15:00:00+00:00',
+  country_name: 'Monaco',
+  circuit_short_name: 'Monte Carlo',
+  year: 2026,
+  isCompleted: false,
+  isLive: false,
+  isPreRace: true,
   mode: 'replay',
 };
 
@@ -46,6 +67,7 @@ const monacoRace: SessionInfo = {
   year: 2026,
   isCompleted: true,
   isLive: false,
+  isPreRace: false,
   mode: 'replay',
 };
 
@@ -74,5 +96,26 @@ describe('sessionDisplay', () => {
   it('detects a live playable window', () => {
     expect(isLivePlayableWindow([liveRace, monacoRace])).toBe(true);
     expect(isLivePlayableWindow([completedSprint, monacoRace])).toBe(false);
+  });
+
+  it('identifies pre-race Race and Sprint sessions', () => {
+    expect(isPreRacePlayableSession(preRaceMonaco)).toBe(true);
+    expect(isPreRacePlayableSession(liveRace)).toBe(false);
+    expect(isPreRacePlayableSession(completedSprint)).toBe(false);
+  });
+
+  it('returns only the pre-race session when one is within the lobby window', () => {
+    const filtered = filterSessionsForDisplay([
+      preRaceMonaco,
+      completedSprint,
+      monacoRace,
+    ]);
+
+    expect(filtered).toEqual([preRaceMonaco]);
+  });
+
+  it('detects a pre-race playable window', () => {
+    expect(isPreRacePlayableWindow([preRaceMonaco, monacoRace])).toBe(true);
+    expect(isPreRacePlayableWindow([completedSprint, monacoRace])).toBe(false);
   });
 });

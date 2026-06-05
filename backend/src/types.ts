@@ -13,7 +13,7 @@ export interface DriverState {
   tyreCompound: string | null;
   tyreAge: number;
   stintNumber: number | null;
-  drsEnabled: boolean;
+  overtakeModeArmed: boolean;
   pitCount: number;
   lastLapTime: number | null;
   inPit: boolean;
@@ -76,11 +76,14 @@ export interface OpenF1Session {
   circuit_key: number;
   circuit_short_name: string;
   year: number;
+  /** Present on OpenF1 `/sessions` responses when a meeting was removed from the calendar. */
+  is_cancelled?: boolean;
 }
 
 export interface SessionInfo extends OpenF1Session {
   isCompleted: boolean;
   isLive: boolean;
+  isPreRace: boolean;
   mode: SessionMode;
 }
 
@@ -249,9 +252,17 @@ export interface QuestionInstanceState {
 }
 
 // Lobby state
+export interface LobbyLookupResult {
+  id: string;
+  code: string;
+  status: 'waiting' | 'active' | 'finished';
+  shareUrl: string;
+}
+
 export interface LobbyState {
   id: string;
   code: string;
+  shareUrl: string;
   hostId: string;
   sessionId: string | null;
   status: 'waiting' | 'active' | 'finished';
@@ -263,6 +274,8 @@ export interface LobbyState {
   currentQuestion: QuestionInstanceState | null;
   latestResolution: ResolutionEvent | null;
   questionCount: number;
+  minQuestions: number;
+  maxQuestions: number;
   leaderboard: LeaderboardEntryState[];
 }
 
@@ -298,6 +311,8 @@ export interface DerivedSignals {
   lateRacePhase: boolean;
   podiumStabilityTrend: boolean;
   closeBattles: { attacker: number; defender: number; gap: number }[];
+  overtakeModeArmed: Map<number, boolean>; // driverNumber -> earned Overtake Mode this lap
+  undercutPressure: Map<number, boolean>; // driverNumber -> close enough to undercut
 }
 
 // Socket event types

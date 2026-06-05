@@ -1,9 +1,11 @@
 import type { OpenF1Session } from '../types';
 import { SCHEDULE_OVERRIDES } from './scheduleOverrides';
+import { isWithinPreRaceLobbyWindow } from '../runtime/sessionRuntimeInfo';
 import {
   getActiveLivePlayableSession,
   getCachedSeasonSession,
   getCachedSeasonSessions,
+  getUpcomingPreRacePlayableSession,
 } from './seasonCalendarStore';
 
 // ─── Season schedule ─────────────────────────────────────────────────────────
@@ -18,6 +20,25 @@ import {
 
 /** Canadian GP 2026 Race — default dev simulation session when telemetry exists. */
 export const DEFAULT_SIMULATION_SESSION_KEY = 11291;
+
+/**
+ * Race/Sprint session keys with no telemetry — cancelled on the calendar or removed
+ * from the season schedule. Kept as a fallback when cached metadata omits is_cancelled.
+ */
+export const CANCELLED_SESSION_KEYS = new Set([
+  9086, // 2023 Emilia Romagna GP (Imola) — cancelled due to flooding
+  11261, // 2026 Sakhir GP — removed from 2026 calendar
+  11269, // 2026 Jeddah GP — removed from 2026 calendar
+]);
+
+export function isSessionCancelled(session: OpenF1Session): boolean {
+  return session.is_cancelled === true || CANCELLED_SESSION_KEYS.has(session.session_key);
+}
+
+/** Drop calendar entries that OpenF1 marked cancelled (no telemetry will ever arrive). */
+export function filterPlayableSessions(sessions: OpenF1Session[]): OpenF1Session[] {
+  return sessions.filter((session) => !isSessionCancelled(session));
+}
 
 function normalizeLabel(value: string): string {
   return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
@@ -145,6 +166,24 @@ export function getActiveLiveCalendarSession(now: number = Date.now()): OpenF1Se
   }
 
   return getActiveLivePlayableSession(now);
+}
+
+/**
+ * Returns the next Race/Sprint session within the pre-race lobby window (30 min
+ * before start), if any. Used so hosts can open lobbies and invite friends early.
+ */
+export function getPreRaceCalendarSession(now: number = Date.now()): OpenF1Session | null {
+  for (const override of SCHEDULE_OVERRIDES) {
+    if (!['Race', 'Sprint'].includes(override.session_name)) {
+      continue;
+    }
+
+    if (isWithinPreRaceLobbyWindow(override, now)) {
+      return override;
+    }
+  }
+
+  return getUpcomingPreRacePlayableSession(now);
 }
 
 const CIRCUIT_RACE_LAPS: Record<string, number> = {

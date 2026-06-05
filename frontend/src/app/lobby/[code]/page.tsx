@@ -10,7 +10,12 @@ import {
   applyPlayerReconnected,
 } from '@/lib/lobbyPlayerDeltas';
 import { SERVER_EVENTS, type LobbyState, type ServerErrorEvent, type SessionInfo } from '@/lib/types';
-import { filterSessionsForDisplay, isLivePlayableWindow } from '@/lib/sessionDisplay';
+import { shareLobbyLink } from '@/lib/shareLobbyLink';
+import {
+  filterSessionsForDisplay,
+  isLivePlayableWindow,
+  isPreRacePlayableWindow,
+} from '@/lib/sessionDisplay';
 import { Button, Brand, Card, Chip, Dialog, Input } from '@/components/ui';
 import { cn } from '@/lib/cn';
 
@@ -27,11 +32,10 @@ export default function LobbyPage() {
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
+  const [shareLinkStatus, setShareLinkStatus] = useState<'shared' | 'copied' | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [confirmSession, setConfirmSession] = useState<SessionInfo | null>(null);
-  const [replaySpeed, setReplaySpeed] = useState<1 | 10>(10);
   const [joinUsername, setJoinUsername] = useState(() => {
     if (typeof window === 'undefined') return '';
     return localStorage.getItem('msp_username') ?? '';
@@ -41,6 +45,24 @@ export default function LobbyPage() {
   const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
+
+  const beginLobbyEntry = useCallback((socket: ReturnType<typeof getSocketClient>) => {
+    const storedUserId = localStorage.getItem('msp_user_id');
+    const storedLobbyCode = localStorage.getItem('msp_lobby_code');
+    const normalizedCode = lobbyCode.toUpperCase();
+
+    if (storedUserId && storedLobbyCode?.toUpperCase() === normalizedCode) {
+      socket.reconnectLobby(storedUserId);
+      return;
+    }
+
+    if (storedUserId) {
+      localStorage.removeItem('msp_user_id');
+      localStorage.removeItem('msp_lobby_code');
+    }
+
+    socket.lookupLobby(lobbyCode);
+  }, [lobbyCode]);
 
   useEffect(() => {
     joinUsernameRef.current = joinUsername;
@@ -54,13 +76,7 @@ export default function LobbyPage() {
       socket.on('connected', () => {
         setIsReconnecting(false);
         setConnectionNotice(null);
-        const storedUserId = localStorage.getItem('msp_user_id');
-        if (storedUserId) {
-          socket.reconnectLobby(storedUserId);
-          return;
-        }
-
-        socket.lookupLobby(lobbyCode);
+        beginLobbyEntry(socket);
       }),
       socket.on(SERVER_EVENTS.LOBBY_LOOKUP, () => {
         if (!localStorage.getItem('msp_user_id')) {
@@ -88,6 +104,7 @@ export default function LobbyPage() {
         if (joinedUser) {
           localStorage.setItem('msp_user_id', joinedUser.id);
           localStorage.setItem('msp_username', joinedUser.username);
+          localStorage.setItem('msp_lobby_code', state.code);
         }
 
         if (state.status === 'active') {
@@ -113,16 +130,21 @@ export default function LobbyPage() {
         setSessions(sessionList);
         if (sessionList.length > 0) {
           const liveSession = sessionList.find((session) => session.isLive);
+          const preRaceSession = sessionList.find((session) => session.isPreRace);
           const firstCompleted = sessionList.find((session) => session.isCompleted);
-          const firstPlayable = sessionList.find((session) => session.isLive || session.isCompleted);
+          const firstPlayable = sessionList.find(
+            (session) => session.isLive || session.isCompleted || session.isPreRace
+          );
           setSelectedSession((current) => {
             if (current && sessionList.some((session) => String(session.session_key) === current)) {
-              const stillPlayable = sessionList.some(
-                (session) => String(session.session_key) === current && (session.isLive || session.isCompleted)
+              const stillRelevant = sessionList.some(
+                (session) => String(session.session_key) === current
+                  && (session.isLive || session.isCompleted || session.isPreRace)
               );
-              if (stillPlayable) return current;
+              if (stillRelevant) return current;
             }
             if (liveSession) return String(liveSession.session_key);
+            if (preRaceSession) return String(preRaceSession.session_key);
             if (firstCompleted) return String(firstCompleted.session_key);
             return firstPlayable ? String(firstPlayable.session_key) : '';
           });
@@ -136,6 +158,7 @@ export default function LobbyPage() {
 
         if (isSessionExpired) {
           localStorage.removeItem('msp_user_id');
+          localStorage.removeItem('msp_lobby_code');
           setShowJoinForm(true);
           setIsLoading(false);
           setConnectionNotice('Enter your driver name to join this lobby.');
@@ -144,9 +167,12 @@ export default function LobbyPage() {
 
         setError(message);
         setIsStarting(false);
+        setIsJoining(false);
+        setIsLoading(false);
       }),
       socket.on(SERVER_EVENTS.PRESENCE_EXPIRED, () => {
         localStorage.removeItem('msp_user_id');
+        localStorage.removeItem('msp_lobby_code');
         router.push('/');
       }),
     ];
@@ -154,19 +180,14 @@ export default function LobbyPage() {
     socket.startSessionsPolling(selectedYear, 60_000);
 
     if (socket.isConnected()) {
-      const userId = localStorage.getItem('msp_user_id');
-      if (userId) {
-        socket.reconnectLobby(userId);
-      } else {
-        socket.lookupLobby(lobbyCode);
-      }
+      beginLobbyEntry(socket);
     }
 
     return () => {
       socket.stopSessionsPolling();
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [lobbyCode, router, selectedYear]);
+  }, [beginLobbyEntry, lobbyCode, router, selectedYear]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -190,12 +211,19 @@ export default function LobbyPage() {
     setTimeout(() => setCopied(false), 2000);
   }, [lobbyCode]);
 
-  const handleCopyLink = useCallback(() => {
-    const shareUrl = `${window.location.origin}/game/${lobbyCode}`;
-    navigator.clipboard.writeText(shareUrl);
-    setCopiedLink(true);
-    setTimeout(() => setCopiedLink(false), 2000);
-  }, [lobbyCode]);
+  const handleShareLink = useCallback(async () => {
+    const shareUrl = lobbyState?.shareUrl ?? `${window.location.origin}/lobby/${lobbyCode}`;
+    try {
+      const result = await shareLobbyLink({ url: shareUrl, code: lobbyCode });
+      if (result === 'cancelled') {
+        return;
+      }
+      setShareLinkStatus(result);
+      setTimeout(() => setShareLinkStatus(null), 2000);
+    } catch {
+      setError('Could not share the lobby link. Try copying the code instead.');
+    }
+  }, [lobbyCode, lobbyState?.shareUrl]);
 
   const handleJoinLobby = useCallback(() => {
     if (!joinUsername.trim()) {
@@ -211,6 +239,7 @@ export default function LobbyPage() {
 
   const handleLeaveLobby = useCallback(() => {
     localStorage.removeItem('msp_user_id');
+    localStorage.removeItem('msp_lobby_code');
     getSocketClient().leaveLobby();
     router.push('/');
   }, [router]);
@@ -236,9 +265,9 @@ export default function LobbyPage() {
 
     setConfirmSession(null);
     setIsStarting(true);
-    const replayOptions = sessionInfo?.isCompleted ? { replaySpeed } : undefined;
+    const replayOptions = sessionInfo?.isCompleted ? { replaySpeed: 1 } : undefined;
     getSocketClient().startSession(lobbyState.id, key, currentUserId, replayOptions);
-  }, [currentUserId, lobbyState, selectedSession, sessions, replaySpeed]);
+  }, [currentUserId, lobbyState, selectedSession, sessions]);
 
   const handleSessionClick = useCallback((session: SessionInfo) => {
     const isSelectable = session.isLive || session.isCompleted;
@@ -274,8 +303,11 @@ export default function LobbyPage() {
     }
   }, [canStartSession, selectedSessionInfo]);
   const liveSessionInList = displaySessions.find((session) => session.isLive) ?? null;
+  const preRaceSessionInList = displaySessions.find((session) => session.isPreRace) ?? null;
   const liveOnlyMode = isLivePlayableWindow(sessions)
     || (Boolean(liveSessionInList) && displaySessions.length === 1);
+  const preRaceOnlyMode = isPreRacePlayableWindow(sessions)
+    || (Boolean(preRaceSessionInList) && displaySessions.length === 1);
 
   const years = useMemo(() => {
     const currentYear = new Date().getFullYear();
@@ -284,9 +316,14 @@ export default function LobbyPage() {
 
   if (isLoading) {
     return (
-      <main className="app-bg flex min-h-dvh flex-col items-center justify-center gap-4">
+      <main className="app-bg flex min-h-dvh flex-col items-center justify-center gap-4 px-5 text-center">
         <span className="h-10 w-10 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
         <p className="font-display text-lg uppercase tracking-wide text-[var(--color-muted-fg)]">Loading lobby…</p>
+        {(connectionNotice || isReconnecting) && (
+          <p className="max-w-sm text-sm text-[var(--color-muted-fg)]">
+            {connectionNotice ?? 'Connecting to the race server…'}
+          </p>
+        )}
       </main>
     );
   }
@@ -308,12 +345,17 @@ export default function LobbyPage() {
             placeholder="Your name"
             className="mt-5"
           />
+          {(connectionNotice || isReconnecting) && (
+            <p className="mt-4 rounded-[var(--radius-sm)] bg-[var(--color-muted)] px-4 py-3 text-sm text-[var(--color-muted-fg)]">
+              {connectionNotice ?? 'Connecting to the race server…'}
+            </p>
+          )}
           {error && (
             <p className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-4 py-3 text-sm font-medium text-[var(--color-accent)]">
               {error}
             </p>
           )}
-          <Button onClick={handleJoinLobby} disabled={isJoining} size="lg" className="mt-6 w-full">
+          <Button onClick={handleJoinLobby} disabled={isJoining || isReconnecting} size="lg" className="mt-6 w-full">
             {isJoining ? 'Joining…' : 'Join lobby'}
           </Button>
         </Card>
@@ -358,8 +400,12 @@ export default function LobbyPage() {
             <Button variant="secondary" onClick={handleCopyCode}>
               {copied ? 'Copied ✓' : 'Copy code'}
             </Button>
-            <Button variant="secondary" onClick={handleCopyLink}>
-              {copiedLink ? 'Copied ✓' : 'Copy link'}
+            <Button variant="secondary" onClick={handleShareLink}>
+              {shareLinkStatus === 'shared'
+                ? 'Shared ✓'
+                : shareLinkStatus === 'copied'
+                  ? 'Link copied ✓'
+                  : 'Share link'}
             </Button>
           </div>
           {(isReconnecting || connectionNotice) && (
@@ -402,7 +448,7 @@ export default function LobbyPage() {
             <>
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="font-display text-lg font-semibold uppercase tracking-wide">Pick a session</h2>
-                {!liveOnlyMode && (
+                {!liveOnlyMode && !preRaceOnlyMode && (
                   <select
                     value={selectedYear}
                     onChange={(event) => {
@@ -420,6 +466,13 @@ export default function LobbyPage() {
                 )}
               </div>
 
+              {preRaceOnlyMode && (
+                <p className="mb-3 rounded-[var(--radius)] border border-[var(--color-warn)]/40 bg-[rgba(255,196,0,0.1)] p-4 text-sm text-[var(--color-fg)]">
+                  <span className="font-semibold text-[var(--color-warn)]">Race has not started yet.</span>{' '}
+                  Invite friends now — the host can start the session when lights go out.
+                </p>
+              )}
+
               {liveOnlyMode && (
                 <p className="mb-3 rounded-[var(--radius)] border border-[var(--color-accent)]/40 bg-[var(--color-accent-soft)] p-4 text-sm text-[var(--color-fg)]">
                   <span className="font-semibold text-[var(--color-accent)]">Race is live.</span> Start the
@@ -433,7 +486,10 @@ export default function LobbyPage() {
                     const isSelected = String(session.session_key) === selectedSession;
                     const isLive = session.isLive;
                     const isCompleted = session.isCompleted;
+                    const isPreRace = session.isPreRace;
                     const isSelectable = isLive || isCompleted;
+
+                    const showAsFeatured = isSelectable || (isPreRace && preRaceOnlyMode);
 
                     return (
                       <button
@@ -443,10 +499,10 @@ export default function LobbyPage() {
                         onClick={() => handleSessionClick(session)}
                         className={cn(
                           'w-full rounded-[var(--radius)] border p-4 text-left transition-all duration-[var(--dur-fast)]',
-                          isSelected && isSelectable
+                          isSelected && showAsFeatured
                             ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] shadow-[var(--shadow-accent)]'
                             : 'border-[var(--color-border)] bg-[var(--color-panel)]',
-                          isSelectable ? 'active:scale-[0.99]' : 'cursor-not-allowed opacity-50'
+                          showAsFeatured ? 'active:scale-[0.99]' : 'cursor-not-allowed opacity-50'
                         )}
                       >
                         <div className="flex items-start justify-between gap-3">
@@ -458,8 +514,8 @@ export default function LobbyPage() {
                               {session.session_name} · {session.country_name}
                             </p>
                           </div>
-                          <Chip tone={isLive ? 'go' : isCompleted ? 'accent' : 'neutral'}>
-                            {isLive ? 'Live' : isCompleted ? 'Replay' : 'Soon'}
+                          <Chip tone={isLive ? 'go' : isCompleted ? 'accent' : isPreRace ? 'warn' : 'neutral'}>
+                            {isLive ? 'Live' : isCompleted ? 'Replay' : isPreRace ? 'Soon' : 'Soon'}
                           </Chip>
                         </div>
                         {isSelected && isSelectable && (
@@ -477,6 +533,21 @@ export default function LobbyPage() {
                 )}
               </div>
             </>
+          ) : preRaceOnlyMode && preRaceSessionInList ? (
+            <div className="rounded-[var(--radius-lg)] border border-[var(--color-warn)]/40 bg-[rgba(255,196,0,0.08)] p-8 text-center">
+              <p className="font-display text-2xl font-semibold uppercase text-[var(--color-warn)]">
+                Race has not started yet
+              </p>
+              <p className="mt-2 font-display text-lg font-semibold uppercase">
+                {preRaceSessionInList.location}
+              </p>
+              <p className="mt-1 text-sm text-[var(--color-muted-fg)]">
+                {preRaceSessionInList.session_name} · {preRaceSessionInList.country_name}
+              </p>
+              <p className="mt-4 text-sm text-[var(--color-muted-fg)]">
+                Invite more friends while you wait — everyone joins automatically when the host starts the race.
+              </p>
+            </div>
           ) : (
             <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--color-border)] bg-[var(--color-panel)] p-8 text-center">
               <span className="mx-auto mb-3 block h-8 w-8 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
@@ -509,7 +580,9 @@ export default function LobbyPage() {
                 ? 'Starting…'
                 : canStartSession
                   ? `Start ${selectedSessionInfo?.location ?? 'session'}`
-                  : 'Select a session'}
+                  : preRaceOnlyMode
+                    ? 'Race has not started yet'
+                    : 'Select a session'}
             </Button>
           </div>
         </div>
@@ -535,68 +608,8 @@ export default function LobbyPage() {
             <p className="mt-4 text-sm text-[var(--color-muted-fg)]">
               {confirmSession.isLive
                 ? 'Everyone joins the live race. Questions appear as the action unfolds.'
-                : replaySpeed === 1
-                  ? 'Everyone joins a real-time replay. Watch alongside your F1 TV broadcast — questions appear as the race plays out.'
-                  : 'Everyone joins a fast replay (10× speed). Questions appear as the race plays out.'}
+                : 'Everyone joins a real-time replay. Watch alongside your F1 TV broadcast — questions appear as the race plays out.'}
             </p>
-
-            {confirmSession.isCompleted && !confirmSession.isLive && (
-              <div className="mt-5">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--color-faint-fg)]">
-                  Playback speed
-                </p>
-                <div
-                  role="radiogroup"
-                  aria-label="Replay playback speed"
-                  className="grid grid-cols-2 gap-2"
-                >
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={replaySpeed === 1}
-                    disabled={isStarting}
-                    onClick={() => setReplaySpeed(1)}
-                    className={cn(
-                      'rounded-[var(--radius)] border p-3.5 text-left transition-all duration-[var(--dur-fast)]',
-                      replaySpeed === 1
-                        ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] shadow-[var(--shadow-accent)]'
-                        : 'border-[var(--color-border)] bg-[var(--color-panel)]',
-                      isStarting ? 'cursor-not-allowed opacity-60' : 'active:scale-[0.99]'
-                    )}
-                  >
-                    <p className="font-display text-lg font-bold uppercase leading-none">1×</p>
-                    <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-fg)]">
-                      Real-time
-                    </p>
-                    <p className="mt-1.5 text-[11px] leading-tight text-[var(--color-faint-fg)]">
-                      Sync with F1 TV broadcast
-                    </p>
-                  </button>
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={replaySpeed === 10}
-                    disabled={isStarting}
-                    onClick={() => setReplaySpeed(10)}
-                    className={cn(
-                      'rounded-[var(--radius)] border p-3.5 text-left transition-all duration-[var(--dur-fast)]',
-                      replaySpeed === 10
-                        ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] shadow-[var(--shadow-accent)]'
-                        : 'border-[var(--color-border)] bg-[var(--color-panel)]',
-                      isStarting ? 'cursor-not-allowed opacity-60' : 'active:scale-[0.99]'
-                    )}
-                  >
-                    <p className="font-display text-lg font-bold uppercase leading-none">10×</p>
-                    <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-fg)]">
-                      Fast replay
-                    </p>
-                    <p className="mt-1.5 text-[11px] leading-tight text-[var(--color-faint-fg)]">
-                      Full race in ~10 minutes
-                    </p>
-                  </button>
-                </div>
-              </div>
-            )}
 
             <div className="mt-6 flex flex-col gap-2.5">
               <Button

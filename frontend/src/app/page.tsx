@@ -56,6 +56,7 @@ export default function Home() {
         const userId = state.players.find((player) => player.username === username)?.id;
         if (userId) {
           localStorage.setItem('msp_user_id', userId);
+          localStorage.setItem('msp_lobby_code', state.code);
         }
 
         if (state.status === 'waiting') {

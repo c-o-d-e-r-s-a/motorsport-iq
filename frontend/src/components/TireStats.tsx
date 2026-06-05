@@ -80,13 +80,17 @@ export default function TireStats({ leaderStats, lapNumber = null, highlighted =
       )}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <p className="text-xs font-medium uppercase tracking-wide text-[var(--color-faint-fg)]">Race leader</p>
-          <h3 className="mt-1 truncate font-display text-2xl font-semibold leading-none">{name}</h3>
-          <p className="mt-1 truncate text-sm text-[var(--color-muted-fg)]">{team}</p>
+          <h3 className="mt-1 truncate font-display text-2xl font-semibold leading-none lg:truncate-none lg:whitespace-normal lg:leading-tight">
+            {name}
+          </h3>
+          <p className="mt-1 truncate text-sm text-[var(--color-muted-fg)] lg:truncate-none lg:whitespace-normal">
+            {team}
+          </p>
         </div>
         <div
-          className="flex flex-col items-center justify-center rounded-[var(--radius-sm)] px-3 py-2 text-center"
+          className="flex shrink-0 flex-col items-center justify-center rounded-[var(--radius-sm)] px-3 py-2 text-center"
           style={{ backgroundColor: compound.color, color: compound.text }}
         >
           <span className="text-[0.6rem] font-semibold uppercase tracking-[0.18em] opacity-80">Tyre</span>

@@ -90,6 +90,24 @@ export default function GamePage() {
   const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
+
+  const beginLobbyEntry = useCallback((socket: ReturnType<typeof getSocketClient>) => {
+    const storedUserId = localStorage.getItem('msp_user_id');
+    const storedLobbyCode = localStorage.getItem('msp_lobby_code');
+    const normalizedCode = lobbyCode.toUpperCase();
+
+    if (storedUserId && storedLobbyCode?.toUpperCase() === normalizedCode) {
+      socket.reconnectLobby(storedUserId);
+      return;
+    }
+
+    if (storedUserId) {
+      localStorage.removeItem('msp_user_id');
+      localStorage.removeItem('msp_lobby_code');
+    }
+
+    socket.lookupLobby(lobbyCode);
+  }, [lobbyCode]);
   useEffect(() => {
     currentQuestionRef.current = currentQuestion;
   }, [currentQuestion]);
@@ -159,6 +177,7 @@ export default function GamePage() {
 
     if (isSessionExpired) {
       localStorage.removeItem('msp_user_id');
+      localStorage.removeItem('msp_lobby_code');
       setShowJoinForm(true);
       setConnectionNotice('Enter your driver name to rejoin this session.');
       return;
@@ -205,13 +224,7 @@ export default function GamePage() {
       socket.on('connected', () => {
         setIsSocketConnected(true);
         setConnectionNotice(null);
-        const storedUserId = localStorage.getItem('msp_user_id');
-        if (storedUserId) {
-          socket.reconnectLobby(storedUserId);
-          return;
-        }
-
-        socket.lookupLobby(lobbyCode);
+        beginLobbyEntry(socket);
       }),
       socket.on(SERVER_EVENTS.LOBBY_LOOKUP, () => {
         if (!localStorage.getItem('msp_user_id')) {
@@ -241,6 +254,7 @@ export default function GamePage() {
         if (joinedUser) {
           localStorage.setItem('msp_user_id', joinedUser.id);
           localStorage.setItem('msp_username', joinedUser.username);
+          localStorage.setItem('msp_lobby_code', state.code);
         }
         if (state.currentQuestion) {
           const current = currentQuestionRef.current;
@@ -432,23 +446,19 @@ export default function GamePage() {
       }),
       socket.on(SERVER_EVENTS.PRESENCE_EXPIRED, () => {
         localStorage.removeItem('msp_user_id');
+        localStorage.removeItem('msp_lobby_code');
         router.push('/');
       }),
     ];
 
     if (socket.isConnected()) {
-      const userId = localStorage.getItem('msp_user_id');
-      if (userId) {
-        socket.reconnectLobby(userId);
-      } else {
-        socket.lookupLobby(lobbyCode);
-      }
+      beginLobbyEntry(socket);
     }
 
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [lobbyCode, playCorrectSound, playSound, playWrongSound, router]);
+  }, [beginLobbyEntry, lobbyCode, playCorrectSound, playSound, playWrongSound, router]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -540,6 +550,7 @@ export default function GamePage() {
       });
     } finally {
       localStorage.removeItem('msp_user_id');
+      localStorage.removeItem('msp_lobby_code');
       getSocketClient().disconnect();
       router.push('/');
     }
@@ -665,7 +676,7 @@ export default function GamePage() {
         </div>
       )}
 
-      <div className="mx-auto grid w-full max-w-5xl gap-5 px-4 py-5 lg:grid-cols-[1fr_340px]">
+      <div className="mx-auto grid w-full max-w-5xl gap-5 px-4 py-5 lg:grid-cols-[1fr_minmax(300px,360px)]">
         {/* Main stage */}
         <div className="min-w-0">
           {(() => {

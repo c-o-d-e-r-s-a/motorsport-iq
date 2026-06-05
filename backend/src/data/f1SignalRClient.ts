@@ -152,7 +152,8 @@ function mapDriverListEntry(driverNumber: number, info: Record<string, unknown>)
 }
 
 function completedLapsToCurrentLap(completedLaps: number): number {
-  return completedLaps > 0 ? completedLaps + 1 : 0;
+  // NumberOfLaps is completed count: 0 completed = on lap 1, 1 completed = on lap 2, etc.
+  return completedLaps + 1;
 }
 
 export class F1SignalRClient {
@@ -481,7 +482,7 @@ export class F1SignalRClient {
       }
     });
 
-    if (maxLap > 0) {
+    if (positions.length > 0 || maxLap > 0) {
       this.options.onTimingProgress?.(completedLapsToCurrentLap(maxLap));
     }
 
