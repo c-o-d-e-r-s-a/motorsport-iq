@@ -10,7 +10,7 @@
     "test": "jest"
   },
   "dependencies": {
-    "next": "16.1.6",
+    "next": "16.2.7",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "socket.io-client": "^4.8.3"
@@ -27,5 +27,8 @@
     "tailwindcss": "^4",
     "ts-jest": "^29.4.11",
     "typescript": "^5"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
   }
 }
