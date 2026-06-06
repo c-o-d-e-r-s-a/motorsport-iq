@@ -142,8 +142,66 @@ describe('F1 Calendar', () => {
       expect(getScheduledLaps(qualSession!)).toBeNull();
     });
 
-    it('returns 57 laps for non-Montreal Race by default', () => {
-      expect(getScheduledLaps(MONACO_GP_2026_RACE)).toBe(57);
+    it('returns 78 laps for Monaco Race', () => {
+      expect(getScheduledLaps(MONACO_GP_2026_RACE)).toBe(78);
+    });
+
+    it('resolves laps from location when circuit_short_name is absent', () => {
+      const monacoByLocation: OpenF1Session = {
+        ...MONACO_GP_2026_RACE,
+        circuit_short_name: '',
+        location: 'Monaco',
+      };
+      expect(getScheduledLaps(monacoByLocation)).toBe(78);
+    });
+
+    it('covers every 2026 OpenF1 race circuit', () => {
+      const expectedByCircuit: Record<string, number> = {
+        Austin: 56,
+        Baku: 51,
+        Catalunya: 66,
+        Hungaroring: 70,
+        Interlagos: 71,
+        Jeddah: 50,
+        'Las Vegas': 50,
+        Lusail: 57,
+        Madring: 57,
+        Melbourne: 58,
+        'Mexico City': 71,
+        Miami: 57,
+        'Monte Carlo': 78,
+        Montreal: 70,
+        Monza: 53,
+        Sakhir: 57,
+        Shanghai: 56,
+        Silverstone: 52,
+        Singapore: 61,
+        'Spa-Francorchamps': 44,
+        Spielberg: 71,
+        Suzuka: 53,
+        'Yas Marina Circuit': 58,
+        Zandvoort: 72,
+      };
+
+      for (const [circuit, expectedLaps] of Object.entries(expectedByCircuit)) {
+        const session: OpenF1Session = {
+          session_key: 1,
+          meeting_key: 1,
+          location: circuit,
+          session_type: 'Race',
+          session_name: 'Race',
+          date_start: '2026-01-01T12:00:00+00:00',
+          date_end: '2026-01-01T14:00:00+00:00',
+          country_key: 1,
+          country_code: 'XX',
+          country_name: 'Test',
+          circuit_key: 1,
+          circuit_short_name: circuit,
+          year: 2026,
+        };
+
+        expect(getScheduledLaps(session)).toBe(expectedLaps);
+      }
     });
   });
 

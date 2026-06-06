@@ -6,7 +6,7 @@ import type { OpenF1Session } from '../types';
  */
 export const SCHEDULE_OVERRIDES: OpenF1Session[] = [
   {
-    session_key: 11295,
+    session_key: 11299,
     meeting_key: 1286,
     location: 'Monaco',
     session_type: 'Race',

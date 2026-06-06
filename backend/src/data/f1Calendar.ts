@@ -186,10 +186,66 @@ export function getPreRaceCalendarSession(now: number = Date.now()): OpenF1Sessi
   return getUpcomingPreRacePlayableSession(now);
 }
 
+/**
+ * Scheduled race distance (laps) until SignalR SessionInfo delivers TotalLaps.
+ * Keys are normalized circuit_short_name or location labels from OpenF1.
+ * Sources: F1.com 2026 race pages + FIA 305 km / Monaco 260 km distance rules.
+ */
 const CIRCUIT_RACE_LAPS: Record<string, number> = {
+  // circuit_short_name
+  austin: 56,
+  baku: 51,
+  catalunya: 66,
+  hungaroring: 70,
+  interlagos: 71,
+  jeddah: 50,
+  'las vegas': 50,
+  lusail: 57,
+  madring: 57,
+  melbourne: 58,
+  'mexico city': 71,
+  miami: 57,
+  'monte carlo': 78,
   montreal: 70,
   montréal: 70,
+  monza: 53,
+  sakhir: 57,
+  shanghai: 56,
+  silverstone: 52,
+  singapore: 61,
+  'spa-francorchamps': 44,
+  spielberg: 71,
+  suzuka: 53,
+  'yas marina circuit': 58,
+  zandvoort: 72,
+  // location aliases (OpenF1 sometimes differs from circuit_short_name)
+  barcelona: 66,
+  budapest: 70,
+  madrid: 57,
+  'marina bay': 61,
+  monaco: 78,
+  'sao paulo': 71,
+  'yas marina': 58,
 };
+
+/** Typical ~5.4 km circuit fallback when a venue is missing from the map above. */
+const DEFAULT_RACE_LAPS = 57;
+
+function getRaceLapFallback(session: OpenF1Session): number | null {
+  const candidates = [
+    normalizeLabel(session.circuit_short_name),
+    normalizeLabel(session.location),
+  ].filter(Boolean);
+
+  for (const key of candidates) {
+    const laps = CIRCUIT_RACE_LAPS[key];
+    if (laps !== undefined) {
+      return laps;
+    }
+  }
+
+  return null;
+}
 
 /** Estimated scheduled distance until LapCount arrives from the live feed. */
 export function getScheduledLaps(session: OpenF1Session): number | null {
@@ -198,8 +254,7 @@ export function getScheduledLaps(session: OpenF1Session): number | null {
   }
 
   if (session.session_name === 'Race') {
-    const circuit = normalizeLabel(session.circuit_short_name);
-    return CIRCUIT_RACE_LAPS[circuit] ?? 57;
+    return getRaceLapFallback(session) ?? DEFAULT_RACE_LAPS;
   }
 
   return null;
