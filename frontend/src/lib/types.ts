@@ -82,7 +82,7 @@ export interface DriverState {
   tyreCompound: string | null;
   tyreAge: number;
   stintNumber: number | null;
-  drsEnabled: boolean;
+  overtakeModeArmed: boolean;
   pitCount: number;
   lastLapTime: number | null;
   inPit: boolean;
@@ -97,9 +97,17 @@ export interface LeaderStats {
   stintNumber: number | null;
 }
 
+export interface LobbyLookupResult {
+  id: string;
+  code: string;
+  status: LobbyState['status'];
+  shareUrl: string;
+}
+
 export interface LobbyState {
   id: string;
   code: string;
+  shareUrl: string;
   hostId: string;
   sessionId: string | null;
   status: 'waiting' | 'active' | 'finished';
@@ -111,6 +119,8 @@ export interface LobbyState {
   currentQuestion: QuestionInstanceState | null;
   latestResolution: ResolutionEvent | null;
   questionCount: number;
+  minQuestions: number;
+  maxQuestions: number;
   leaderboard: LeaderboardEntry[];
 }
 
@@ -223,8 +233,10 @@ export interface SessionInfo {
   country_name: string;
   circuit_short_name: string;
   year: number;
+  is_cancelled?: boolean;
   isCompleted: boolean;
   isLive: boolean;
+  isPreRace: boolean;
   mode: SessionMode;
 }
 

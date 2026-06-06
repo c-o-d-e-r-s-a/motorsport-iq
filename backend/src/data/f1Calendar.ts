@@ -1,9 +1,11 @@
 import type { OpenF1Session } from '../types';
 import { SCHEDULE_OVERRIDES } from './scheduleOverrides';
+import { isWithinPreRaceLobbyWindow } from '../runtime/sessionRuntimeInfo';
 import {
   getActiveLivePlayableSession,
   getCachedSeasonSession,
   getCachedSeasonSessions,
+  getUpcomingPreRacePlayableSession,
 } from './seasonCalendarStore';
 
 // ─── Season schedule ─────────────────────────────────────────────────────────
@@ -18,6 +20,25 @@ import {
 
 /** Canadian GP 2026 Race — default dev simulation session when telemetry exists. */
 export const DEFAULT_SIMULATION_SESSION_KEY = 11291;
+
+/**
+ * Race/Sprint session keys with no telemetry — cancelled on the calendar or removed
+ * from the season schedule. Kept as a fallback when cached metadata omits is_cancelled.
+ */
+export const CANCELLED_SESSION_KEYS = new Set([
+  9086, // 2023 Emilia Romagna GP (Imola) — cancelled due to flooding
+  11261, // 2026 Sakhir GP — removed from 2026 calendar
+  11269, // 2026 Jeddah GP — removed from 2026 calendar
+]);
+
+export function isSessionCancelled(session: OpenF1Session): boolean {
+  return session.is_cancelled === true || CANCELLED_SESSION_KEYS.has(session.session_key);
+}
+
+/** Drop calendar entries that OpenF1 marked cancelled (no telemetry will ever arrive). */
+export function filterPlayableSessions(sessions: OpenF1Session[]): OpenF1Session[] {
+  return sessions.filter((session) => !isSessionCancelled(session));
+}
 
 function normalizeLabel(value: string): string {
   return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
@@ -147,10 +168,84 @@ export function getActiveLiveCalendarSession(now: number = Date.now()): OpenF1Se
   return getActiveLivePlayableSession(now);
 }
 
+/**
+ * Returns the next Race/Sprint session within the pre-race lobby window (30 min
+ * before start), if any. Used so hosts can open lobbies and invite friends early.
+ */
+export function getPreRaceCalendarSession(now: number = Date.now()): OpenF1Session | null {
+  for (const override of SCHEDULE_OVERRIDES) {
+    if (!['Race', 'Sprint'].includes(override.session_name)) {
+      continue;
+    }
+
+    if (isWithinPreRaceLobbyWindow(override, now)) {
+      return override;
+    }
+  }
+
+  return getUpcomingPreRacePlayableSession(now);
+}
+
+/**
+ * Scheduled race distance (laps) until SignalR SessionInfo delivers TotalLaps.
+ * Keys are normalized circuit_short_name or location labels from OpenF1.
+ * Sources: F1.com 2026 race pages + FIA 305 km / Monaco 260 km distance rules.
+ */
 const CIRCUIT_RACE_LAPS: Record<string, number> = {
+  // circuit_short_name
+  austin: 56,
+  baku: 51,
+  catalunya: 66,
+  hungaroring: 70,
+  interlagos: 71,
+  jeddah: 50,
+  'las vegas': 50,
+  lusail: 57,
+  madring: 57,
+  melbourne: 58,
+  'mexico city': 71,
+  miami: 57,
+  'monte carlo': 78,
   montreal: 70,
   montréal: 70,
+  monza: 53,
+  sakhir: 57,
+  shanghai: 56,
+  silverstone: 52,
+  singapore: 61,
+  'spa-francorchamps': 44,
+  spielberg: 71,
+  suzuka: 53,
+  'yas marina circuit': 58,
+  zandvoort: 72,
+  // location aliases (OpenF1 sometimes differs from circuit_short_name)
+  barcelona: 66,
+  budapest: 70,
+  madrid: 57,
+  'marina bay': 61,
+  monaco: 78,
+  'sao paulo': 71,
+  'yas marina': 58,
 };
+
+/** Typical ~5.4 km circuit fallback when a venue is missing from the map above. */
+const DEFAULT_RACE_LAPS = 57;
+
+function getRaceLapFallback(session: OpenF1Session): number | null {
+  const candidates = [
+    normalizeLabel(session.circuit_short_name),
+    normalizeLabel(session.location),
+  ].filter(Boolean);
+
+  for (const key of candidates) {
+    const laps = CIRCUIT_RACE_LAPS[key];
+    if (laps !== undefined) {
+      return laps;
+    }
+  }
+
+  return null;
+}
 
 /** Estimated scheduled distance until LapCount arrives from the live feed. */
 export function getScheduledLaps(session: OpenF1Session): number | null {
@@ -159,8 +254,7 @@ export function getScheduledLaps(session: OpenF1Session): number | null {
   }
 
   if (session.session_name === 'Race') {
-    const circuit = normalizeLabel(session.circuit_short_name);
-    return CIRCUIT_RACE_LAPS[circuit] ?? 57;
+    return getRaceLapFallback(session) ?? DEFAULT_RACE_LAPS;
   }
 
   return null;

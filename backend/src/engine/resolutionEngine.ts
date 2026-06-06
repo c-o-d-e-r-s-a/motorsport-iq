@@ -234,7 +234,7 @@ export function generateExplanation(
       return `${yesNo}! ${driver1Name} ${outcome ? 'held' : 'lost'} P${triggerDriver1?.position}. Now P${currentDriver1?.position}.`;
 
     case 'stillWithinGap':
-      return `${yesNo}! ${driver1Name} ${outcome ? 'stayed within' : 'fell outside of'} DRS range behind ${driver2Name}.`;
+      return `${yesNo}! ${driver1Name} ${outcome ? 'stayed within' : 'fell outside of'} 1 second behind ${driver2Name}.`;
 
     case 'gapExceeded':
       return `${yesNo}! ${driver1Name} ${outcome ? 'dropped back beyond' : 'stayed within'} 1 second of ${driver2Name}.`;

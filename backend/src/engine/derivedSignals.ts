@@ -1,6 +1,26 @@
 import type { RaceSnapshot, DriverState, DerivedSignals } from '../types';
 
 /**
+ * Optional thresholds for relaxed signal calculation during pacing tiers.
+ * Defaults match strict-mode values (tier: strict).
+ */
+export interface SignalOverrides {
+  closingTrendThreshold?: number;
+  closeBattleThreshold?: number;
+  lateRacePhasePercent?: number;
+  overtakeOpportunityMaxGap?: number;
+  pitWindowStintLength?: number;
+}
+
+const DEFAULT_SIGNAL_OVERRIDES: Required<SignalOverrides> = {
+  closingTrendThreshold: 0.1,
+  closeBattleThreshold: 4.0,
+  lateRacePhasePercent: 0.6,
+  overtakeOpportunityMaxGap: 1.5,
+  pitWindowStintLength: 18,
+};
+
+/**
  * Derived Signals - Observable, lap-based signals only for the MVP ruleset.
  */
 
@@ -24,12 +44,12 @@ export function isAtTyreCliff(current: DriverState, previous: DriverState | null
   return current.tyreAge >= 20 && current.lastLapTime - previous.lastLapTime >= 1.0;
 }
 
-export function isLateRacePhase(snapshot: RaceSnapshot): boolean {
+export function isLateRacePhase(snapshot: RaceSnapshot, phasePercent = 0.6): boolean {
   if (!snapshot.totalLaps || snapshot.totalLaps <= 0) {
     return false;
   }
 
-  return snapshot.lapNumber >= Math.ceil(snapshot.totalLaps * 0.6);
+  return snapshot.lapNumber >= Math.ceil(snapshot.totalLaps * phasePercent);
 }
 
 export function isPodiumStable(currentSnapshot: RaceSnapshot, previousSnapshot: RaceSnapshot | null): boolean {
@@ -85,30 +105,87 @@ export function getCloseBattles(
   return battles;
 }
 
-export function calculateDerivedSignals(currentSnapshot: RaceSnapshot, previousSnapshot: RaceSnapshot | null): DerivedSignals {
+export function isUndercutPressure(driver: DriverState, closing: boolean, pitWindow: boolean): boolean {
+  if (!pitWindow || !closing || driver.inPit || driver.retired) {
+    return false;
+  }
+
+  if (driver.position < 3 || driver.position > 15) {
+    return false;
+  }
+
+  return driver.interval !== null && driver.interval >= 1.5 && driver.interval <= 4.5;
+}
+
+/**
+ * 2026 Overtake Mode proxy: within 1s at the last detection point grants
+ * extra deploy power on the following lap while chasing the same car.
+ */
+export function isOvertakeModeArmed(
+  snapshot: RaceSnapshot,
+  previousSnapshot: RaceSnapshot | null,
+  driver: DriverState
+): boolean {
+  if (!previousSnapshot || driver.position <= 1 || driver.inPit || driver.retired) {
+    return false;
+  }
+
+  const previousDriver = previousSnapshot.drivers.find(
+    (candidate) => candidate.driverNumber === driver.driverNumber
+  );
+  if (!previousDriver || previousDriver.interval === null || previousDriver.interval > 1.0) {
+    return false;
+  }
+
+  const previousCarAhead = getDriverAhead(previousSnapshot, previousDriver);
+  const currentCarAhead = getDriverAhead(snapshot, driver);
+  if (!previousCarAhead || !currentCarAhead) {
+    return false;
+  }
+
+  return previousCarAhead.driverNumber === currentCarAhead.driverNumber;
+}
+
+export function calculateDerivedSignals(
+  currentSnapshot: RaceSnapshot,
+  previousSnapshot: RaceSnapshot | null,
+  overrides: SignalOverrides = {}
+): DerivedSignals {
+  const config = { ...DEFAULT_SIGNAL_OVERRIDES, ...overrides };
   const closingTrend = new Map<number, boolean>();
   const fallingBack = new Map<number, boolean>();
   const withinOneSecond = new Map<number, boolean>();
   const overtakeOpportunity = new Map<number, boolean>();
   const pitWindowOpen = new Map<number, boolean>();
   const tyreCliffRisk = new Map<number, boolean>();
-  const closeBattles = getCloseBattles(currentSnapshot, 4.0);
+  const overtakeModeArmed = new Map<number, boolean>();
+  const undercutPressure = new Map<number, boolean>();
+  const closeBattles = getCloseBattles(currentSnapshot, config.closeBattleThreshold);
 
   for (const driver of currentSnapshot.drivers) {
     const previousDriver = previousSnapshot?.drivers.find((candidate) => candidate.driverNumber === driver.driverNumber) ?? null;
     const closing = previousDriver && driver.interval !== null && previousDriver.interval !== null
-      ? isClosingTrend(driver.interval, previousDriver.interval)
+      ? isClosingTrend(driver.interval, previousDriver.interval, config.closingTrendThreshold)
       : false;
     const opening = previousDriver && driver.interval !== null && previousDriver.interval !== null
-      ? isClosingTrend(previousDriver.interval, driver.interval)
+      ? isClosingTrend(previousDriver.interval, driver.interval, config.closingTrendThreshold)
       : false;
+    const inPitWindow = isInPitWindow(driver, config.pitWindowStintLength);
 
     closingTrend.set(driver.driverNumber, closing);
     fallingBack.set(driver.driverNumber, opening);
     withinOneSecond.set(driver.driverNumber, isWithinOneSecond(driver));
-    overtakeOpportunity.set(driver.driverNumber, closing && (driver.interval ?? Infinity) <= 1.5);
-    pitWindowOpen.set(driver.driverNumber, isInPitWindow(driver));
+    overtakeOpportunity.set(
+      driver.driverNumber,
+      closing && (driver.interval ?? Infinity) <= config.overtakeOpportunityMaxGap
+    );
+    pitWindowOpen.set(driver.driverNumber, inPitWindow);
     tyreCliffRisk.set(driver.driverNumber, isAtTyreCliff(driver, previousDriver));
+    overtakeModeArmed.set(
+      driver.driverNumber,
+      isOvertakeModeArmed(currentSnapshot, previousSnapshot, driver)
+    );
+    undercutPressure.set(driver.driverNumber, isUndercutPressure(driver, closing, inPitWindow));
   }
 
   return {
@@ -118,13 +195,15 @@ export function calculateDerivedSignals(currentSnapshot: RaceSnapshot, previousS
     overtakeOpportunity,
     pitWindowOpen,
     tyreCliffRisk,
-    lateRacePhase: isLateRacePhase(currentSnapshot),
+    lateRacePhase: isLateRacePhase(currentSnapshot, config.lateRacePhasePercent),
     podiumStabilityTrend: isPodiumStable(currentSnapshot, previousSnapshot),
     closeBattles: closeBattles.map((battle) => ({
       attacker: battle.attacker.driverNumber,
       defender: battle.defender.driverNumber,
       gap: battle.gap,
     })),
+    overtakeModeArmed,
+    undercutPressure,
   };
 }
 

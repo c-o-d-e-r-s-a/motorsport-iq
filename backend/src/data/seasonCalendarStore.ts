@@ -1,5 +1,7 @@
 import type { OpenF1Session } from '../types';
 
+import { PRE_RACE_LOBBY_WINDOW_MS } from '../runtime/sessionRuntimeInfo';
+
 const PLAYABLE_LIVE_SESSION_NAMES = new Set(['Race', 'Sprint']);
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -62,6 +64,40 @@ export function getActiveLivePlayableSession(now: number = Date.now()): OpenF1Se
       if (
         !bestMatch
         || new Date(session.date_start).getTime() > new Date(bestMatch.date_start).getTime()
+      ) {
+        bestMatch = session;
+      }
+    }
+  }
+
+  return bestMatch;
+}
+
+function isPreRacePlayableSession(session: OpenF1Session, now: number): boolean {
+  if (!PLAYABLE_LIVE_SESSION_NAMES.has(session.session_name)) {
+    return false;
+  }
+
+  const start = new Date(session.date_start).getTime();
+  if (now >= start) {
+    return false;
+  }
+
+  return start - now <= PRE_RACE_LOBBY_WINDOW_MS;
+}
+
+export function getUpcomingPreRacePlayableSession(now: number = Date.now()): OpenF1Session | null {
+  let bestMatch: OpenF1Session | null = null;
+
+  for (const entry of cacheByYear.values()) {
+    for (const session of entry.sessions) {
+      if (!isPreRacePlayableSession(session, now)) {
+        continue;
+      }
+
+      if (
+        !bestMatch
+        || new Date(session.date_start).getTime() < new Date(bestMatch.date_start).getTime()
       ) {
         bestMatch = session;
       }

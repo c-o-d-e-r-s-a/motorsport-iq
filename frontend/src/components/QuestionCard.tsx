@@ -1,6 +1,7 @@
 'use client';
 
 import { Chip } from '@/components/ui';
+import { CATEGORY_LABELS } from '@/lib/categoryLabels';
 import { cn } from '@/lib/cn';
 import { type Difficulty, type QuestionCategory } from '@/lib/types';
 
@@ -13,13 +14,6 @@ interface QuestionCardProps {
   disabled?: boolean;
   answered?: 'YES' | 'NO' | null;
 }
-
-const CATEGORY_LABELS: Record<QuestionCategory, string> = {
-  OVERTAKE: 'Overtake',
-  PIT_WINDOW: 'Pit Window',
-  GAP_CLOSING: 'Gap Closing',
-  FINISH_POSITION: 'Finish Position',
-};
 
 const CATEGORY_TONE: Record<QuestionCategory, 'accent' | 'info' | 'warn' | 'go'> = {
   OVERTAKE: 'accent',

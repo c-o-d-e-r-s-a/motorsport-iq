@@ -12,6 +12,7 @@ import type {
   DerivedSignals,
   SessionMode,
 } from '../types';
+import { isOvertakeModeArmed } from '../engine/derivedSignals';
 import type { OpenF1Client } from './openf1Client';
 import { mergeStintRecords, resolveTyreCompound } from './tyreCompoundResolver';
 
@@ -202,6 +203,8 @@ export class SnapshotStore {
       this.refreshLatestCompound(data);
     }
 
+    this.ensureActiveRaceLapFloor();
+
     if (this.sessionId) {
       this.buildSnapshot();
     }
@@ -266,6 +269,7 @@ export class SnapshotStore {
       this.lapNumber = nextLap;
     }
 
+    this.ensureActiveRaceLapFloor();
     this.buildSnapshot();
     if (this.currentSnapshot) {
       this.options.onLapComplete?.(this.currentSnapshot);
@@ -279,8 +283,10 @@ export class SnapshotStore {
 
     if (lapNumber > this.lapNumber) {
       this.lapNumber = lapNumber;
-      this.scheduleHudSnapshotUpdate();
     }
+
+    this.ensureActiveRaceLapFloor();
+    this.scheduleHudSnapshotUpdate();
   }
 
   processPositionUpdate(positions: OpenF1Position[]): void {
@@ -290,6 +296,7 @@ export class SnapshotStore {
         driverData.latestPosition = pos;
       }
     }
+    this.ensureActiveRaceLapFloor();
     this.scheduleHudSnapshotUpdate();
   }
 
@@ -306,6 +313,7 @@ export class SnapshotStore {
         driverData.latestInterval = interval;
       }
     }
+    this.ensureActiveRaceLapFloor();
     this.scheduleHudSnapshotUpdate();
   }
 
@@ -365,6 +373,18 @@ export class SnapshotStore {
   }
 
   processRaceControlUpdate(messages: OpenF1RaceControl[]): void {
+    const sessionStarted = messages.some(
+      (message) => message.category === 'SessionStatus'
+        && message.message?.toUpperCase() === 'SESSION STARTED'
+    );
+
+    if (sessionStarted && this.lapNumber < 1) {
+      this.lapNumber = 1;
+      if (this.sessionId) {
+        this.buildSnapshot();
+      }
+    }
+
     const nextTrackStatus = this.client.parseTrackStatus(messages);
 
     if (nextTrackStatus === this.trackStatus) {
@@ -425,7 +445,7 @@ export class SnapshotStore {
         tyreCompound,
         tyreAge: this.calculateCurrentTyreAge(activeStint, tyreAge),
         stintNumber,
-        drsEnabled: false,
+        overtakeModeArmed: false,
         pitCount: data.pits.length,
         lastLapTime: data.latestLap?.lap_duration ?? null,
         inPit: false,
@@ -461,7 +481,7 @@ export class SnapshotStore {
       ? [leader, ...driverStates.filter((driver) => driver.driverNumber !== leader.driverNumber)]
       : driverStates;
 
-    this.currentSnapshot = {
+    const draftSnapshot: RaceSnapshot = {
       sessionId: this.sessionId,
       lapNumber: this.lapNumber,
       totalLaps: this.totalLaps,
@@ -476,6 +496,18 @@ export class SnapshotStore {
       leaderLapStartTime,
     };
 
+    if (this.previousSnapshot) {
+      for (const driver of orderedDrivers) {
+        driver.overtakeModeArmed = isOvertakeModeArmed(
+          draftSnapshot,
+          this.previousSnapshot,
+          driver
+        );
+      }
+    }
+
+    this.currentSnapshot = draftSnapshot;
+
     if (DEBUG_DRIVER_PROVENANCE && leader) {
       console.debug('[snapshot-driver-provenance]', {
         leader: leader.name,
@@ -488,8 +520,29 @@ export class SnapshotStore {
     this.lastHudSnapshotAt = Date.now();
   }
 
+  private hasRaceActivity(): boolean {
+    for (const data of this.drivers.values()) {
+      if ((data.latestPosition?.position ?? 0) > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Active sessions should never display lap 0 once cars are on track. */
+  private ensureActiveRaceLapFloor(): void {
+    if (this.hasRaceActivity() && this.lapNumber < 1) {
+      this.lapNumber = 1;
+    }
+  }
+
   private scheduleHudSnapshotUpdate(): void {
-    if (!this.currentSnapshot || !this.sessionId) {
+    if (!this.sessionId) {
+      return;
+    }
+
+    if (!this.currentSnapshot) {
+      this.buildSnapshot();
       return;
     }
 
@@ -635,6 +688,8 @@ export class SnapshotStore {
         lateRacePhase: false,
         podiumStabilityTrend: false,
         closeBattles: [],
+        overtakeModeArmed: new Map(),
+        undercutPressure: new Map(),
       };
     }
 
@@ -644,6 +699,8 @@ export class SnapshotStore {
     const overtakeOpportunity = new Map<number, boolean>();
     const pitWindowOpen = new Map<number, boolean>();
     const tyreCliffRisk = new Map<number, boolean>();
+    const overtakeModeArmed = new Map<number, boolean>();
+    const undercutPressure = new Map<number, boolean>();
     const closeBattles: { attacker: number; defender: number; gap: number }[] = [];
 
     for (const driver of snapshot.drivers) {
@@ -651,13 +708,25 @@ export class SnapshotStore {
       const currentGap = driver.gap;
       const isClosing = prevGap !== undefined && currentGap !== null ? prevGap - currentGap > 0.1 : false;
       const isOpening = prevGap !== undefined && currentGap !== null ? currentGap - prevGap > 0.1 : false;
+      const inPitWindow = driver.tyreAge >= 15 && driver.pitCount < 2;
       closingTrend.set(driver.driverNumber, isClosing);
       fallingBack.set(driver.driverNumber, isOpening);
       withinOneSecond.set(driver.driverNumber, driver.interval !== null && driver.interval <= 1.0);
       overtakeOpportunity.set(driver.driverNumber, isClosing && driver.interval !== null && driver.interval <= 1.5);
 
-      pitWindowOpen.set(driver.driverNumber, driver.tyreAge >= 15 && driver.pitCount < 2);
+      pitWindowOpen.set(driver.driverNumber, inPitWindow);
       tyreCliffRisk.set(driver.driverNumber, driver.tyreAge >= 25);
+      overtakeModeArmed.set(driver.driverNumber, driver.overtakeModeArmed);
+      undercutPressure.set(
+        driver.driverNumber,
+        inPitWindow
+          && isClosing
+          && driver.position >= 3
+          && driver.position <= 15
+          && driver.interval !== null
+          && driver.interval >= 1.5
+          && driver.interval <= 4.5
+      );
 
       if (driver.interval !== null && driver.interval < 4.0 && driver.position > 1) {
         const defender = snapshot.drivers.find((candidate) => candidate.position === driver.position - 1);
@@ -681,6 +750,8 @@ export class SnapshotStore {
       lateRacePhase: snapshot.totalLaps !== null ? snapshot.lapNumber >= Math.ceil(snapshot.totalLaps * 0.6) : false,
       podiumStabilityTrend: false,
       closeBattles,
+      overtakeModeArmed,
+      undercutPressure,
     };
   }
 }

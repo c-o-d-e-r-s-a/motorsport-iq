@@ -66,7 +66,7 @@ export const CANADIAN_GP_2026_SESSIONS: OpenF1Session[] = [
 ];
 
 export const MONACO_GP_2026_RACE: OpenF1Session = SCHEDULE_OVERRIDES.find(
-  (session) => session.session_key === 11295
+  (session) => session.session_key === 11299
 )!;
 
 export const SEASON_2026_FIXTURE: OpenF1Session[] = [

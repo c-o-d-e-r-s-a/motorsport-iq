@@ -10,6 +10,7 @@ import {
 const baseState: LobbyState = {
   id: 'lobby-1',
   code: 'ABC123',
+  shareUrl: 'https://motorsport-iq.vercel.app/lobby/ABC123',
   hostId: 'host-1',
   sessionId: null,
   status: 'active',

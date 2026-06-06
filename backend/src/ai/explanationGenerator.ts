@@ -7,7 +7,6 @@ import { getDriverByNumber } from '../engine/derivedSignals';
 const apiKey = process.env.GROQ_API_KEY;
 const groq = apiKey ? new Groq({ apiKey }) : null;
 const MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-const QUESTION_TIMEOUT_MS = 2500;
 const EXPLANATION_TIMEOUT_MS = 4000;
 
 function hasGroq(): boolean {
@@ -23,50 +22,14 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   ]);
 }
 
+/** Bank templates are the source of truth — Groq must not rewrite live question copy. */
 export async function generateQuestionText(instance: QuestionInstanceState): Promise<string> {
   const question = getQuestionById(instance.questionId);
-  const fallback = question && instance.driver1
-    ? formatQuestionText(question, instance.driver1, instance.driver2 ?? null)
-    : instance.questionText ?? 'Will this prediction come true?';
-
-  if (!hasGroq() || !question || !instance.driver1) {
-    return fallback;
+  if (question && instance.driver1) {
+    return formatQuestionText(question, instance.driver1, instance.driver2 ?? null);
   }
 
-  try {
-    const response = await withTimeout(
-      groq!.chat.completions.create({
-        model: MODEL,
-        temperature: 0.4,
-        max_tokens: 80,
-        messages: [
-          {
-            role: 'system',
-            content: 'You rewrite F1 prediction prompts. Keep them factual, short, yes-or-no, and based only on the provided race context.',
-          },
-          {
-            role: 'user',
-            content: [
-              `Template: ${question.template}`,
-              `Driver A: ${instance.driver1.name} (${instance.driver1.team})`,
-              `Driver B: ${instance.driver2?.name ?? 'Car ahead'}`,
-              `Lap: ${instance.triggerSnapshot.lapNumber}`,
-              `Category: ${question.category}`,
-              `Window: ${instance.windowSize} laps`,
-              'Return a single yes-or-no prediction question only.',
-            ].join('\n'),
-          },
-        ],
-      }),
-      QUESTION_TIMEOUT_MS,
-      'Groq question rewrite'
-    );
-
-    return response.choices[0]?.message?.content?.trim() || fallback;
-  } catch (error) {
-    console.error('Failed to generate AI question text:', error);
-    return fallback;
-  }
+  return instance.questionText ?? 'Will this prediction come true?';
 }
 
 export async function generateResolutionExplanation(

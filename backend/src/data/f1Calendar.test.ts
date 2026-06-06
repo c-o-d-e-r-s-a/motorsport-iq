@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach } from '@jest/globals';
 import {
   dedupeWeekendSessions,
+  filterPlayableSessions,
   findMatchingOpenF1Session,
   getCalendarSessions,
   getCalendarSession,
   getActiveLiveCalendarSession,
+  getPreRaceCalendarSession,
   getScheduledLaps,
+  isSessionCancelled,
   mergeWithCalendar,
   resolveSessionForReplay,
 } from './f1Calendar';
@@ -92,6 +95,34 @@ describe('F1 Calendar', () => {
     });
   });
 
+  describe('getPreRaceCalendarSession', () => {
+    it('returns null when the next session is more than 30 minutes away', () => {
+      const raceSession = getCalendarSession(11291);
+      expect(raceSession).not.toBeNull();
+
+      const tooEarly = new Date(raceSession!.date_start).getTime() - (31 * 60 * 1000);
+      const session = getPreRaceCalendarSession(tooEarly);
+      expect(session).toBeNull();
+    });
+
+    it('returns the upcoming Race within the 30-minute lobby window', () => {
+      const raceSession = getCalendarSession(11291);
+      expect(raceSession).not.toBeNull();
+
+      const thirtyMinutesBefore = new Date(raceSession!.date_start).getTime() - (30 * 60 * 1000);
+      const session = getPreRaceCalendarSession(thirtyMinutesBefore);
+      expect(session).not.toBeNull();
+      expect(session?.session_name).toBe('Race');
+      expect(session?.session_key).toBe(11291);
+    });
+
+    it('returns null once the session is live', () => {
+      const duringRace = new Date('2026-05-24T20:30:00Z').getTime();
+      const session = getPreRaceCalendarSession(duringRace);
+      expect(session).toBeNull();
+    });
+  });
+
   describe('getScheduledLaps', () => {
     it('returns 20 laps for Sprint sessions', () => {
       const sprintSession = getCalendarSession(11286);
@@ -111,8 +142,66 @@ describe('F1 Calendar', () => {
       expect(getScheduledLaps(qualSession!)).toBeNull();
     });
 
-    it('returns 57 laps for non-Montreal Race by default', () => {
-      expect(getScheduledLaps(MONACO_GP_2026_RACE)).toBe(57);
+    it('returns 78 laps for Monaco Race', () => {
+      expect(getScheduledLaps(MONACO_GP_2026_RACE)).toBe(78);
+    });
+
+    it('resolves laps from location when circuit_short_name is absent', () => {
+      const monacoByLocation: OpenF1Session = {
+        ...MONACO_GP_2026_RACE,
+        circuit_short_name: '',
+        location: 'Monaco',
+      };
+      expect(getScheduledLaps(monacoByLocation)).toBe(78);
+    });
+
+    it('covers every 2026 OpenF1 race circuit', () => {
+      const expectedByCircuit: Record<string, number> = {
+        Austin: 56,
+        Baku: 51,
+        Catalunya: 66,
+        Hungaroring: 70,
+        Interlagos: 71,
+        Jeddah: 50,
+        'Las Vegas': 50,
+        Lusail: 57,
+        Madring: 57,
+        Melbourne: 58,
+        'Mexico City': 71,
+        Miami: 57,
+        'Monte Carlo': 78,
+        Montreal: 70,
+        Monza: 53,
+        Sakhir: 57,
+        Shanghai: 56,
+        Silverstone: 52,
+        Singapore: 61,
+        'Spa-Francorchamps': 44,
+        Spielberg: 71,
+        Suzuka: 53,
+        'Yas Marina Circuit': 58,
+        Zandvoort: 72,
+      };
+
+      for (const [circuit, expectedLaps] of Object.entries(expectedByCircuit)) {
+        const session: OpenF1Session = {
+          session_key: 1,
+          meeting_key: 1,
+          location: circuit,
+          session_type: 'Race',
+          session_name: 'Race',
+          date_start: '2026-01-01T12:00:00+00:00',
+          date_end: '2026-01-01T14:00:00+00:00',
+          country_key: 1,
+          country_code: 'XX',
+          country_name: 'Test',
+          circuit_key: 1,
+          circuit_short_name: circuit,
+          year: 2026,
+        };
+
+        expect(getScheduledLaps(session)).toBe(expectedLaps);
+      }
     });
   });
 
@@ -214,6 +303,61 @@ describe('F1 Calendar', () => {
     });
   });
 
+  describe('cancelled sessions', () => {
+    const cancelledSakhirRace: OpenF1Session = {
+      session_key: 11261,
+      meeting_key: 1282,
+      location: 'Sakhir',
+      session_type: 'Race',
+      session_name: 'Race',
+      date_start: '2026-04-12T15:00:00+00:00',
+      date_end: '2026-04-12T17:00:00+00:00',
+      country_key: 36,
+      country_code: 'BRN',
+      country_name: 'Bahrain',
+      circuit_key: 63,
+      circuit_short_name: 'Sakhir',
+      year: 2026,
+      is_cancelled: true,
+    };
+
+    const imola2023Race: OpenF1Session = {
+      session_key: 9086,
+      meeting_key: 1209,
+      location: 'Imola',
+      session_type: 'Race',
+      session_name: 'Race',
+      date_start: '2023-05-21T13:00:00+00:00',
+      date_end: '2023-05-21T15:00:00+00:00',
+      country_key: 13,
+      country_code: 'ITA',
+      country_name: 'Italy',
+      circuit_key: 6,
+      circuit_short_name: 'Imola',
+      year: 2023,
+    };
+
+    it('detects cancelled OpenF1 sessions', () => {
+      expect(isSessionCancelled(cancelledSakhirRace)).toBe(true);
+      expect(isSessionCancelled(CANADIAN_GP_2026_SESSIONS[3])).toBe(false);
+    });
+
+    it('blocks known cancelled races even without is_cancelled on cached metadata', () => {
+      expect(isSessionCancelled(imola2023Race)).toBe(true);
+    });
+
+    it('filters cancelled sessions from playable lists', () => {
+      const filtered = filterPlayableSessions([
+        cancelledSakhirRace,
+        imola2023Race,
+        CANADIAN_GP_2026_SESSIONS[3],
+      ]);
+
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0].session_key).toBe(11291);
+    });
+  });
+
   describe('Calendar data integrity', () => {
     it('all sessions have valid ISO 8601 timestamps', () => {
       const sessions = getCalendarSessions();
@@ -274,7 +418,20 @@ describe('F1 Calendar', () => {
       const isUpcoming = beforeStart < start;
 
       expect(isUpcoming).toBe(true);
-      expect(toSessionInfo(raceSession!).isLive).toBe(false);
+      expect(toSessionInfo(raceSession!, beforeStart).isLive).toBe(false);
+      expect(toSessionInfo(raceSession!, beforeStart).isPreRace).toBe(false);
+    });
+
+    it('marks sessions within the 30-minute pre-race lobby window', () => {
+      const raceSession = getCalendarSession(11291);
+      expect(raceSession).not.toBeNull();
+
+      const twentyMinutesBefore = new Date(raceSession!.date_start).getTime() - (20 * 60 * 1000);
+      const info = toSessionInfo(raceSession!, twentyMinutesBefore);
+
+      expect(info.isLive).toBe(false);
+      expect(info.isCompleted).toBe(false);
+      expect(info.isPreRace).toBe(true);
     });
 
     it('correctly marks live sessions', () => {

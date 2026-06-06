@@ -3,6 +3,7 @@ import type { Question, QuestionCategory } from '../types';
 /**
  * MVP Question Bank
  * Curated questions for observable, lap-based race situations.
+ * Copy reflects 2026 regulations: Overtake Mode replaces traditional DRS.
  */
 
 export const QUESTION_BANK: Question[] = [
@@ -11,7 +12,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'OVR_PASS_NEXT_3',
     category: 'OVERTAKE',
     difficulty: 'MEDIUM',
-    template: 'Will {driver1} overtake {driver2} in the next {windowSize} laps?',
+    template: 'Battle brewing — will {driver1} get past {driver2} in the next {windowSize} laps?',
     windowSize: 3,
     triggers: [{ type: 'overtakeOpportunity', params: {} }],
     successCondition: { type: 'overtake', params: {} },
@@ -19,15 +20,14 @@ export const QUESTION_BANK: Question[] = [
     cooldownLaps: 2,
   },
   {
-    id: 'OVR_DRS_ATTACK',
+    id: 'OVR_OVERTAKE_MODE',
     category: 'OVERTAKE',
     difficulty: 'HARD',
-    template: 'DRS is open — can {driver1} pass {driver2} in the next 2 laps?',
+    template: '{driver1} has Overtake Mode armed — can they pass {driver2} in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'overtakeOpportunity', params: {} },
-      { type: 'withinOneSecond', params: {} },
-      { type: 'drsEnabled', params: {} },
+      { type: 'overtakeModeArmed', params: {} },
     ],
     successCondition: { type: 'overtake', params: {} },
     priority: 1,
@@ -37,7 +37,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'OVR_MAKE_THE_MOVE',
     category: 'OVERTAKE',
     difficulty: 'MEDIUM',
-    template: 'The gap is under a second — will {driver1} complete the move on {driver2} in 2 laps?',
+    template: '{driver1} is right on {driver2}\'s tail — will the move stick in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'overtakeOpportunity', params: {} },
@@ -51,7 +51,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'OVR_CLOSE_TO_1S',
     category: 'OVERTAKE',
     difficulty: 'EASY',
-    template: 'Will {driver1} close to within 1 second of {driver2} over the next 2 laps?',
+    template: '{driver1} is hunting {driver2} down — will they be within 1 second in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'closingTrend', params: {} },
@@ -65,7 +65,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'OVR_GAIN_POSITION',
     category: 'OVERTAKE',
     difficulty: 'MEDIUM',
-    template: 'Will {driver1} gain at least one position in the next {windowSize} laps?',
+    template: '{driver1} is on the charge — will they pick up at least one place in the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'closingTrend', params: {} },
@@ -81,7 +81,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'PIT_STOP_NEXT_3',
     category: 'PIT_WINDOW',
     difficulty: 'EASY',
-    template: 'Will {driver1} pit for fresh tyres in the next {windowSize} laps?',
+    template: 'Fresh rubber calling — will {driver1} pit in the next {windowSize} laps?',
     windowSize: 3,
     triggers: [{ type: 'pitWindowOpen', params: {} }],
     successCondition: { type: 'pitStop', params: { withinLaps: 3 } },
@@ -92,7 +92,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'PIT_IMMINENT',
     category: 'PIT_WINDOW',
     difficulty: 'MEDIUM',
-    template: 'The pit window is open — will {driver1} box in the next 2 laps?',
+    template: 'Strategy window is open — does {driver1} box in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'pitWindowOpen', params: {} },
@@ -106,7 +106,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'PIT_CLIFF_BOX',
     category: 'PIT_WINDOW',
     difficulty: 'MEDIUM',
-    template: 'Tyres on lap {tyreAge} — will {driver1} pit before they fall off a cliff?',
+    template: 'Tyres at {tyreAge} laps — will {driver1} pit before grip falls off a cliff?',
     windowSize: 2,
     triggers: [{ type: 'tyreCliffRisk', params: {} }],
     successCondition: { type: 'pitStop', params: { withinLaps: 2 } },
@@ -117,7 +117,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'PIT_STAY_OUT_NEXT_3',
     category: 'PIT_WINDOW',
     difficulty: 'MEDIUM',
-    template: 'Will {driver1} extend this stint and stay out for the next {windowSize} laps?',
+    template: 'Will {driver1} gamble on old tyres and stay out for the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'pitWindowOpen', params: {} },
@@ -128,12 +128,38 @@ export const QUESTION_BANK: Question[] = [
     cooldownLaps: 2,
   },
 
+  {
+    id: 'PIT_LEADER_BOX',
+    category: 'PIT_WINDOW',
+    difficulty: 'HARD',
+    template: 'The race leader is on ageing rubber — will {driver1} pit in the next 2 laps?',
+    windowSize: 2,
+    triggers: [
+      { type: 'pitWindowOpen', params: {} },
+      { type: 'positionRange', params: { min: 1, max: 1 } },
+    ],
+    successCondition: { type: 'pitStop', params: { withinLaps: 2 } },
+    priority: 2,
+    cooldownLaps: 2,
+  },
+  {
+    id: 'PIT_UNDERCUT_GAMBLE',
+    category: 'PIT_WINDOW',
+    difficulty: 'HARD',
+    template: 'Undercut window open — will {driver1} gamble on fresh tyres in the next {windowSize} laps?',
+    windowSize: 3,
+    triggers: [{ type: 'undercutPressure', params: {} }],
+    successCondition: { type: 'pitStop', params: { withinLaps: 3 } },
+    priority: 2,
+    cooldownLaps: 2,
+  },
+
   // ── GAP CLOSING ───────────────────────────────────────────────────────────
   {
     id: 'GAP_REDUCE_1S',
     category: 'GAP_CLOSING',
     difficulty: 'MEDIUM',
-    template: 'Will {driver1} cut at least 1 second off {driver2} in the next {windowSize} laps?',
+    template: 'Can {driver1} find a second on {driver2} over the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'closingTrend', params: {} },
@@ -147,7 +173,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'GAP_SLASH_TWO',
     category: 'GAP_CLOSING',
     difficulty: 'HARD',
-    template: 'Can {driver1} slash 2 seconds off {driver2} in the next {windowSize} laps?',
+    template: '{driver1} is closing fast — can they shave 2 seconds off {driver2} in the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'closingTrend', params: {} },
@@ -161,7 +187,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'GAP_FALL_BELOW_1S',
     category: 'GAP_CLOSING',
     difficulty: 'EASY',
-    template: 'Will the gap from {driver1} to {driver2} drop below 1 second in 2 laps?',
+    template: 'The gap is tightening — will {driver1} drop inside 1 second of {driver2} in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'closingTrend', params: {} },
@@ -172,10 +198,10 @@ export const QUESTION_BANK: Question[] = [
     cooldownLaps: 2,
   },
   {
-    id: 'GAP_STICKY_DRS',
+    id: 'GAP_STAY_CLOSE',
     category: 'GAP_CLOSING',
     difficulty: 'EASY',
-    template: 'Will {driver1} stay glued to {driver2} in DRS range for the next 2 laps?',
+    template: 'Will {driver1} stay glued to {driver2}\'s gearbox for the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'withinOneSecond', params: {} },
@@ -186,10 +212,10 @@ export const QUESTION_BANK: Question[] = [
     cooldownLaps: 2,
   },
   {
-    id: 'GAP_LOSE_DRS',
+    id: 'GAP_SLIP_BACK',
     category: 'GAP_CLOSING',
     difficulty: 'MEDIUM',
-    template: 'Will {driver1} drop out of DRS range behind {driver2} in the next 2 laps?',
+    template: 'Is {driver1} losing touch with {driver2} — will they slip back beyond 1 second in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'withinOneSecond', params: {} },
@@ -206,7 +232,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'FIN_AHEAD_OF_RIVAL',
     category: 'FINISH_POSITION',
     difficulty: 'MEDIUM',
-    template: 'Late-race fight — will {driver1} finish ahead of {driver2}?',
+    template: 'Final laps, wheel-to-wheel — will {driver1} beat {driver2} to the flag?',
     windowSize: 3,
     triggers: [
       { type: 'lateRacePhase', params: {} },
@@ -220,7 +246,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'FIN_TOP_5',
     category: 'FINISH_POSITION',
     difficulty: 'EASY',
-    template: 'Will {driver1} still be in the top 5 after the next {windowSize} laps?',
+    template: 'Can {driver1} hold a top-5 spot over the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'lateRacePhase', params: {} },
@@ -234,7 +260,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'FIN_PODIUM_PUSH',
     category: 'FINISH_POSITION',
     difficulty: 'HARD',
-    template: 'Can {driver1} break onto the podium in the next {windowSize} laps?',
+    template: 'Podium within reach — will {driver1} crack the top 3 in the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'lateRacePhase', params: {} },
@@ -249,7 +275,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'FIN_POINTS_HOLD',
     category: 'FINISH_POSITION',
     difficulty: 'EASY',
-    template: 'Will {driver1} still be in the points (top 10) after {windowSize} laps?',
+    template: 'Points on the line — will {driver1} stay inside the top 10 after the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'lateRacePhase', params: {} },
@@ -263,7 +289,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'FIN_PODIUM_HOLD',
     category: 'FINISH_POSITION',
     difficulty: 'MEDIUM',
-    template: 'Will {driver1} hang onto P{position} for the next 2 laps?',
+    template: 'P{position} under pressure — can {driver1} defend their spot for the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'lateRacePhase', params: {} },
@@ -277,12 +303,26 @@ export const QUESTION_BANK: Question[] = [
     id: 'FIN_PODIUM_STABLE',
     category: 'FINISH_POSITION',
     difficulty: 'MEDIUM',
-    template: 'Podium looks settled — will {driver1} still be on the podium in 2 laps?',
+    template: 'The podium looks set — will {driver1} still be there in 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'lateRacePhase', params: {} },
       { type: 'podiumStabilityTrend', params: {} },
       { type: 'positionRange', params: { min: 1, max: 3 } },
+    ],
+    successCondition: { type: 'maintainPosition', params: {} },
+    priority: 4,
+    cooldownLaps: 2,
+  },
+  {
+    id: 'FIN_LEAD_DEFEND',
+    category: 'FINISH_POSITION',
+    difficulty: 'HARD',
+    template: 'Late-race nerves — can {driver1} hold the lead for the next 2 laps?',
+    windowSize: 2,
+    triggers: [
+      { type: 'lateRacePhase', params: {} },
+      { type: 'positionRange', params: { min: 1, max: 1 } },
     ],
     successCondition: { type: 'maintainPosition', params: {} },
     priority: 4,
@@ -307,10 +347,10 @@ export function getCategories(): QuestionCategory[] {
 }
 
 export const CATEGORY_NAMES: Record<QuestionCategory, string> = {
-  OVERTAKE: 'Overtake',
-  PIT_WINDOW: 'Pit Window',
-  GAP_CLOSING: 'Gap Closing',
-  FINISH_POSITION: 'Finish Position',
+  OVERTAKE: 'Make the Move',
+  PIT_WINDOW: 'Strategy Call',
+  GAP_CLOSING: 'The Chase',
+  FINISH_POSITION: 'Final Stretch',
 };
 
 export const DIFFICULTY_INFO: Record<string, { name: string; color: string; points: number }> = {

@@ -1,12 +1,76 @@
 import type { RaceSnapshot, DriverState, Question, QuestionInstanceState, DerivedSignals, QuestionCategory } from '../types';
 import { QUESTION_BANK } from './questionBank';
-import { calculateDerivedSignals } from './derivedSignals';
+import { calculateDerivedSignals, type SignalOverrides } from './derivedSignals';
 import { randomUUID } from 'crypto';
+
+export const MIN_QUESTIONS_PER_RACE = 8;
+export const MAX_QUESTIONS_PER_RACE = 15;
+
+const LAPS_PER_QUESTION_CYCLE = 4;
+const SHORT_RACE_MAX_LAPS = 25;
+
+export type RelaxationTier = 'strict' | 'tier1' | 'tier2' | 'tier3' | 'urgency';
+
+export interface PacingState {
+  tier: RelaxationTier;
+  behindMin: boolean;
+  urgency: boolean;
+  postResolutionCooldown: 0 | 1 | 2;
+  questionsRemaining: number;
+  eligibleLapsRemaining: number;
+}
+
+/**
+ * Per-tier signal relaxation. Urgency reuses tier3 thresholds (cooldown only differs).
+ */
+export const TIER_SIGNAL_OVERRIDES: Record<RelaxationTier, SignalOverrides> = {
+  strict: {
+    closingTrendThreshold: 0.1,
+    closeBattleThreshold: 4.0,
+    lateRacePhasePercent: 0.6,
+    overtakeOpportunityMaxGap: 1.5,
+  },
+  tier1: {
+    closingTrendThreshold: 0.05,
+    closeBattleThreshold: 4.0,
+    lateRacePhasePercent: 0.6,
+    overtakeOpportunityMaxGap: 2.0,
+  },
+  tier2: {
+    closingTrendThreshold: 0.05,
+    closeBattleThreshold: 5.0,
+    lateRacePhasePercent: 0.5,
+    overtakeOpportunityMaxGap: 2.5,
+  },
+  tier3: {
+    closingTrendThreshold: 0.05,
+    closeBattleThreshold: 5.0,
+    lateRacePhasePercent: 0.4,
+    overtakeOpportunityMaxGap: 3.0,
+  },
+  urgency: {
+    closingTrendThreshold: 0.05,
+    closeBattleThreshold: 5.0,
+    lateRacePhasePercent: 0.4,
+    overtakeOpportunityMaxGap: 3.0,
+  },
+};
+
+/** Extra relaxation for ~20-lap sprints still below the minimum question count. */
+const SPRINT_CATCHUP_OVERRIDES: SignalOverrides = {
+  closingTrendThreshold: 0.02,
+  closeBattleThreshold: 7.5,
+  lateRacePhasePercent: 0.2,
+  overtakeOpportunityMaxGap: 5.5,
+  pitWindowStintLength: 12,
+};
 
 export interface TriggerContext {
   snapshot: RaceSnapshot;
   previousSnapshot: RaceSnapshot | null;
   signals: DerivedSignals;
+  tier: RelaxationTier;
+  shortRaceCatchup?: boolean;
 }
 
 export interface QuestionCandidate {
@@ -19,6 +83,11 @@ export interface QuestionCandidate {
 export interface EligibilityResult {
   eligible: boolean;
   reason?: string;
+}
+
+export interface QuestionSelectionResult {
+  instance: QuestionInstanceState | null;
+  tier: RelaxationTier | null;
 }
 
 type LobbyGuardState = {
@@ -52,6 +121,104 @@ function getDriverAhead(snapshot: RaceSnapshot, driver1: DriverState): DriverSta
   return snapshot.drivers.find((driver) => driver.position === driver1.position - 1) ?? null;
 }
 
+function getRaceProgress(snapshot: RaceSnapshot): number {
+  if (!snapshot.totalLaps || snapshot.totalLaps <= 0) {
+    return 0;
+  }
+
+  return snapshot.lapNumber / snapshot.totalLaps;
+}
+
+function isShortRace(snapshot: RaceSnapshot): boolean {
+  return snapshot.totalLaps !== null && snapshot.totalLaps <= SHORT_RACE_MAX_LAPS;
+}
+
+function isTier1Active(snapshot: RaceSnapshot, questionCount: number, behindMin: boolean): boolean {
+  const progress = getRaceProgress(snapshot);
+  return (behindMin && progress >= 0.35)
+    || (isShortRace(snapshot) && snapshot.lapNumber >= 4 && questionCount === 0);
+}
+
+function isTier2Active(snapshot: RaceSnapshot, questionCount: number): boolean {
+  return questionCount < 6 && getRaceProgress(snapshot) >= 0.5;
+}
+
+function isTier3Active(snapshot: RaceSnapshot, questionCount: number): boolean {
+  return questionCount < 7 && getRaceProgress(snapshot) >= 0.65;
+}
+
+function isShortRaceBehindMin(snapshot: RaceSnapshot, questionCount: number): boolean {
+  return isShortRace(snapshot)
+    && snapshot.lapNumber >= 4
+    && questionCount < MIN_QUESTIONS_PER_RACE;
+}
+
+export function getPacingState(
+  snapshot: RaceSnapshot,
+  questionCount: number,
+  _lobbyId?: string
+): PacingState {
+  const totalLaps = snapshot.totalLaps;
+  const raceProgress = getRaceProgress(snapshot);
+  const expectedCount = totalLaps ? Math.floor(MIN_QUESTIONS_PER_RACE * raceProgress) : 0;
+  const behindMin = totalLaps ? questionCount < expectedCount : false;
+  const questionsRemaining = Math.max(0, MIN_QUESTIONS_PER_RACE - questionCount);
+  const eligibleLapsRemaining = totalLaps
+    ? Math.max(0, totalLaps - snapshot.lapNumber - 1)
+    : 0;
+  const cycleLaps = isShortRace(snapshot) ? 3 : LAPS_PER_QUESTION_CYCLE;
+  const estimatedSlotsRemaining = Math.floor(eligibleLapsRemaining / cycleLaps);
+  const urgency = questionCount < MIN_QUESTIONS_PER_RACE
+    && (questionsRemaining > estimatedSlotsRemaining || isShortRaceBehindMin(snapshot, questionCount));
+
+  let tier: RelaxationTier = 'strict';
+  if (urgency) {
+    tier = 'urgency';
+  } else if (isTier3Active(snapshot, questionCount)) {
+    tier = 'tier3';
+  } else if (isTier2Active(snapshot, questionCount)) {
+    tier = 'tier2';
+  } else if (isTier1Active(snapshot, questionCount, behindMin)) {
+    tier = 'tier1';
+  }
+
+  const needsShortRaceCatchUp = isShortRaceBehindMin(snapshot, questionCount);
+
+  return {
+    tier,
+    behindMin,
+    urgency,
+    postResolutionCooldown: needsShortRaceCatchUp ? 0 : urgency ? 1 : 2,
+    questionsRemaining,
+    eligibleLapsRemaining,
+  };
+}
+
+export function getTiersToTry(snapshot: RaceSnapshot, questionCount: number): RelaxationTier[] {
+  if (questionCount >= MIN_QUESTIONS_PER_RACE) {
+    return ['strict'];
+  }
+
+  if (isShortRace(snapshot) && snapshot.lapNumber >= 4 && questionCount < MIN_QUESTIONS_PER_RACE) {
+    return ['strict', 'tier1', 'tier2', 'tier3'];
+  }
+
+  const pacing = getPacingState(snapshot, questionCount);
+  const tiers: RelaxationTier[] = ['strict'];
+
+  if (isTier1Active(snapshot, questionCount, pacing.behindMin)) {
+    tiers.push('tier1');
+  }
+  if (isTier2Active(snapshot, questionCount)) {
+    tiers.push('tier2');
+  }
+  if (isTier3Active(snapshot, questionCount)) {
+    tiers.push('tier3');
+  }
+
+  return tiers;
+}
+
 export function updateRestartCooldown(lobbyId: string, snapshot: RaceSnapshot, previousSnapshot: RaceSnapshot | null): void {
   const state = getLobbyGuardState(lobbyId);
   if (!previousSnapshot) {
@@ -74,7 +241,8 @@ export function checkGlobalEligibility(
   activeQuestion: QuestionInstanceState | null,
   questionCount: number,
   lobbyId: string,
-  maxQuestions = 10
+  maxQuestions = MAX_QUESTIONS_PER_RACE,
+  postResolutionCooldown: 0 | 1 | 2 = 2
 ): EligibilityResult {
   const state = getLobbyGuardState(lobbyId);
 
@@ -102,7 +270,7 @@ export function checkGlobalEligibility(
     return { eligible: false, reason: 'Restart cooldown active' };
   }
 
-  if (state.lastResolvedLap !== null && snapshot.lapNumber - state.lastResolvedLap < 2) {
+  if (state.lastResolvedLap !== null && snapshot.lapNumber - state.lastResolvedLap < postResolutionCooldown) {
     return { eligible: false, reason: 'Post-resolution cooldown active' };
   }
 
@@ -113,13 +281,36 @@ export function checkGlobalEligibility(
   return { eligible: true };
 }
 
+function relaxTriggersForTier(question: Question, tier: RelaxationTier): Question['triggers'] {
+  if ((tier !== 'tier2' && tier !== 'tier3' && tier !== 'urgency') || question.category !== 'FINISH_POSITION') {
+    return question.triggers;
+  }
+
+  return question.triggers.map((trigger) => {
+    if (trigger.type !== 'positionRange') {
+      return trigger;
+    }
+
+    const min = Number(trigger.params.min ?? 1);
+    const max = Number(trigger.params.max ?? 20);
+    if (min >= 4 && max <= 12) {
+      return {
+        ...trigger,
+        params: { ...trigger.params, min: 6, max: 15 },
+      };
+    }
+
+    return trigger;
+  });
+}
+
 export function evaluateTrigger(
   trigger: { type: string; params: Record<string, unknown> },
   context: TriggerContext,
   driver1: DriverState,
   driver2: DriverState | null
 ): boolean {
-  const { snapshot, signals } = context;
+  const { signals } = context;
 
   switch (trigger.type) {
     case 'overtakeOpportunity':
@@ -146,8 +337,11 @@ export function evaluateTrigger(
     case 'podiumStabilityTrend':
       return signals.podiumStabilityTrend && driver1.position >= 1 && driver1.position <= 3;
 
-    case 'drsEnabled':
-      return driver1.drsEnabled === true;
+    case 'overtakeModeArmed':
+      return signals.overtakeModeArmed.get(driver1.driverNumber) ?? false;
+
+    case 'undercutPressure':
+      return signals.undercutPressure.get(driver1.driverNumber) ?? false;
 
     case 'positionRange': {
       const min = Number(trigger.params.min ?? 1);
@@ -160,13 +354,19 @@ export function evaluateTrigger(
       if (gap === null) return false;
 
       const minGap = Number(trigger.params.minGap ?? 0);
-      const maxGap = Number(trigger.params.maxGap ?? Number.POSITIVE_INFINITY);
+      let maxGap = Number(trigger.params.maxGap ?? Number.POSITIVE_INFINITY);
+      if (context.shortRaceCatchup) {
+        maxGap = Math.max(maxGap, 6.0);
+      }
       return gap >= minGap && gap <= maxGap;
     }
 
     case 'positionClose': {
       if (!driver2) return false;
-      const maxGap = Number(trigger.params.maxGap ?? 5.0);
+      let maxGap = Number(trigger.params.maxGap ?? 5.0);
+      if (context.shortRaceCatchup) {
+        maxGap = Math.max(maxGap, 8.0);
+      }
       const gap = Math.abs((driver1.gap ?? 0) - (driver2.gap ?? 0));
       return gap <= maxGap;
     }
@@ -176,14 +376,47 @@ export function evaluateTrigger(
   }
 }
 
-export function evaluateAllTriggers(question: Question, context: TriggerContext): QuestionCandidate[] {
+export function isPlausibleCandidate(candidate: QuestionCandidate, tier: RelaxationTier): boolean {
+  const { question, driver1, driver2 } = candidate;
+
+  if (driver1.retired || driver1.inPit) {
+    return false;
+  }
+
+  if (question.category === 'OVERTAKE' && (driver1.interval ?? Infinity) > 5.0) {
+    return false;
+  }
+
+  if (question.category === 'GAP_CLOSING' && (driver1.interval ?? Infinity) > 6.0) {
+    return false;
+  }
+
+  if (
+    question.category === 'FINISH_POSITION'
+    && question.successCondition.type === 'maintainPosition'
+    && driver1.position === 1
+    && (driver2?.interval ?? Infinity) > 10
+  ) {
+    return false;
+  }
+
+  void tier;
+  return true;
+}
+
+export function evaluateAllTriggers(
+  question: Question,
+  context: TriggerContext,
+  tier: RelaxationTier = context.tier
+): QuestionCandidate[] {
   const candidates: QuestionCandidate[] = [];
   const { snapshot } = context;
   const drivers = snapshot.drivers.filter((driver) => !driver.retired && !driver.inPit);
+  const triggers = relaxTriggersForTier(question, tier);
 
   for (const driver1 of drivers) {
     const driver2 = getDriverAhead(snapshot, driver1);
-    const allTriggersPass = question.triggers.every((trigger) => evaluateTrigger(trigger, context, driver1, driver2));
+    const allTriggersPass = triggers.every((trigger) => evaluateTrigger(trigger, context, driver1, driver2));
 
     if (!allTriggersPass) {
       continue;
@@ -237,50 +470,85 @@ export function applyPriorityHierarchy(candidates: QuestionCandidate[]): Questio
   });
 }
 
-function pickQuestionCandidate(candidates: QuestionCandidate[]): QuestionCandidate {
-  const sorted = applyPriorityHierarchy(candidates);
-  const bestPriority = sorted[0].question.priority;
-  const tier = sorted.filter((candidate) => candidate.question.priority === bestPriority);
-  const topScore = tier[0].score;
-  const contenders = tier.filter((candidate) => candidate.score >= topScore - 15);
+function pickQuestionCandidate(candidates: QuestionCandidate[], tier: RelaxationTier): QuestionCandidate {
+  const useRelaxedPriority = tier === 'tier2' || tier === 'tier3' || tier === 'urgency';
+  const sorted = useRelaxedPriority
+    ? [...candidates].sort((a, b) => b.score - a.score)
+    : applyPriorityHierarchy(candidates);
+
+  const topScore = sorted[0].score;
+  let contenders = sorted.filter((candidate) => candidate.score >= topScore - 15);
+
+  if (useRelaxedPriority) {
+    const lowerPriority = contenders.filter((candidate) => candidate.question.priority >= 3);
+    if (lowerPriority.length > 0) {
+      contenders = lowerPriority;
+    }
+  } else {
+    const bestPriority = sorted[0].question.priority;
+    contenders = contenders.filter((candidate) => candidate.question.priority === bestPriority);
+  }
+
+  if (useRelaxedPriority) {
+    const shortWindow = contenders.filter((candidate) => candidate.question.windowSize === 2);
+    if (shortWindow.length > 0) {
+      contenders = shortWindow;
+    }
+  }
 
   return contenders[Math.floor(Math.random() * contenders.length)];
 }
 
-export function selectQuestion(
+function resolveTierOverrides(
   snapshot: RaceSnapshot,
-  previousSnapshot: RaceSnapshot | null,
-  lobbyId: string,
-  activeQuestion: QuestionInstanceState | null,
-  questionCount: number
-): QuestionInstanceState | null {
-  updateRestartCooldown(lobbyId, snapshot, previousSnapshot);
-
-  const eligibility = checkGlobalEligibility(snapshot, activeQuestion, questionCount, lobbyId);
-  if (!eligibility.eligible) {
-    return null;
+  questionCount: number,
+  tier: RelaxationTier
+): SignalOverrides {
+  const base = { ...TIER_SIGNAL_OVERRIDES[tier] };
+  if (isShortRace(snapshot) && questionCount < MIN_QUESTIONS_PER_RACE && tier !== 'strict') {
+    return { ...base, ...SPRINT_CATCHUP_OVERRIDES };
   }
 
-  const signals = calculateDerivedSignals(snapshot, previousSnapshot);
-  const context: TriggerContext = { snapshot, previousSnapshot, signals };
-  const state = getLobbyGuardState(lobbyId);
+  if (isShortRace(snapshot) && questionCount < 4 && tier === 'tier1') {
+    return { ...base, ...SPRINT_CATCHUP_OVERRIDES };
+  }
+
+  return base;
+}
+
+function gatherCandidates(
+  snapshot: RaceSnapshot,
+  previousSnapshot: RaceSnapshot | null,
+  lastCategory: QuestionCategory | null,
+  tier: RelaxationTier,
+  questionCount: number
+): QuestionCandidate[] {
+  const shortRaceCatchup = isShortRace(snapshot) && questionCount < MIN_QUESTIONS_PER_RACE && tier !== 'strict';
+  const signals = calculateDerivedSignals(
+    snapshot,
+    previousSnapshot,
+    resolveTierOverrides(snapshot, questionCount, tier)
+  );
+  const context: TriggerContext = { snapshot, previousSnapshot, signals, tier, shortRaceCatchup };
   let allCandidates: QuestionCandidate[] = [];
 
   for (const question of QUESTION_BANK) {
-    if (state.lastCategory === question.category) {
+    if (lastCategory === question.category) {
       continue;
     }
 
-    allCandidates = allCandidates.concat(evaluateAllTriggers(question, context));
+    allCandidates = allCandidates.concat(evaluateAllTriggers(question, context, tier));
   }
 
-  if (allCandidates.length === 0) {
-    return null;
-  }
+  return allCandidates.filter((candidate) => isPlausibleCandidate(candidate, tier));
+}
 
-  const selected = pickQuestionCandidate(allCandidates);
-
-    return {
+function buildQuestionInstance(
+  selected: QuestionCandidate,
+  snapshot: RaceSnapshot,
+  lobbyId: string
+): QuestionInstanceState {
+  return {
     id: randomUUID(),
     lobbyId,
     questionId: selected.question.id,
@@ -295,6 +563,58 @@ export function selectQuestion(
     driver1: selected.driver1,
     driver2: selected.driver2 ?? undefined,
   };
+}
+
+export function selectQuestionWithMeta(
+  snapshot: RaceSnapshot,
+  previousSnapshot: RaceSnapshot | null,
+  lobbyId: string,
+  activeQuestion: QuestionInstanceState | null,
+  questionCount: number
+): QuestionSelectionResult {
+  updateRestartCooldown(lobbyId, snapshot, previousSnapshot);
+
+  const pacingState = getPacingState(snapshot, questionCount, lobbyId);
+  const eligibility = checkGlobalEligibility(
+    snapshot,
+    activeQuestion,
+    questionCount,
+    lobbyId,
+    MAX_QUESTIONS_PER_RACE,
+    pacingState.postResolutionCooldown
+  );
+
+  if (!eligibility.eligible) {
+    return { instance: null, tier: null };
+  }
+
+  const state = getLobbyGuardState(lobbyId);
+  const tiersToTry = getTiersToTry(snapshot, questionCount);
+
+  for (const tier of tiersToTry) {
+    const candidates = gatherCandidates(snapshot, previousSnapshot, state.lastCategory, tier, questionCount);
+    if (candidates.length === 0) {
+      continue;
+    }
+
+    const selected = pickQuestionCandidate(candidates, tier);
+    return {
+      instance: buildQuestionInstance(selected, snapshot, lobbyId),
+      tier,
+    };
+  }
+
+  return { instance: null, tier: null };
+}
+
+export function selectQuestion(
+  snapshot: RaceSnapshot,
+  previousSnapshot: RaceSnapshot | null,
+  lobbyId: string,
+  activeQuestion: QuestionInstanceState | null,
+  questionCount: number
+): QuestionInstanceState | null {
+  return selectQuestionWithMeta(snapshot, previousSnapshot, lobbyId, activeQuestion, questionCount).instance;
 }
 
 export function formatQuestionText(question: Question, driver1: DriverState, driver2: DriverState | null): string {
@@ -312,12 +632,12 @@ export function clearCooldowns(lobbyId: string): void {
 
 export function getAllCandidates(snapshot: RaceSnapshot, previousSnapshot: RaceSnapshot | null): QuestionCandidate[] {
   const signals = calculateDerivedSignals(snapshot, previousSnapshot);
-  const context: TriggerContext = { snapshot, previousSnapshot, signals };
+  const context: TriggerContext = { snapshot, previousSnapshot, signals, tier: 'strict' };
   let candidates: QuestionCandidate[] = [];
 
   for (const question of QUESTION_BANK) {
     candidates = candidates.concat(evaluateAllTriggers(question, context));
   }
 
-  return applyPriorityHierarchy(candidates);
+  return applyPriorityHierarchy(candidates.filter((candidate) => isPlausibleCandidate(candidate, 'strict')));
 }

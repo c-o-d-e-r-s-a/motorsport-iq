@@ -33,6 +33,7 @@ import {
   touchUserActivityThrottled,
   flushUserActivity,
 } from './lobby/lobbyManager';
+import { buildLobbyShareUrl } from './lobby/shareUrl';
 import {
   startQuestionLifecycle,
   submitAnswer,
@@ -44,15 +45,18 @@ import {
   clearLobbyLifecycle,
 } from './lobby/lifecycleManager';
 import { LobbyLifecycleQueue } from './lobby/lifecycleQueue';
-import { generateQuestionText } from './ai/explanationGenerator';
 import { OpenF1Client } from './data/openf1Client';
 import {
   dedupeWeekendSessions,
   DEFAULT_SIMULATION_SESSION_KEY,
+  filterPlayableSessions,
   getActiveLiveCalendarSession,
   getCalendarSession,
   getCalendarSessions,
+  getPreRaceCalendarSession,
+  isSessionCancelled,
   mergeWithCalendar,
+  resolveSessionForReplay,
 } from './data/f1Calendar';
 import {
   ensureSeasonCalendar,
@@ -63,6 +67,7 @@ import {
 import { selectQuestion, clearCooldowns, formatQuestionText } from './engine/questionEngine';
 import { SessionRuntimeManager, toSessionInfo, normalizeReplaySpeed } from './runtime/sessionRuntimeManager';
 import { PresenceManager, type PresenceExpiryReason } from './lobby/presenceManager';
+import { LobbyCleanupScheduler } from './lobby/lobbyCleanup';
 import { buildQuestionEventPayload, isUnresolvedQuestionState } from './lobby/questionPayload';
 import {
   clearAdminSessionCookie,
@@ -144,6 +149,16 @@ const lapWorkConcurrency = parsePositiveNumberEnv(
 const maxActiveLobbies = parsePositiveNumberEnv(
   process.env.MAX_ACTIVE_LOBBIES,
   500
+);
+const DEFAULT_STALE_LOBBY_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_STALE_LOBBY_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const staleLobbyTimeoutMs = parsePositiveNumberEnv(
+  process.env.STALE_LOBBY_TIMEOUT_MS,
+  DEFAULT_STALE_LOBBY_TIMEOUT_MS
+);
+const staleLobbySweepIntervalMs = parsePositiveNumberEnv(
+  process.env.STALE_LOBBY_SWEEP_INTERVAL_MS,
+  DEFAULT_STALE_LOBBY_SWEEP_INTERVAL_MS
 );
 
 async function assertActiveLobbyCapacity(): Promise<void> {
@@ -320,6 +335,8 @@ app.get('/health/scaling', (_req, res) => {
     limits: {
       maxPlayersPerLobby: Number.parseInt(process.env.MAX_PLAYERS_PER_LOBBY ?? '', 10) || 75,
       maxActiveLobbies,
+      staleLobbyTimeoutMs,
+      staleLobbySweepIntervalMs,
       lapWorkConcurrency,
       presenceDbWriteMinIntervalMs,
     },
@@ -543,6 +560,35 @@ const presenceManager = new PresenceManager({
   },
 });
 
+async function handleStaleLobbyDeleted(lobbyId: string, lobbyCode: string): Promise<void> {
+  presenceManager.removeLobby(lobbyId);
+  clearCooldowns(lobbyId);
+  clearLobbyLifecycle(lobbyId);
+  runtimeManager.detachLobbyFromSession(lobbyId);
+  metrics.incrementCounter('lobby.stale_deleted_total');
+  console.log(`[LobbyCleanup] Removed stale lobby ${lobbyCode} (${lobbyId})`);
+}
+
+const lobbyCleanupScheduler = new LobbyCleanupScheduler({
+  staleThresholdMs: staleLobbyTimeoutMs,
+  sweepIntervalMs: staleLobbySweepIntervalMs,
+  hasActivePresence: (lobbyId) => presenceManager.hasActivePresence(lobbyId),
+  onDeleted: handleStaleLobbyDeleted,
+  onSweepComplete: (trigger, result) => {
+    metrics.incrementCounter('lobby.stale_sweep_total');
+    if (result.deleted.length > 0 || trigger === 'startup') {
+      console.log(
+        `[LobbyCleanup] ${trigger}: scanned=${result.scanned} deleted=${result.deleted.length}`
+        + ` skippedActive=${result.skippedActive}`
+        + (result.deleted.length > 0 ? ` codes=${result.deleted.join(',')}` : '')
+      );
+    }
+  },
+  onSweepError: (trigger, error) => {
+    console.error(`[LobbyCleanup] ${trigger} sweep failed:`, error);
+  },
+});
+
 async function markUserActive(userId: string): Promise<void> {
   presenceManager.markSeen(userId);
   if (FF_PRESENCE_WRITE_THROTTLE) {
@@ -653,37 +699,24 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
       suggestedStatKeys: [],
     });
 
-    // PERFORMANCE OPTIMIZATION: Fire AI generation in background
-    const aiStartTime = Date.now();
-    generateQuestionText(newQuestion).then(async (aiText) => {
-      const aiDuration = Date.now() - aiStartTime;
-      if (aiDuration > 1000) {
-        console.log(`[PERF] AI question generation took ${aiDuration}ms (slow)`);
+    // Stat hints only — question copy stays on the curated bank template.
+    generateSuggestedStatKeys({
+      questionText: fallbackText,
+      category: questionDef?.category ?? 'GAP_CLOSING',
+      snapshot,
+    }).then((suggestedStatKeys) => {
+      if (suggestedStatKeys.length === 0) {
+        return;
       }
 
-      // Only emit update if AI text is different from fallback
-      if (aiText !== fallbackText) {
-        newQuestion.questionText = aiText;
-
-        // Generate suggested stat keys based on AI text
-        const suggestedStatKeys = await generateSuggestedStatKeys({
-          questionText: aiText,
-          category: questionDef?.category ?? 'GAP_CLOSING',
-          snapshot,
-        });
-        newQuestion.suggestedStatKeys = suggestedStatKeys;
-
-        // Broadcast updated question text and stat hints
-        io.to(lobbyId).emit('question_text_update', {
-          instanceId: newQuestion.id,
-          questionText: aiText,
-          suggestedStatKeys,
-        });
-
-        console.log(`[PERF] Broadcast AI text update for question ${newQuestion.questionId} in lobby ${lobbyId}`);
-      }
+      newQuestion.suggestedStatKeys = suggestedStatKeys;
+      io.to(lobbyId).emit('question_text_update', {
+        instanceId: newQuestion.id,
+        questionText: fallbackText,
+        suggestedStatKeys,
+      });
     }).catch((error) => {
-      console.error('[PERF] Failed to generate AI question text:', error);
+      console.error('[PERF] Failed to generate suggested stat keys:', error);
     });
   }
 }
@@ -901,6 +934,7 @@ io.on('connection', (socket) => {
         code: lobby.code,
         status: lobby.status,
         id: lobby.id,
+        shareUrl: buildLobbyShareUrl(lobby.code, process.env.CORS_ORIGIN),
       });
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
@@ -979,6 +1013,26 @@ io.on('connection', (socket) => {
 
       if (!isLive && !isCompleted) {
         throw new Error('This session has not started yet');
+      }
+
+      if (isCompleted) {
+        const yearSessions = await sessionLookupClient.getSessions(session.year) ?? [];
+        session = resolveSessionForReplay(session, yearSessions);
+      }
+
+      if (isSessionCancelled(session)) {
+        throw new Error(
+          'This race was cancelled on the 2026 calendar and has no telemetry available for replay.'
+        );
+      }
+
+      if (isCompleted) {
+        const hasTelemetry = await sessionLookupClient.sessionHasTelemetry(session.session_key);
+        if (!hasTelemetry) {
+          throw new Error(
+            'No race telemetry is available for this session. Try another weekend or a different season.'
+          );
+        }
       }
 
       // Update lobby status
@@ -1196,6 +1250,15 @@ io.on('connection', (socket) => {
         return;
       }
 
+      const preRaceSession = getPreRaceCalendarSession();
+      const preRaceIsPlayable = preRaceSession
+        && ['Race', 'Sprint'].includes(preRaceSession.session_name);
+
+      if (preRaceIsPlayable && preRaceSession) {
+        socket.emit('sessions_list', [toSessionInfo(preRaceSession)]);
+        return;
+      }
+
       let openf1Sessions: Awaited<ReturnType<OpenF1Client['getSessions']>> = [];
       // Prefer cached schedule (includes emergency overrides). Fall back to OpenF1
       // /sessions listing — that endpoint stays available even when telemetry is live-locked.
@@ -1215,7 +1278,7 @@ io.on('connection', (socket) => {
 
       const merged = mergeWithCalendar(openf1Sessions ?? [], year);
 
-      const filtered = merged
+      const filtered = filterPlayableSessions(merged)
         .filter((session) => !/^practice\b/i.test(session.session_name))
         .filter((session) =>
           ['Race', 'Sprint'].includes(session.session_name)
@@ -1281,6 +1344,7 @@ io.on('connection', (socket) => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully...');
+  lobbyCleanupScheduler.stop();
   presenceManager.stop();
   stopSeasonCalendarRefresh();
   clearAllTimers();
@@ -1294,6 +1358,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully...');
+  lobbyCleanupScheduler.stop();
   presenceManager.stop();
   stopSeasonCalendarRefresh();
   clearAllTimers();
@@ -1311,7 +1376,9 @@ httpServer.listen(PORT, () => {
   console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
   console.log(`[SCALING] Redis adapter: ${redisRuntime ? 'enabled' : 'disabled'}`);
   console.log(`[SCALING] Lap concurrency: ${lapWorkConcurrency}`);
+  console.log(`[SCALING] Stale lobby cleanup: timeout=${staleLobbyTimeoutMs}ms sweep=${staleLobbySweepIntervalMs}ms`);
   console.log(`[SCALING] Feature flags: batchScoring=${FF_BATCH_SCORING}, presenceThrottle=${FF_PRESENCE_WRITE_THROTTLE}, deltaLobbyState=${FF_DELTA_LOBBY_STATE}`);
+  lobbyCleanupScheduler.start();
 });
 
 export { io, app, httpServer };

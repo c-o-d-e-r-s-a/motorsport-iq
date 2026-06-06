@@ -39,7 +39,7 @@
 
 ## Engine Guardrails
 - One active question per lobby.
-- Maximum `8-10` questions per race.
+- Minimum `8`, maximum `15` questions per race (same for Sprint and GP).
 - No new questions on laps `1-3`.
 - No triggers during `SC`, `VSC`, or `RED`.
 - Enforce a 1-lap cooldown after a restart.

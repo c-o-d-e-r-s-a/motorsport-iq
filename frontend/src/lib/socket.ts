@@ -3,6 +3,7 @@
 import { io, Socket } from 'socket.io-client';
 import { resolveBackendUrl } from './backendUrl';
 import type {
+  LobbyLookupResult,
   LobbyState,
   PresenceExpiryReason,
   QuestionEvent,
@@ -105,6 +106,10 @@ class SocketClient {
 
     this.socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
       this.emit(SERVER_EVENTS.LOBBY_STATE, state);
+    });
+
+    this.socket.on(SERVER_EVENTS.LOBBY_LOOKUP, (data: LobbyLookupResult) => {
+      this.emit(SERVER_EVENTS.LOBBY_LOOKUP, data);
     });
 
     this.socket.on(SERVER_EVENTS.QUESTION_EVENT, (event: QuestionEvent) => {

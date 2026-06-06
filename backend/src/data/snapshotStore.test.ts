@@ -373,6 +373,43 @@ describe('SnapshotStore race control updates', () => {
     store.bootstrapAfterStintPreload();
 
     expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('MEDIUM');
-    expect(store.getCurrentSnapshot()?.lapNumber).toBe(0);
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(1);
+  });
+
+  it('starts at lap 1 when live telemetry arrives before the first lap completes', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1002, { sessionMode: 'live', skipDriverPreload: true });
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+    jest.runOnlyPendingTimers();
+
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(1);
+  });
+
+  it('starts at lap 1 when SESSION STARTED race control is received', async () => {
+    const onSnapshotUpdate = jest.fn();
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client, { onSnapshotUpdate });
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processRaceControlUpdate([
+      createRaceControl({
+        date: '2025-09-01T13:00:00Z',
+        category: 'SessionStatus',
+        flag: 'GREEN',
+        scope: 'Track',
+        message: 'SESSION STARTED',
+      }),
+    ]);
+
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(1);
   });
 });

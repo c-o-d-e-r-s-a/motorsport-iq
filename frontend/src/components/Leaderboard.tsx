@@ -62,7 +62,7 @@ export default function Leaderboard({ entries, currentUserId, maxEntries = 10 }:
                   {rank}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-display text-base font-semibold uppercase leading-tight">
+                  <p className="truncate font-display text-base font-semibold uppercase leading-tight lg:truncate-none lg:whitespace-normal">
                     {entry.username}
                     {isCurrentUser && <span className="ml-1.5 text-[var(--color-accent)]">· you</span>}
                   </p>
@@ -71,7 +71,7 @@ export default function Leaderboard({ entries, currentUserId, maxEntries = 10 }:
                     {entry.streak > 1 ? ` · ${entry.streak} streak` : ''}
                   </p>
                 </div>
-                <div className="text-right">
+                <div className="shrink-0 text-right">
                   <span className="font-display text-xl font-bold leading-none">{entry.points}</span>
                   <span className="ml-1 text-[0.65rem] font-medium uppercase text-[var(--color-faint-fg)]">pts</span>
                 </div>

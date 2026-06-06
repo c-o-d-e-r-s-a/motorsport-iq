@@ -5,6 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Lobby, User, QuestionInstance } from '../db/types';
 import supabase from '../db/supabaseClient';
 import { trackDbQuery, trackDbWrite } from '../observability/dbMetrics';
+import { enrichLobbyState } from './shareUrl';
+import { MIN_QUESTIONS_PER_RACE, MAX_QUESTIONS_PER_RACE } from '../engine/questionEngine';
 import type {
   LobbyState,
   PlayerState,
@@ -146,6 +148,8 @@ export async function createLobby(username: string, sessionId?: string): Promise
     currentQuestion: null,
     latestResolution: null,
     questionCount: 0,
+    minQuestions: MIN_QUESTIONS_PER_RACE,
+    maxQuestions: MAX_QUESTIONS_PER_RACE,
     leaderboard: [],
   };
   lobbyStates.set(lobby.id, lobbyState);
@@ -282,7 +286,7 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
   // Check in-memory cache first
   const cached = lobbyStates.get(lobbyId);
   if (cached) {
-    return cached;
+    return enrichLobbyState(cached);
   }
 
   trackDbQuery('lobby_state.load');
@@ -330,6 +334,8 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
     currentQuestion: null, // Would need to fetch active question
     latestResolution: null,
     questionCount: lobby.question_count,
+    minQuestions: MIN_QUESTIONS_PER_RACE,
+    maxQuestions: MAX_QUESTIONS_PER_RACE,
     leaderboard: (leaderboard ?? []).map((lb) => ({
       userId: lb.user_id,
       username: users?.find((u) => u.id === lb.user_id)?.username ?? '',
@@ -346,7 +352,7 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
   // Cache it
   lobbyStates.set(lobbyId, lobbyState);
 
-  return lobbyState;
+  return enrichLobbyState(lobbyState);
 }
 
 /**
@@ -619,6 +625,37 @@ export function updateLeaderboardCache(
     if (b.accuracy !== a.accuracy) return b.accuracy - a.accuracy;
     return b.maxStreak - a.maxStreak;
   });
+}
+
+/**
+ * Delete a lobby from the database and clear local runtime/cache state.
+ */
+export async function destroyLobby(lobbyId: string): Promise<{ lobbyId: string; lobbyCode: string } | null> {
+  let lobbyCode = lobbyStates.get(lobbyId)?.code;
+
+  if (!lobbyCode) {
+    const { data: lobby } = await supabase
+      .from('lobbies')
+      .select('code')
+      .eq('id', lobbyId)
+      .single();
+    lobbyCode = lobby?.code ?? null;
+  }
+
+  trackDbWrite('lobbies.delete');
+  const { error } = await supabase.from('lobbies').delete().eq('id', lobbyId);
+  if (error) {
+    throw new Error(`Failed to delete lobby ${lobbyId}: ${error.message}`);
+  }
+
+  clearLobbyRuntimeMeta(lobbyId);
+  clearLobbyCache(lobbyId);
+
+  if (!lobbyCode) {
+    return null;
+  }
+
+  return { lobbyId, lobbyCode };
 }
 
 /**

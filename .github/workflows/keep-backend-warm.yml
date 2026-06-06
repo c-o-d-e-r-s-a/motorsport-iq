@@ -1,0 +1,23 @@
+# Pings the Render backend before the ~15 min idle spin-down window.
+# Uses /health/scaling (no DB) to minimize load.
+name: Keep backend warm
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping Render health endpoint
+        env:
+          BACKEND_KEEP_ALIVE_URL: ${{ vars.BACKEND_KEEP_ALIVE_URL }}
+        run: |
+          set -euo pipefail
+          backend="${BACKEND_KEEP_ALIVE_URL:-https://motorsport-iq-backend.onrender.com}"
+          url="${backend%/}/health/scaling"
+          echo "GET $url"
+          curl -fsS --max-time 90 "$url"

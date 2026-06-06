@@ -95,6 +95,30 @@ export class PresenceManager {
     return entry ? { ...entry } : null;
   }
 
+  hasActivePresence(lobbyId: string): boolean {
+    const now = Date.now();
+    for (const entry of this.entries.values()) {
+      if (entry.lobbyId !== lobbyId || entry.expiring) {
+        continue;
+      }
+
+      if (now - entry.lastSeenAt < this.inactivityTimeoutMs) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  removeLobby(lobbyId: string): void {
+    for (const userId of [...this.entries.keys()]) {
+      const entry = this.entries.get(userId);
+      if (entry?.lobbyId === lobbyId) {
+        this.removeUser(userId);
+      }
+    }
+  }
+
   stop(): void {
     clearInterval(this.interval);
     this.entries.clear();
