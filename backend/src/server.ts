@@ -66,6 +66,7 @@ import {
 } from './data/seasonCalendarStore';
 import { selectQuestion, clearCooldowns, formatQuestionText } from './engine/questionEngine';
 import { SessionRuntimeManager, toSessionInfo, normalizeReplaySpeed } from './runtime/sessionRuntimeManager';
+import { isSessionCompleted, isSessionLive } from './runtime/sessionRuntimeInfo';
 import { PresenceManager, type PresenceExpiryReason } from './lobby/presenceManager';
 import { LobbyCleanupScheduler } from './lobby/lobbyCleanup';
 import { buildQuestionEventPayload, isUnresolvedQuestionState } from './lobby/questionPayload';
@@ -1005,11 +1006,9 @@ io.on('connection', (socket) => {
       // OR an active live window. Calendar-backed sessions in the future are
       // gated until they go live; OpenF1-backed historical sessions are
       // replay-only and require completion.
-      const sessionStart = new Date(session.date_start).getTime();
-      const sessionEnd = new Date(session.date_end).getTime();
       const now = Date.now();
-      const isLive = sessionStart <= now && now < sessionEnd;
-      const isCompleted = sessionEnd < now;
+      const isLive = isSessionLive(session, now);
+      const isCompleted = isSessionCompleted(session, now);
 
       if (!isLive && !isCompleted) {
         throw new Error('This session has not started yet');

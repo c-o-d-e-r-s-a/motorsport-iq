@@ -414,14 +414,27 @@ describe('Home Status - Calendar Integration', () => {
       expect(statusBefore.phase).toBe('live');
       expect(statusBefore.isLive).toBe(true);
 
-      // 1 second after end
-      const afterEnd = new Date('2026-05-23T17:00:01Z').getTime();
+      // 1 second after scheduled end — still live during overtime window
+      const afterScheduledEnd = new Date('2026-05-23T17:00:01Z').getTime();
+      const statusDuringOvertime = deriveHomeOpenF1Status({
+        sessions: mockCanadianGPSessions,
+        isLoading: false,
+        hasError: false,
+        year: 2026,
+        now: afterScheduledEnd,
+      });
+
+      expect(statusDuringOvertime.phase).toBe('live');
+      expect(statusDuringOvertime.isLive).toBe(true);
+
+      // After sprint overtime and qualifying have both finished
+      const afterWeekendGap = new Date('2026-05-23T21:01:00Z').getTime();
       const statusAfter = deriveHomeOpenF1Status({
         sessions: mockCanadianGPSessions,
         isLoading: false,
         hasError: false,
         year: 2026,
-        now: afterEnd,
+        now: afterWeekendGap,
       });
 
       expect(statusAfter.phase).toBe('upcoming'); // Shows next session (Grand Prix)
@@ -445,20 +458,18 @@ describe('Home Status - Calendar Integration', () => {
       expect(status.isLive).toBe(true);
     });
 
-    it('handles exact end time', () => {
-      // Exactly at end time
-      const exactEnd = new Date('2026-05-23T17:00:00Z').getTime();
+    it('handles exact scheduled end time as still live during overtime', () => {
+      const exactScheduledEnd = new Date('2026-05-23T17:00:00Z').getTime();
       const status = deriveHomeOpenF1Status({
         sessions: mockCanadianGPSessions,
         isLoading: false,
         hasError: false,
         year: 2026,
-        now: exactEnd,
+        now: exactScheduledEnd,
       });
 
-      // start <= now < end (now is NOT less than end), so should NOT be live
-      expect(status.phase).not.toBe('live');
-      expect(status.isLive).toBe(false);
+      expect(status.phase).toBe('live');
+      expect(status.isLive).toBe(true);
     });
   });
 

@@ -1,6 +1,6 @@
 import type { OpenF1Session } from '../types';
 import { SCHEDULE_OVERRIDES } from './scheduleOverrides';
-import { isWithinPreRaceLobbyWindow } from '../runtime/sessionRuntimeInfo';
+import { isSessionLive, isWithinPreRaceLobbyWindow } from '../runtime/sessionRuntimeInfo';
 import {
   getActiveLivePlayableSession,
   getCachedSeasonSession,
@@ -97,11 +97,7 @@ function applyScheduleOverrides(sessions: OpenF1Session[]): OpenF1Session[] {
 }
 
 function pickPreferredWeekendSession(candidates: OpenF1Session[], now: number): OpenF1Session {
-  const liveCandidate = candidates.find((session) => {
-    const start = new Date(session.date_start).getTime();
-    const end = new Date(session.date_end).getTime();
-    return start <= now && now < end;
-  });
+  const liveCandidate = candidates.find((session) => isSessionLive(session, now));
 
   if (liveCandidate) {
     return liveCandidate;
@@ -158,9 +154,7 @@ export function getActiveLiveCalendarSession(now: number = Date.now()): OpenF1Se
       continue;
     }
 
-    const start = new Date(override.date_start).getTime();
-    const end = new Date(override.date_end).getTime();
-    if (start <= now && now < end) {
+    if (isSessionLive(override, now)) {
       return override;
     }
   }

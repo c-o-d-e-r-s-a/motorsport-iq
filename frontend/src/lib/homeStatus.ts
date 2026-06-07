@@ -1,4 +1,5 @@
 import type { SessionInfo } from './types';
+import { isSessionCompleted, isSessionLive, stampSessionFlags } from './sessionWindow';
 
 type HomeStatusKind = 'loading' | 'ready' | 'empty' | 'error';
 export type HomeStatusPhase = 'live' | 'upcoming' | 'finished' | 'unknown';
@@ -34,11 +35,7 @@ function selectRelevantSession(sessions: SessionInfo[], now: number): SessionInf
   if (visibleSessions.length === 0) return null;
 
   const liveCandidates = visibleSessions
-    .filter((session) => {
-      const start = new Date(session.date_start).getTime();
-      const end = new Date(session.date_end).getTime();
-      return start <= now && now < end;
-    })
+    .filter((session) => isSessionLive(session, now))
     .sort((a, b) => new Date(b.date_start).getTime() - new Date(a.date_start).getTime());
 
   if (liveCandidates.length > 0) {
@@ -56,7 +53,7 @@ function selectRelevantSession(sessions: SessionInfo[], now: number): SessionInf
   }
 
   const completedCandidates = visibleSessions
-    .filter((session) => new Date(session.date_end).getTime() <= now)
+    .filter((session) => isSessionCompleted(session, now))
     .sort((a, b) => new Date(b.date_end).getTime() - new Date(a.date_end).getTime());
 
   if (completedCandidates.length > 0) {
@@ -122,7 +119,8 @@ export function deriveHomeOpenF1Status(input: {
     };
   }
 
-  const selected = selectRelevantSession(sessions, now);
+  const normalizedSessions = stampSessionFlags(sessions, now);
+  const selected = selectRelevantSession(normalizedSessions, now);
   if (!selected) {
     const noDataYear = year ?? new Date(now).getFullYear();
     return {
@@ -140,14 +138,13 @@ export function deriveHomeOpenF1Status(input: {
   }
 
   const start = new Date(selected.date_start).getTime();
-  const end = new Date(selected.date_end).getTime();
   const seasonYear = selected.year ?? year ?? new Date(now).getFullYear();
 
   let phase: HomeStatusPhase;
   let trackStatusText: string;
   let progressText: string;
 
-  if (start <= now && now < end) {
+  if (selected.isLive) {
     phase = 'live';
     trackStatusText = 'Live';
     progressText = 'In Progress';
