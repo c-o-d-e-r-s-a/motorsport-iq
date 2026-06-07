@@ -1,5 +1,7 @@
 import { getScheduledLaps } from '../data/f1Calendar';
 import { F1SignalRClient } from '../data/f1SignalRClient';
+import { F1SignalRCoreClient } from '../data/f1SignalRCoreClient';
+import { hasOpenF1ApiKey } from '../data/openf1Client';
 import type { OpenF1Session, SessionMode } from '../types';
 import {
   applyReplayEvent,
@@ -27,33 +29,24 @@ export function normalizeReplaySpeed(value: unknown): ReplaySpeed {
   return DEFAULT_REPLAY_SPEED;
 }
 
+type LiveTimingClient = F1SignalRClient | F1SignalRCoreClient;
+
 class LiveSessionRuntime extends BaseRuntime {
-  private signalRClient: F1SignalRClient | null = null;
+  private liveTimingClient: LiveTimingClient | null = null;
+  private usingOpenF1Fallback = false;
   private raceFinished = false;
 
   constructor(session: OpenF1Session, callbacks: RuntimeCallbacks) {
     super(session, 'live', null, callbacks);
   }
 
-  async start(): Promise<void> {
-    if (this.started) return;
-    this.started = true;
-    this.raceFinished = false;
+  private setFeedStalled(stalled: boolean): void {
+    this.snapshotStore.handleFeedStall(stalled);
+    this.callbacks.onFeedStall(stalled, cloneLobbyIds(this.lobbyIds));
+  }
 
-    await this.snapshotStore.initialize(this.session.session_key, {
-      sessionMode: 'live',
-      replaySpeed: null,
-      skipDriverPreload: true,
-    });
-
-    const scheduledLaps = getScheduledLaps(this.session);
-    if (scheduledLaps) {
-      this.snapshotStore.setTotalLaps(scheduledLaps);
-    }
-
-    console.log(`[Live Runtime] Booting SignalR streaming pipeline for session: ${this.sessionId}`);
-
-    this.signalRClient = new F1SignalRClient({
+  private createLiveTimingCallbacks(): ConstructorParameters<typeof F1SignalRClient>[0] {
+    return {
       onPositionUpdate: (positions) => this.snapshotStore.processPositionUpdate(positions),
       onIntervalUpdate: (intervals) => this.snapshotStore.processIntervalUpdate(intervals),
       onLapCompletion: (lap) => this.snapshotStore.processLapCompletion(lap),
@@ -79,34 +72,120 @@ class LiveSessionRuntime extends BaseRuntime {
       },
       onPitUpdate: (pits) => this.snapshotStore.processPitUpdate(pits),
       onConnectionLoss: () => {
-        console.warn(`[Live Runtime] SignalR connection unstable for session ${this.sessionId}. Monitoring...`);
-        this.snapshotStore.handleFeedStall(true);
+        console.warn(`[Live Runtime] Live timing connection unstable for session ${this.sessionId}. Monitoring...`);
+        this.setFeedStalled(true);
       },
       onConnectionRestored: () => {
-        console.log(`[Live Runtime] SignalR connection restored for session ${this.sessionId}.`);
-        this.snapshotStore.handleFeedStall(false);
+        console.log(`[Live Runtime] Live timing connection restored for session ${this.sessionId}.`);
+        this.setFeedStalled(false);
       },
       onConnectionClosedPermanently: () => {
-        console.error(`[Live Runtime] SignalR closed permanently for session ${this.sessionId}. Feed marked stalled (no REST fallback during live window).`);
-        this.snapshotStore.handleFeedStall(true);
-        this.callbacks.onFeedStall(true, cloneLobbyIds(this.lobbyIds));
+        console.error(`[Live Runtime] Live timing closed permanently for session ${this.sessionId}.`);
+        void this.handleLiveTimingFailure('connection closed after reconnect attempts');
       },
+    };
+  }
+
+  private async startOpenF1Fallback(reason: string): Promise<boolean> {
+    if (this.usingOpenF1Fallback) {
+      return true;
+    }
+
+    if (!hasOpenF1ApiKey()) {
+      console.error(
+        `[Live Runtime] Cannot fall back to OpenF1 (${reason}). ` +
+        'Set OPENF1_API_KEY on the backend or F1_LIVE_TIMING_TOKEN for SignalR Core auth.'
+      );
+      this.setFeedStalled(true);
+      return false;
+    }
+
+    this.usingOpenF1Fallback = true;
+    console.warn(`[Live Runtime] Falling back to OpenF1 polling for session ${this.sessionId} (${reason}).`);
+
+    if (this.liveTimingClient) {
+      await this.liveTimingClient.stop();
+      this.liveTimingClient = null;
+    }
+
+    await this.snapshotStore.initialize(this.session.session_key, {
+      sessionMode: 'live',
+      replaySpeed: null,
+      skipDriverPreload: false,
     });
 
+    const scheduledLaps = getScheduledLaps(this.session);
+    if (scheduledLaps) {
+      this.snapshotStore.setTotalLaps(scheduledLaps);
+    }
+
+    this.client.setSession(this.session.session_key);
+    this.client.startPolling();
+    this.setFeedStalled(false);
+    return true;
+  }
+
+  private async handleLiveTimingFailure(reason: string): Promise<void> {
+    const recovered = await this.startOpenF1Fallback(reason);
+    if (!recovered) {
+      this.setFeedStalled(true);
+    }
+  }
+
+  async start(): Promise<void> {
+    if (this.started) return;
+    this.started = true;
+    this.raceFinished = false;
+    this.usingOpenF1Fallback = false;
+
+    await this.snapshotStore.initialize(this.session.session_key, {
+      sessionMode: 'live',
+      replaySpeed: null,
+      skipDriverPreload: true,
+    });
+
+    const scheduledLaps = getScheduledLaps(this.session);
+    if (scheduledLaps) {
+      this.snapshotStore.setTotalLaps(scheduledLaps);
+    }
+
+    const callbacks = this.createLiveTimingCallbacks();
+
+    // F1 migrated live timing from legacy /signalr (401 during races) to /signalrcore.
+    // The Core hub still streams over WebSocket and works without auth for race sessions.
+    console.log(`[Live Runtime] Booting SignalR Core WebSocket pipeline for session: ${this.sessionId}`);
+    this.liveTimingClient = new F1SignalRCoreClient(callbacks);
+
     try {
-      await this.signalRClient.start();
-      console.log('[Live Runtime] SignalR connection established.');
-    } catch (error: any) {
-      console.error(`[Live Runtime] SignalR handshake failed:`, error?.message ?? error);
-      this.snapshotStore.handleFeedStall(true);
-      this.callbacks.onFeedStall(true, cloneLobbyIds(this.lobbyIds));
+      await this.liveTimingClient.start();
+      console.log('[Live Runtime] SignalR Core connection established.');
+      this.setFeedStalled(false);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[Live Runtime] SignalR Core handshake failed:', message);
+
+      console.warn('[Live Runtime] Retrying with legacy /signalr WebSocket client...');
+      this.liveTimingClient = new F1SignalRClient(callbacks);
+      try {
+        await this.liveTimingClient.start();
+        console.log('[Live Runtime] Legacy SignalR connection established.');
+        this.setFeedStalled(false);
+      } catch (legacyError: unknown) {
+        const legacyMessage = legacyError instanceof Error ? legacyError.message : String(legacyError);
+        console.error('[Live Runtime] Legacy SignalR handshake failed:', legacyMessage);
+        await this.handleLiveTimingFailure(legacyMessage);
+      }
     }
   }
 
   stop(): void {
-    if (this.signalRClient) {
-      this.signalRClient.stop();
-      this.signalRClient = null;
+    if (this.liveTimingClient) {
+      void this.liveTimingClient.stop();
+      this.liveTimingClient = null;
+    }
+    if (this.usingOpenF1Fallback) {
+      this.client.stopPolling();
+      this.usingOpenF1Fallback = false;
     }
     this.started = false;
     console.log(`[Live Runtime] Tearing down session runtime: ${this.sessionId}`);

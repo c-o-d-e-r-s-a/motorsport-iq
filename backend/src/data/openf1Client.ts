@@ -12,7 +12,11 @@ import type {
 } from '../types';
 
 const OPENF1_BASE_URL = process.env.OPENF1_BASE_URL || 'https://api.openf1.org/v1';
-const OPENF1_API_KEY = process.env.OPENF1_API_KEY || ''; // Optional; only needed for historical access during live sessions
+const OPENF1_API_KEY = process.env.OPENF1_API_KEY || ''; // Required for live-session telemetry when F1 SignalR auth is unavailable
+
+export function hasOpenF1ApiKey(): boolean {
+  return OPENF1_API_KEY.trim().length > 0;
+}
 const POLLING_INTERVAL = 10000;
 const MAX_RETRIES = 4;
 const BASE_BACKOFF = 1000;

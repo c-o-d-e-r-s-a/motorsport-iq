@@ -35,7 +35,7 @@ export interface F1SignalRClientOptions {
 }
 
 // F1 live timing topics. Suffix ".z" means base64+raw-deflate compressed.
-const SUBSCRIBE_TOPICS = [
+export const F1_LIVE_TIMING_TOPICS = [
   'Heartbeat',
   'CarData.z',
   'Position.z',
@@ -174,6 +174,11 @@ export class F1SignalRClient {
 
   constructor(private options: F1SignalRClientOptions = {}) {}
 
+  /** Process a single live-timing topic payload (shared by legacy and SignalR Core clients). */
+  processFeedMessage(topic: string, payload: unknown): void {
+    this.dispatchTopic(topic, payload);
+  }
+
   async start(): Promise<void> {
     this.intentionallyClosed = false;
     await this.connect();
@@ -233,7 +238,7 @@ export class F1SignalRClient {
         const payload = {
           H: 'Streaming',
           M: 'Subscribe',
-          A: [SUBSCRIBE_TOPICS],
+          A: [F1_LIVE_TIMING_TOPICS],
           I: this.invocationId++,
         };
         this.ws?.send(JSON.stringify(payload));
