@@ -88,9 +88,16 @@ describe('F1 Calendar', () => {
       expect(session).toBeNull();
     });
 
-    it('returns null just after session ends', () => {
-      const afterSprintRace = new Date('2026-05-23T17:01:00Z').getTime();
-      const session = getActiveLiveCalendarSession(afterSprintRace);
+    it('stays live shortly after scheduled end (red-flag overtime window)', () => {
+      const afterScheduledEnd = new Date('2026-05-23T17:01:00Z').getTime();
+      const session = getActiveLiveCalendarSession(afterScheduledEnd);
+      expect(session).not.toBeNull();
+      expect(session?.session_name).toBe('Sprint');
+    });
+
+    it('returns null after the live overtime window expires', () => {
+      const afterOvertime = new Date('2026-05-23T20:01:00Z').getTime();
+      const session = getActiveLiveCalendarSession(afterOvertime);
       expect(session).toBeNull();
     });
   });
@@ -454,6 +461,18 @@ describe('F1 Calendar', () => {
       const end = new Date(sprintQualifying!.date_end).getTime();
 
       expect(end < afterEnd).toBe(true);
+    });
+
+    it('keeps Monaco GP live past scheduled end during red-flag delays', () => {
+      const monacoRace = getCalendarSession(11299);
+      expect(monacoRace).not.toBeNull();
+
+      const duringRedFlagDelay = new Date('2026-06-07T15:30:00Z').getTime();
+      const info = toSessionInfo(monacoRace!, duringRedFlagDelay);
+
+      expect(info.isLive).toBe(true);
+      expect(info.isCompleted).toBe(false);
+      expect(info.mode).toBe('live');
     });
   });
 });

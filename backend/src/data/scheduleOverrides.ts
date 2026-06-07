@@ -12,7 +12,7 @@ export const SCHEDULE_OVERRIDES: OpenF1Session[] = [
     session_type: 'Race',
     session_name: 'Race',
     date_start: '2026-06-07T13:00:00+00:00',
-    date_end: '2026-06-07T15:00:00+00:00',
+    date_end: '2026-06-07T17:00:00+00:00',
     country_key: 95,
     country_code: 'MCO',
     country_name: 'Monaco',

@@ -1,6 +1,6 @@
 import type { OpenF1Session } from '../types';
 
-import { PRE_RACE_LOBBY_WINDOW_MS } from '../runtime/sessionRuntimeInfo';
+import { isSessionLive, PRE_RACE_LOBBY_WINDOW_MS } from '../runtime/sessionRuntimeInfo';
 
 const PLAYABLE_LIVE_SESSION_NAMES = new Set(['Race', 'Sprint']);
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -20,9 +20,7 @@ function isPlayableLiveSession(session: OpenF1Session, now: number): boolean {
     return false;
   }
 
-  const start = new Date(session.date_start).getTime();
-  const end = new Date(session.date_end).getTime();
-  return start <= now && now < end;
+  return isSessionLive(session, now);
 }
 
 export function seedSeasonCalendar(year: number, sessions: OpenF1Session[]): void {

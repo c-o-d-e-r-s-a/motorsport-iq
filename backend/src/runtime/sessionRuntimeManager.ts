@@ -16,7 +16,7 @@ import {
   type SessionRuntime,
 } from './sessionRuntimeBase';
 import { SimulatedLiveSessionRuntime } from './simulatedLiveSessionRuntime';
-import { toSessionInfo } from './sessionRuntimeInfo';
+import { isSessionCompleted, toSessionInfo } from './sessionRuntimeInfo';
 
 export const SUPPORTED_REPLAY_SPEEDS = [1, 10] as const;
 export type ReplaySpeed = (typeof SUPPORTED_REPLAY_SPEEDS)[number];
@@ -310,8 +310,7 @@ export class SessionRuntimeManager {
   }
 
   getSessionMode(session: OpenF1Session): SessionMode {
-    const endDate = new Date(session.date_end).getTime();
-    return endDate < Date.now() ? 'replay' : 'live';
+    return isSessionCompleted(session) ? 'replay' : 'live';
   }
 
   private getRuntimeKey(
