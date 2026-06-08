@@ -1,10 +1,13 @@
 # Pings the Render backend before the ~15 min idle spin-down window.
 # Uses /health/scaling (no DB) to minimize load.
+#
+# Schedule at odd offsets (not :00/:10/:30) — GitHub delays peak-minute cron heavily.
+# Observed gaps with */10 were 65–300+ min; Render spins down after ~15 min idle.
 name: Keep backend warm
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
   workflow_dispatch:
 
 jobs:
