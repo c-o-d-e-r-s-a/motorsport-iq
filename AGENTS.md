@@ -35,7 +35,7 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 - **URL**: `https://motorsport-iq-backend.onrender.com`
 - **Service ID**: `srv-d70utgnkijhs73c7q1a0`
 - **Plan**: Free tier (hibernates after ~15 min inactivity — cold start ~30-60s)
-- **Keep-alive**: GitHub Actions workflow `.github/workflows/keep-backend-warm.yml` pings `GET /health/scaling` every 10 minutes; the frontend also pings while a production tab is open (`BackendKeepAlive` in root layout). Override backend URL via repo variable `BACKEND_KEEP_ALIVE_URL` if needed.
+- **Keep-alive**: GitHub Actions workflow `.github/workflows/keep-backend-warm.yml` pings `GET /health/scaling` every 5 minutes (off-peak cron offsets — avoid `*/10` at :00/:30, GitHub delays those heavily). The frontend also pings every 5 min while a production tab is open (`BackendKeepAlive` in root layout). Override backend URL via repo variable `BACKEND_KEEP_ALIVE_URL` if needed.
 - **Auto-deploys**: on push to `main` (build: `cd backend && npm install --include=dev && npm run build`, start: `cd backend && node dist/server.js`)
 - **Region**: Oregon
 - **Dashboard**: `https://dashboard.render.com/web/srv-d70utgnkijhs73c7q1a0`

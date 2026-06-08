@@ -3,8 +3,18 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { SERVER_EVENTS, type LobbyState } from '@/lib/types';
+import { getApiUrl } from '@/lib/api';
 import { getSocketClient } from '@/lib/socket';
 import { Button, Brand, Input } from '@/components/ui';
+
+/** Wake Render via HTTP before the Socket.io handshake (cold start can take 30–60s). */
+async function wakeBackend(): Promise<void> {
+  try {
+    await fetch(getApiUrl('/health/scaling'), { method: 'GET', cache: 'no-store' });
+  } catch {
+    // Backend may still be spinning up — socket retries will continue.
+  }
+}
 
 const STEPS = [
   ['Create or join', 'Start a private lobby or hop in with a 6-character code.'],
@@ -29,11 +39,14 @@ export default function Home() {
 
   useEffect(() => {
     const socket = getSocketClient();
-    socket.connect();
+    let warmUpTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const warmUpTimer = setTimeout(() => {
-      if (!socket.isConnected()) setIsWarmingUp(true);
-    }, 4000);
+    void wakeBackend().finally(() => {
+      socket.connect();
+      warmUpTimer = setTimeout(() => {
+        if (!socket.isConnected()) setIsWarmingUp(true);
+      }, 4000);
+    });
 
     const unsubscribers = [
       socket.on('connected', () => {
@@ -74,6 +87,7 @@ export default function Home() {
     ];
 
     return () => {
+      if (warmUpTimer) clearTimeout(warmUpTimer);
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, [router, username]);

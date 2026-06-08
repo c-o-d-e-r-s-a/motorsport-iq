@@ -3,8 +3,8 @@
 import { useEffect } from 'react';
 import { getApiUrl } from '@/lib/api';
 
-/** Slightly under Render's ~15 min idle spin-down. */
-const PING_INTERVAL_MS = 10 * 60 * 1000;
+/** Under Render's ~15 min idle spin-down; 5 min leaves margin for GitHub cron jitter. */
+const PING_INTERVAL_MS = 5 * 60 * 1000;
 
 async function pingBackend(): Promise<void> {
   try {
