@@ -17,7 +17,11 @@ interface PresenceManagerOptions {
   onExpire: (entry: PresenceEntry, reason: PresenceExpiryReason) => Promise<void> | void;
 }
 
-const DEFAULT_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+// Mobile browsers aggressively throttle app timers and may suspend a tab's
+// application-level heartbeat while the user switches to the race broadcast.
+// Keep presence for a full race-window unless the user explicitly leaves the
+// lobby. Three hours covers F1's race time limit including stoppages.
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const DEFAULT_DISCONNECT_GRACE_MS = 2 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 30 * 1000;
 

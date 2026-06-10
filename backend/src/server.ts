@@ -121,6 +121,7 @@ function parseAllowedOrigins(value: string | undefined): string[] {
 
 const allowedOrigins = parseAllowedOrigins(process.env.CORS_ORIGIN);
 const DEFAULT_PRESENCE_DISCONNECT_GRACE_MS = 2 * 60 * 1000;
+const DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 
 function parsePositiveNumberEnv(value: string | undefined, fallback: number): number {
   if (!value) {
@@ -138,6 +139,10 @@ function parsePositiveNumberEnv(value: string | undefined, fallback: number): nu
 const presenceDisconnectGraceMs = parsePositiveNumberEnv(
   process.env.PRESENCE_DISCONNECT_GRACE_MS,
   DEFAULT_PRESENCE_DISCONNECT_GRACE_MS
+);
+const presenceInactivityTimeoutMs = parsePositiveNumberEnv(
+  process.env.PRESENCE_INACTIVITY_TIMEOUT_MS,
+  DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_MS
 );
 const presenceDbWriteMinIntervalMs = parsePositiveNumberEnv(
   process.env.PRESENCE_DB_WRITE_MIN_INTERVAL_MS,
@@ -554,6 +559,7 @@ async function handleUserRemoval(
 }
 
 const presenceManager = new PresenceManager({
+  inactivityTimeoutMs: presenceInactivityTimeoutMs,
   disconnectGraceMs: presenceDisconnectGraceMs,
   sweepIntervalMs: 60 * 1000, // Changed from 30s to 60s to reduce CPU overhead
   onExpire: async (entry, reason) => {
