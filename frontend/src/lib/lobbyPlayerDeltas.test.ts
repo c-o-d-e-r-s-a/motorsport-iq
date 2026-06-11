@@ -18,6 +18,7 @@ const baseState: LobbyState = {
   replaySpeed: null,
   isReplayComplete: false,
   isSimulation: false,
+  isPublic: false,
   players: [
     { id: 'host-1', username: 'Host', isHost: true, connected: true },
     { id: 'guest-1', username: 'Guest', isHost: false, connected: true },
@@ -25,6 +26,8 @@ const baseState: LobbyState = {
   currentQuestion: null,
   latestResolution: null,
   questionCount: 0,
+  minQuestions: 8,
+  maxQuestions: 15,
   leaderboard: [],
 };
 

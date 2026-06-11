@@ -270,6 +270,7 @@ export interface LobbyState {
   replaySpeed: number | null;
   isReplayComplete: boolean;
   isSimulation: boolean;
+  isPublic: boolean;
   players: PlayerState[];
   currentQuestion: QuestionInstanceState | null;
   latestResolution: ResolutionEvent | null;
@@ -284,6 +285,7 @@ export interface PlayerState {
   username: string;
   isHost: boolean;
   connected: boolean;
+  joinedAtLap?: number;
 }
 
 export type PresenceExpiryReason = 'inactive' | 'disconnected_timeout';
@@ -298,6 +300,7 @@ export interface LeaderboardEntryState {
   wrongAnswers: number;
   questionsAnswered: number;
   accuracy: number;
+  joinedAtLap?: number;
 }
 
 // Derived signals (used for trigger evaluation)

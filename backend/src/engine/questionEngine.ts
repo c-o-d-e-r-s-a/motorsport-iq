@@ -27,31 +27,33 @@ export const TIER_SIGNAL_OVERRIDES: Record<RelaxationTier, SignalOverrides> = {
   strict: {
     closingTrendThreshold: 0.1,
     closeBattleThreshold: 4.0,
-    lateRacePhasePercent: 0.6,
+    // Mirrors the raised default — Final Stretch only in the last ~15% of the race.
+    lateRacePhasePercent: 0.85,
     overtakeOpportunityMaxGap: 1.5,
   },
   tier1: {
     closingTrendThreshold: 0.05,
     closeBattleThreshold: 4.0,
-    lateRacePhasePercent: 0.6,
+    // Allow Final Stretch a bit earlier when behind on question count.
+    lateRacePhasePercent: 0.75,
     overtakeOpportunityMaxGap: 2.0,
   },
   tier2: {
     closingTrendThreshold: 0.05,
     closeBattleThreshold: 5.0,
-    lateRacePhasePercent: 0.5,
+    lateRacePhasePercent: 0.65,
     overtakeOpportunityMaxGap: 2.5,
   },
   tier3: {
     closingTrendThreshold: 0.05,
     closeBattleThreshold: 5.0,
-    lateRacePhasePercent: 0.4,
+    lateRacePhasePercent: 0.55,
     overtakeOpportunityMaxGap: 3.0,
   },
   urgency: {
     closingTrendThreshold: 0.05,
     closeBattleThreshold: 5.0,
-    lateRacePhasePercent: 0.4,
+    lateRacePhasePercent: 0.55,
     overtakeOpportunityMaxGap: 3.0,
   },
 };
@@ -411,6 +413,17 @@ export function evaluateAllTriggers(
 ): QuestionCandidate[] {
   const candidates: QuestionCandidate[] = [];
   const { snapshot } = context;
+
+  // Don't trigger a question if there aren't enough laps remaining for it to
+  // resolve before the race ends. Prevents e.g. a 3-lap question from
+  // triggering on the penultimate lap and never being resolved.
+  if (
+    snapshot.totalLaps
+    && snapshot.lapNumber + question.windowSize > snapshot.totalLaps
+  ) {
+    return candidates;
+  }
+
   const drivers = snapshot.drivers.filter((driver) => !driver.retired && !driver.inPit);
   const triggers = relaxTriggersForTier(question, tier);
 

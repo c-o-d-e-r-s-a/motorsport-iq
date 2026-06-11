@@ -35,7 +35,7 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 - **URL**: `https://motorsport-iq-backend.onrender.com`
 - **Service ID**: `srv-d70utgnkijhs73c7q1a0`
 - **Plan**: Free tier (hibernates after ~15 min inactivity — cold start ~30-60s)
-- **Keep-alive**: GitHub Actions workflow `.github/workflows/keep-backend-warm.yml` pings `GET /health/scaling` every 5 minutes (off-peak cron offsets — avoid `*/10` at :00/:30, GitHub delays those heavily). The frontend also pings every 5 min while a production tab is open (`BackendKeepAlive` in root layout). Override backend URL via repo variable `BACKEND_KEEP_ALIVE_URL` if needed.
+- **Keep-alive**: [cron-job.org](https://cron-job.org) pings `GET /health/scaling` on a fixed interval (before Render’s ~15 min idle spin-down). The frontend also pings every 5 min while a production tab is open (`BackendKeepAlive` in root layout).
 - **Auto-deploys**: on push to `main` (build: `cd backend && npm install --include=dev && npm run build`, start: `cd backend && node dist/server.js`)
 - **Region**: Oregon
 - **Dashboard**: `https://dashboard.render.com/web/srv-d70utgnkijhs73c7q1a0`
@@ -53,7 +53,8 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 |---|---|
 | `SUPABASE_URL` | `https://rwwdnhclabuqvoxqzrcy.supabase.co` |
 | `SUPABASE_SERVICE_KEY` | Service role key — ref must match `vox` project |
-| `GROQ_API_KEY` | Groq API key |
+| `GROQ_API_KEY` | Groq API key — used for question explanations and stat hints |
+| `GROQ_MODERATION_KEY` | Optional dedicated Groq key for username AI moderation. Falls back to `GROQ_API_KEY` if unset. Recommended to isolate moderation quota from gameplay calls. |
 | `GROQ_MODEL` | `llama-3.3-70b-versatile` |
 | `OPENF1_BASE_URL` | `https://api.openf1.org/v1` — replay telemetry and session listing (not used for live data) |
 | `PORT` | `4000` |
@@ -61,6 +62,10 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 | `ADMIN_SESSION_SECRET` | 32-char random secret |
 | `ADMIN_INITIAL_PASSWORD_HASH` | bcrypt hash |
 | `PRESENCE_DISCONNECT_GRACE_MS` | Default: 2 min |
+| `PRESENCE_INACTIVITY_TIMEOUT_ACTIVE_MS` | Default: 20 min — removes inactive players during a race (slot freed, can rejoin) |
+| `PRESENCE_INACTIVITY_TIMEOUT_WAITING_MS` | Default: 10 min — removes inactive players in waiting rooms |
+
+Run `backend/schema/migration_leaderboard_archives.sql` in Supabase so inactive kicks can restore scores on rejoin. Archives are keyed by player id (stored on device), not display name — duplicate names in one lobby cannot steal each other's scores.
 
 ### Environment Variables — Frontend (Vercel + `frontend/.env.local`)
 | Variable | Notes |

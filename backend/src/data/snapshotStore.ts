@@ -66,6 +66,10 @@ export class SnapshotStore {
   private client: OpenF1Client;
   private hudSnapshotTimer: NodeJS.Timeout | null = null;
   private lastHudSnapshotAt = 0;
+  /** Drivers confirmed as retired (position went to 0 after being in the race). */
+  private retiredDrivers = new Set<number>();
+  /** Drivers that have had at least one valid position (> 0) reported during this session. */
+  private driverHadValidPosition = new Set<number>();
 
   constructor(client: OpenF1Client, options: SnapshotStoreOptions = {}) {
     this.client = client;
@@ -89,6 +93,8 @@ export class SnapshotStore {
     this.previousGaps.clear();
     this.trackStatus = 'GREEN';
     this.isReplayComplete = false;
+    this.retiredDrivers.clear();
+    this.driverHadValidPosition.clear();
     this.sessionMode = config?.sessionMode ?? 'live';
     this.openF1LapNumbering = config?.openF1LapNumbering ?? false;
     this.replaySpeed = config?.replaySpeed ?? null;
@@ -295,6 +301,20 @@ export class SnapshotStore {
       if (hasNewerTimestamp(pos.date, driverData.latestPosition?.date)) {
         driverData.latestPosition = pos;
       }
+
+      if (pos.position > 0) {
+        this.driverHadValidPosition.add(pos.driver_number);
+      } else if (
+        pos.position === 0
+        && this.lapNumber > 3
+        && this.driverHadValidPosition.has(pos.driver_number)
+      ) {
+        // Driver had a valid race position, now shows 0 — they have retired.
+        if (!this.retiredDrivers.has(pos.driver_number)) {
+          console.log(`[SnapshotStore] Driver #${pos.driver_number} marked as retired (position → 0 at lap ${this.lapNumber})`);
+          this.retiredDrivers.add(pos.driver_number);
+        }
+      }
     }
     this.ensureActiveRaceLapFloor();
     this.scheduleHudSnapshotUpdate();
@@ -449,7 +469,7 @@ export class SnapshotStore {
         pitCount: data.pits.length,
         lastLapTime: data.latestLap?.lap_duration ?? null,
         inPit: false,
-        retired: false,
+        retired: this.retiredDrivers.has(driverNumber),
       });
 
       if (

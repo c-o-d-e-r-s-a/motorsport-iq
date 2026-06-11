@@ -25,6 +25,7 @@ export interface PlayerState {
   username: string;
   isHost: boolean;
   connected: boolean;
+  joinedAtLap?: number;
 }
 
 export interface LeaderboardEntry {
@@ -37,6 +38,7 @@ export interface LeaderboardEntry {
   wrongAnswers: number;
   questionsAnswered: number;
   accuracy: number;
+  joinedAtLap?: number;
 }
 
 export interface QuestionInstanceState {
@@ -115,6 +117,7 @@ export interface LobbyState {
   replaySpeed: number | null;
   isReplayComplete: boolean;
   isSimulation: boolean;
+  isPublic: boolean;
   players: PlayerState[];
   currentQuestion: QuestionInstanceState | null;
   latestResolution: ResolutionEvent | null;
@@ -243,6 +246,7 @@ export interface SessionInfo {
 // Socket event names
 export const SERVER_EVENTS = {
   LOBBY_STATE: 'lobby_state',
+  JOIN_RESULT: 'join_result',
   QUESTION_EVENT: 'question_event',
   QUESTION_STATE: 'question_state',
   QUESTION_LOCKED: 'question_locked',
@@ -267,6 +271,7 @@ export const SERVER_EVENTS = {
 export const CLIENT_EVENTS = {
   CREATE_LOBBY: 'create_lobby',
   JOIN_LOBBY: 'join_lobby',
+  JOIN_SOLO: 'join_solo',
   LOOKUP_LOBBY: 'lookup_lobby',
   START_SESSION: 'start_session',
   START_SIMULATION: 'start_simulation',

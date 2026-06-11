@@ -47,5 +47,11 @@ export function mergeStintRecords(existing: OpenF1Stint, incoming: OpenF1Stint):
   return {
     ...incoming,
     compound: incoming.compound ?? existing.compound,
+    // Preserve a valid lap_start from the existing record so that a subsequent
+    // stale/partial update with lap_start=null does not reset the tyre-age
+    // calculation and cause the displayed age to jump back to the raw lap count.
+    lap_start: incoming.lap_start ?? existing.lap_start,
+    // Similarly preserve tyre_age_at_start so the current-stint age is stable.
+    tyre_age_at_start: incoming.tyre_age_at_start ?? existing.tyre_age_at_start,
   };
 }

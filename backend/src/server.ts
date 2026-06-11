@@ -29,10 +29,25 @@ import {
   getUserLobby,
   getUserLobbyFromDatabase,
   registerUserLobby,
+  registerPublicLobbyState,
   touchUserActivity,
   touchUserActivityThrottled,
   flushUserActivity,
+  clearLobbyCache,
 } from './lobby/lobbyManager';
+import { restoreOrBootstrapLeaderboard } from './lobby/leaderboardArchive';
+import {
+  sanitizeUsernameForPublic,
+  joinExistingPublicLobby,
+  createPublicLobby,
+  getDefaultMaxPlayers,
+  normalizeLateJoinLap,
+  findActivePublicLobbyId,
+  findWaitingPublicLobbyIds,
+  patchUserJoinedAtLap,
+} from './lobby/publicLobbyManager';
+import { PublicLobbyAutoStartScheduler } from './lobby/publicLobbyAutoStart';
+import type { LobbyState as LobbyStateType } from './types';
 import { buildLobbyShareUrl } from './lobby/shareUrl';
 import {
   startQuestionLifecycle,
@@ -64,9 +79,13 @@ import {
   startSeasonCalendarRefresh,
   stopSeasonCalendarRefresh,
 } from './data/seasonCalendarStore';
-import { selectQuestion, clearCooldowns, formatQuestionText } from './engine/questionEngine';
+import { selectQuestion, clearCooldowns, formatQuestionText, MIN_QUESTIONS_PER_RACE, MAX_QUESTIONS_PER_RACE } from './engine/questionEngine';
 import { SessionRuntimeManager, toSessionInfo, normalizeReplaySpeed } from './runtime/sessionRuntimeManager';
-import { isSessionCompleted, isSessionLive } from './runtime/sessionRuntimeInfo';
+import {
+  isSessionCompleted,
+  isSessionLive,
+  isWithinPreRaceLobbyWindow,
+} from './runtime/sessionRuntimeInfo';
 import { PresenceManager, type PresenceExpiryReason } from './lobby/presenceManager';
 import { LobbyCleanupScheduler } from './lobby/lobbyCleanup';
 import { buildQuestionEventPayload, isUnresolvedQuestionState } from './lobby/questionPayload';
@@ -121,6 +140,8 @@ function parseAllowedOrigins(value: string | undefined): string[] {
 
 const allowedOrigins = parseAllowedOrigins(process.env.CORS_ORIGIN);
 const DEFAULT_PRESENCE_DISCONNECT_GRACE_MS = 2 * 60 * 1000;
+const DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_ACTIVE_MS = 20 * 60 * 1000;
+const DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_WAITING_MS = 10 * 60 * 1000;
 
 function parsePositiveNumberEnv(value: string | undefined, fallback: number): number {
   if (!value) {
@@ -139,6 +160,31 @@ const presenceDisconnectGraceMs = parsePositiveNumberEnv(
   process.env.PRESENCE_DISCONNECT_GRACE_MS,
   DEFAULT_PRESENCE_DISCONNECT_GRACE_MS
 );
+const presenceInactivityTimeoutActiveMs = parsePositiveNumberEnv(
+  process.env.PRESENCE_INACTIVITY_TIMEOUT_ACTIVE_MS,
+  DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_ACTIVE_MS
+);
+const presenceInactivityTimeoutWaitingMs = parsePositiveNumberEnv(
+  process.env.PRESENCE_INACTIVITY_TIMEOUT_WAITING_MS,
+  DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_WAITING_MS
+);
+const presenceInactivitySweepMs = Math.min(
+  presenceInactivityTimeoutActiveMs,
+  presenceInactivityTimeoutWaitingMs
+);
+const presenceInactivityMaxMs = Math.max(
+  presenceInactivityTimeoutActiveMs,
+  presenceInactivityTimeoutWaitingMs
+);
+
+async function resolvePresenceInactivityTimeoutMs(lobbyId: string): Promise<number> {
+  const lobbyState = await getLobbyState(lobbyId);
+  if (lobbyState?.status === 'active') {
+    return presenceInactivityTimeoutActiveMs;
+  }
+
+  return presenceInactivityTimeoutWaitingMs;
+}
 const presenceDbWriteMinIntervalMs = parsePositiveNumberEnv(
   process.env.PRESENCE_DB_WRITE_MIN_INTERVAL_MS,
   5 * 60 * 1000
@@ -477,8 +523,12 @@ const runtimeManager = new SessionRuntimeManager({
         }
 
         await lifecycleQueue.enqueue(lobbyId, async () => {
-          await checkAndResolveQuestion(lobbyId, snapshot);
-          await checkAndTriggerQuestion(lobbyId, snapshot);
+          try {
+            await checkAndResolveQuestion(lobbyId, snapshot);
+            await checkAndTriggerQuestion(lobbyId, snapshot);
+          } catch (err) {
+            console.error(`[LAP_PROCESSING] Unhandled error for lobby=${lobbyId} lap=${snapshot.lapNumber}:`, err);
+          }
           metrics.setGauge('runtime.lifecycle_active_lobbies', lifecycleQueue.getActiveLobbyCount());
           metrics.setGauge('runtime.lifecycle_pending_tasks', lifecycleQueue.getPendingTaskCount());
         }).finally(async () => {
@@ -520,7 +570,9 @@ async function handleUserRemoval(
   reason: PresenceExpiryReason | 'left',
   socketId?: string | null
 ): Promise<void> {
-  const removal = await removePlayer(userId);
+  const removal = await removePlayer(userId, {
+    reason: reason === 'left' ? 'left' : reason,
+  });
   if (!removal) {
     return;
   }
@@ -554,6 +606,9 @@ async function handleUserRemoval(
 }
 
 const presenceManager = new PresenceManager({
+  inactivityTimeoutMs: presenceInactivitySweepMs,
+  maxInactivityTimeoutMs: presenceInactivityMaxMs,
+  resolveInactivityTimeoutMs: (entry) => resolvePresenceInactivityTimeoutMs(entry.lobbyId),
   disconnectGraceMs: presenceDisconnectGraceMs,
   sweepIntervalMs: 60 * 1000, // Changed from 30s to 60s to reduce CPU overhead
   onExpire: async (entry, reason) => {
@@ -569,6 +624,10 @@ async function handleStaleLobbyDeleted(lobbyId: string, lobbyCode: string): Prom
   metrics.incrementCounter('lobby.stale_deleted_total');
   console.log(`[LobbyCleanup] Removed stale lobby ${lobbyCode} (${lobbyId})`);
 }
+
+const publicLobbyAutoStartScheduler = new PublicLobbyAutoStartScheduler({
+  onSweep: sweepWaitingPublicLobbies,
+});
 
 const lobbyCleanupScheduler = new LobbyCleanupScheduler({
   staleThresholdMs: staleLobbyTimeoutMs,
@@ -884,6 +943,174 @@ function emitSessionCatchUp(
   }
 }
 
+/**
+ * Resolve the current lap for a late public-lobby join.
+ * Replay runtimes are keyed per lobby (not per session), so we must check the
+ * target lobby's runtime — getRuntime(sessionKey) only works for live sessions.
+ */
+async function resolveLateJoinLapForPublicSession(
+  sessionKey: string,
+  lobbyId?: string | null
+): Promise<number | null> {
+  if (lobbyId) {
+    const lap = normalizeLateJoinLap(
+      runtimeManager.getRuntimeForLobby(lobbyId)?.getCurrentSnapshot()?.lapNumber
+    );
+    if (lap != null) {
+      return lap;
+    }
+  }
+
+  const activeLobbyId = lobbyId ?? await findActivePublicLobbyId(sessionKey);
+  if (activeLobbyId && activeLobbyId !== lobbyId) {
+    const lap = normalizeLateJoinLap(
+      runtimeManager.getRuntimeForLobby(activeLobbyId)?.getCurrentSnapshot()?.lapNumber
+    );
+    if (lap != null) {
+      return lap;
+    }
+  }
+
+  return normalizeLateJoinLap(
+    runtimeManager.getRuntime(sessionKey)?.getCurrentSnapshot()?.lapNumber
+  );
+}
+
+/**
+ * Start a session for a lobby without host-ownership checks.
+ * Used by the public lobby auto-start path (join_solo).
+ */
+async function startSessionForLobby(
+  lobbyId: string,
+  sessionIdStr: string,
+  replaySpeed?: number | null
+): Promise<void> {
+  const requestedKey = parseInt(sessionIdStr, 10);
+  const calendarSession = Number.isFinite(requestedKey) ? getCalendarSession(requestedKey) : null;
+  let session = calendarSession
+    ?? (Number.isFinite(requestedKey) ? await sessionLookupClient.getSession(requestedKey) : null);
+
+  if (!session) {
+    throw new Error('Session not found');
+  }
+
+  const now = Date.now();
+  const isLive = isSessionLive(session, now);
+  const isCompleted = isSessionCompleted(session, now);
+
+  if (!isLive && !isCompleted) {
+    throw new Error('This session has not started yet');
+  }
+
+  if (isCompleted) {
+    const yearSessions = await sessionLookupClient.getSessions(session.year) ?? [];
+    session = resolveSessionForReplay(session, yearSessions);
+  }
+
+  if (isSessionCancelled(session)) {
+    throw new Error('This race was cancelled and has no telemetry available.');
+  }
+
+  if (isCompleted) {
+    const hasTelemetry = await sessionLookupClient.sessionHasTelemetry(session.session_key);
+    if (!hasTelemetry) {
+      throw new Error('No race telemetry is available for this session.');
+    }
+  }
+
+  await updateLobbyStatus(lobbyId, 'active');
+  await setLobbySession(lobbyId, String(session.session_key));
+  setLatestResolution(lobbyId, null);
+
+  const requestedReplaySpeed = isCompleted && replaySpeed != null
+    ? normalizeReplaySpeed(replaySpeed)
+    : undefined;
+
+  const runtime = await runtimeManager.attachLobbyToSession(lobbyId, session, {
+    replaySpeed: requestedReplaySpeed,
+  });
+
+  setLobbyRuntimeMeta(lobbyId, {
+    sessionMode: runtime.mode,
+    replaySpeed: runtime.replaySpeed,
+    isReplayComplete: false,
+  });
+
+  io.to(lobbyId).emit('session_started', {
+    sessionId: String(session.session_key),
+    mode: runtime.mode,
+    replaySpeed: runtime.replaySpeed,
+  });
+
+  const snapshot = runtime.getCurrentSnapshot();
+  if (snapshot) {
+    broadcastRaceSnapshot(snapshot, new Set([lobbyId]));
+  }
+}
+
+async function maybeActivatePublicLobby(
+  lobbyId: string,
+  sessionKey: string,
+  replaySpeed?: number | null
+): Promise<boolean> {
+  const lobbyState = await getLobbyState(lobbyId);
+  if (!lobbyState || lobbyState.status !== 'waiting') {
+    return false;
+  }
+
+  const requestedKey = parseInt(sessionKey, 10);
+  const calendarSession = Number.isFinite(requestedKey) ? getCalendarSession(requestedKey) : null;
+  const session = calendarSession
+    ?? (Number.isFinite(requestedKey) ? await sessionLookupClient.getSession(requestedKey) : null);
+
+  if (!session) {
+    return false;
+  }
+
+  const now = Date.now();
+  if (!isSessionLive(session, now) && !isSessionCompleted(session, now)) {
+    return false;
+  }
+
+  await startSessionForLobby(lobbyId, sessionKey, replaySpeed ?? 1);
+  clearLobbyCache(lobbyId);
+
+  const refreshedLobbyState = await getLobbyState(lobbyId);
+  if (refreshedLobbyState) {
+    io.to(lobbyId).emit('lobby_state', refreshedLobbyState);
+  }
+
+  return true;
+}
+
+async function sweepWaitingPublicLobbies(): Promise<void> {
+  const liveSession = getActiveLiveCalendarSession();
+  if (!liveSession) {
+    return;
+  }
+
+  const sessionKey = String(liveSession.session_key);
+  const waitingLobbyIds = await findWaitingPublicLobbyIds(sessionKey);
+  if (waitingLobbyIds.length === 0) {
+    return;
+  }
+
+  let started = 0;
+  for (const lobbyId of waitingLobbyIds) {
+    const activated = await maybeActivatePublicLobby(lobbyId, sessionKey);
+    if (activated) {
+      started += 1;
+    }
+  }
+
+  if (started > 0) {
+    console.log(
+      `[PublicLobby] Auto-started ${started} waiting lobby(ies) for session ${sessionKey}`
+    );
+    metrics.incrementCounter('lobby.public_auto_started_total', started);
+  }
+}
+
 // Socket.io connection handling
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
@@ -945,9 +1172,30 @@ io.on('connection', (socket) => {
   /**
    * Join an existing lobby
    */
-  socket.on('join_lobby', async (data: { lobbyCode: string; username: string }) => {
+  socket.on('join_lobby', async (data: { lobbyCode: string; username: string; restoreUserId?: string }) => {
     try {
-      const { lobby, user } = await joinLobby(data.lobbyCode, data.username);
+      // For mid-race joins, record the current lap so the leaderboard can show a "Joined lap X" badge.
+      const existingLobby = await getLobbyByCode(data.lobbyCode);
+      let joinedAtLap: number | null = null;
+      if (existingLobby?.status === 'active') {
+        const runtime = runtimeManager.getRuntimeForLobby(existingLobby.id)
+          ?? runtimeManager.getRuntime(existingLobby.session_id ?? '');
+        const lap = runtime?.getCurrentSnapshot()?.lapNumber ?? null;
+        if (lap !== null && lap > 1) {
+          joinedAtLap = lap;
+        }
+      }
+
+      // Public lobbies apply the same profanity filter as join_solo so the rejoin
+      // form can't bypass sanitization by submitting a bad-word name directly.
+      const username = existingLobby?.is_public
+        ? await sanitizeUsernameForPublic(data.username)
+        : data.username;
+
+      const { lobby, user } = await joinLobby(data.lobbyCode, username, {
+        joinedAtLap,
+        restoreUserId: data.restoreUserId ?? null,
+      });
       currentUserId = user.id;
       currentLobbyId = lobby.id;
 
@@ -956,6 +1204,9 @@ io.on('connection', (socket) => {
       await touchUserActivity(user.id);
 
       const lobbyState = await getLobbyState(lobby.id);
+
+      // Tell the client their actual userId and (possibly sanitized) username before lobby_state.
+      socket.emit('join_result', { userId: user.id, username: user.username });
       socket.emit('lobby_state', lobbyState);
 
       if (lobby.status === 'active' && lobbyState) {
@@ -963,15 +1214,199 @@ io.on('connection', (socket) => {
       }
 
       // Notify others in the lobby
+      const joinedPlayer = lobbyState?.players.find((p) => p.id === user.id);
       socket.to(lobby.id).emit('player_joined', {
         userId: user.id,
         username: user.username,
+        joinedAtLap: joinedPlayer?.joinedAtLap ?? joinedAtLap ?? undefined,
       });
 
-      console.log(`${data.username} joined lobby ${lobby.code}`);
+      // Push the updated leaderboard to existing players so the rejoiner's entry appears
+      // immediately without waiting for the next scored question.
+      if (lobbyState?.leaderboard) {
+        socket.to(lobby.id).emit('leaderboard_update', lobbyState.leaderboard);
+      }
+
+      console.log(`${username} joined lobby ${lobby.code}${joinedAtLap ? ` (late join at lap ${joinedAtLap})` : ''}`);
       metrics.incrementCounter('lobby.joined_total');
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
+    }
+  });
+
+  /**
+   * Join or create a public solo lobby for the given session.
+   * Handles matchmaking, username sanitization, atomic slot claim, and auto-start.
+   */
+  socket.on('join_solo', async (data: { username: string; sessionKey: string; restoreUserId?: string }) => {
+    try {
+      if (!data.username?.trim() || !data.sessionKey) {
+        emitSocketError(socket, 'Username and sessionKey are required', 'VALIDATION_ERROR');
+        return;
+      }
+
+      const sanitizedUsername = await sanitizeUsernameForPublic(data.username.trim());
+      const sessionKey = data.sessionKey;
+      const maxPlayers = getDefaultMaxPlayers();
+
+      const requestedKey = parseInt(sessionKey, 10);
+      const calendarSession = Number.isFinite(requestedKey) ? getCalendarSession(requestedKey) : null;
+      const resolvedSession = calendarSession
+        ?? (Number.isFinite(requestedKey) ? await sessionLookupClient.getSession(requestedKey) : null);
+
+      if (!resolvedSession) {
+        emitSocketError(socket, 'Session not found', 'VALIDATION_ERROR');
+        return;
+      }
+
+      const now = Date.now();
+      const isLive = isSessionLive(resolvedSession, now);
+      const isCompleted = isSessionCompleted(resolvedSession, now);
+      const isPreRace = !isLive && !isCompleted && isWithinPreRaceLobbyWindow(resolvedSession, now);
+
+      if (!isLive && !isCompleted && !isPreRace) {
+        emitSocketError(socket, 'This session has not started yet', 'VALIDATION_ERROR');
+        return;
+      }
+
+      const shouldAutoStart = isLive || isCompleted;
+
+      // Resolve lap before join (replay runtimes are per-lobby, not per-session).
+      const currentLap = await resolveLateJoinLapForPublicSession(sessionKey);
+
+      // Try to atomically join an existing public lobby
+      const joinResult = await joinExistingPublicLobby(
+        sessionKey,
+        sanitizedUsername,
+        currentLap,
+        maxPlayers
+      );
+
+      let lobbyId: string;
+      let userId: string;
+      let finalUsername = sanitizedUsername;
+      let isNewLobby = false;
+      let joinedAtLap: number | null = null;
+
+      if (joinResult === 'NEEDS_NEW_LOBBY') {
+        // No open public lobby — create one and auto-start
+        await assertActiveLobbyCapacity();
+        const created = await createPublicLobby(sessionKey, sanitizedUsername);
+        lobbyId = created.lobbyId;
+        userId = created.userId;
+        isNewLobby = true;
+
+        // Register in-memory state for this freshly-created public lobby
+        const initialState: LobbyStateType = {
+          id: lobbyId,
+          code: created.lobbyCode,
+          shareUrl: '',
+          hostId: userId,
+          sessionId: sessionKey,
+          status: 'waiting',
+          sessionMode: null,
+          replaySpeed: null,
+          isReplayComplete: false,
+          isSimulation: false,
+          isPublic: true,
+          players: [{ id: userId, username: sanitizedUsername, isHost: true, connected: true }],
+          currentQuestion: null,
+          latestResolution: null,
+          questionCount: 0,
+          minQuestions: MIN_QUESTIONS_PER_RACE,
+          maxQuestions: MAX_QUESTIONS_PER_RACE,
+          leaderboard: [],
+        };
+        registerPublicLobbyState(initialState);
+
+        if (shouldAutoStart) {
+          try {
+            await startSessionForLobby(lobbyId, sessionKey, 1);
+          } catch (startError) {
+            console.error(`[join_solo] Failed to auto-start session ${sessionKey} for lobby ${lobbyId}:`, (startError as Error).message);
+            emitSocketError(socket, (startError as Error).message);
+            return;
+          }
+        }
+      } else {
+        lobbyId = joinResult.lobbyId;
+        userId = joinResult.userId;
+        finalUsername = joinResult.username;
+        joinedAtLap = joinResult.joinedAtLap;
+
+        // Re-resolve from the lobby runtime and patch DB if the pre-join lookup missed it.
+        const runtimeLap = await resolveLateJoinLapForPublicSession(sessionKey, lobbyId);
+        if (runtimeLap != null && runtimeLap !== joinedAtLap) {
+          joinedAtLap = runtimeLap;
+          await patchUserJoinedAtLap(userId, runtimeLap);
+        } else if (runtimeLap != null) {
+          joinedAtLap = runtimeLap;
+        }
+      }
+
+      if (!isNewLobby && shouldAutoStart) {
+        try {
+          await maybeActivatePublicLobby(lobbyId, sessionKey, 1);
+        } catch (startError) {
+          console.error(`[join_solo] Failed to activate waiting lobby ${lobbyId}:`, (startError as Error).message);
+          emitSocketError(socket, (startError as Error).message);
+          return;
+        }
+      }
+
+      currentUserId = userId;
+      currentLobbyId = lobbyId;
+
+      socket.join(lobbyId);
+      await restoreOrBootstrapLeaderboard(lobbyId, userId, {
+        restoreUserId: data.restoreUserId ?? null,
+      });
+      presenceManager.upsertConnection({ userId, lobbyId, socketId: socket.id });
+      await touchUserActivity(userId);
+
+      clearLobbyCache(lobbyId);
+      const lobbyState = await getLobbyState(lobbyId);
+
+      // clearLobbyCache wipes the userLobbies map for every player in the lobby.
+      // Re-register all players so that leave/kick flows can still find their lobbyId.
+      if (lobbyState) {
+        for (const player of lobbyState.players) {
+          registerUserLobby(player.id, lobbyId);
+        }
+      }
+
+      // Tell the client their actual userId and (possibly sanitized) username before lobby_state,
+      // so they can always resolve themselves in the player list regardless of name changes.
+      socket.emit('join_result', { userId, username: finalUsername });
+      socket.emit('lobby_state', lobbyState);
+
+      if (!isNewLobby && lobbyState?.status === 'active') {
+        emitSessionCatchUp(socket, lobbyId, lobbyState);
+      }
+
+      // Notify other players that someone joined
+      const joinedPlayer = lobbyState?.players.find((p) => p.id === userId);
+      socket.to(lobbyId).emit('player_joined', {
+        userId,
+        username: finalUsername,
+        joinedAtLap: joinedPlayer?.joinedAtLap ?? joinedAtLap ?? undefined,
+      });
+
+      // Push the updated leaderboard to existing players so the rejoiner's entry appears
+      // immediately without waiting for the next scored question.
+      if (lobbyState?.leaderboard) {
+        socket.to(lobbyId).emit('leaderboard_update', lobbyState.leaderboard);
+      }
+
+      const label = isNewLobby
+        ? (shouldAutoStart ? 'created+started' : 'created+waiting')
+        : 'joined';
+      console.log(`[join_solo] ${finalUsername} ${label} public lobby ${lobbyState?.code ?? lobbyId} (session=${sessionKey} lap=${currentLap ?? 'n/a'})`);
+      metrics.incrementCounter(isNewLobby ? 'lobby.solo_created_total' : 'lobby.solo_joined_total');
+    } catch (error) {
+      const message = (error as Error).message;
+      const code = message.includes('active-lobby capacity') ? 'VALIDATION_ERROR' : 'UNKNOWN';
+      emitSocketError(socket, message, code);
     }
   });
 
@@ -1343,6 +1778,7 @@ io.on('connection', (socket) => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully...');
+  publicLobbyAutoStartScheduler.stop();
   lobbyCleanupScheduler.stop();
   presenceManager.stop();
   stopSeasonCalendarRefresh();
@@ -1357,6 +1793,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully...');
+  publicLobbyAutoStartScheduler.stop();
   lobbyCleanupScheduler.stop();
   presenceManager.stop();
   stopSeasonCalendarRefresh();
@@ -1375,8 +1812,14 @@ httpServer.listen(PORT, () => {
   console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
   console.log(`[SCALING] Redis adapter: ${redisRuntime ? 'enabled' : 'disabled'}`);
   console.log(`[SCALING] Lap concurrency: ${lapWorkConcurrency}`);
+  console.log(
+    `[SCALING] Presence: activeInactivity=${presenceInactivityTimeoutActiveMs}ms`
+    + ` waitingInactivity=${presenceInactivityTimeoutWaitingMs}ms`
+    + ` disconnectGrace=${presenceDisconnectGraceMs}ms`
+  );
   console.log(`[SCALING] Stale lobby cleanup: timeout=${staleLobbyTimeoutMs}ms sweep=${staleLobbySweepIntervalMs}ms`);
   console.log(`[SCALING] Feature flags: batchScoring=${FF_BATCH_SCORING}, presenceThrottle=${FF_PRESENCE_WRITE_THROTTLE}, deltaLobbyState=${FF_DELTA_LOBBY_STATE}`);
+  publicLobbyAutoStartScheduler.start();
   lobbyCleanupScheduler.start();
 });
 

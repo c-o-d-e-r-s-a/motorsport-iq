@@ -6,6 +6,10 @@ import type { Lobby, User, QuestionInstance } from '../db/types';
 import supabase from '../db/supabaseClient';
 import { trackDbQuery, trackDbWrite } from '../observability/dbMetrics';
 import { enrichLobbyState } from './shareUrl';
+import {
+  archiveLeaderboardForInactivePlayer,
+  restoreOrBootstrapLeaderboard,
+} from './leaderboardArchive';
 import { MIN_QUESTIONS_PER_RACE, MAX_QUESTIONS_PER_RACE } from '../engine/questionEngine';
 import type {
   LobbyState,
@@ -24,7 +28,9 @@ import type {
 const lobbyStates: Map<string, LobbyState> = new Map();
 const userLobbies: Map<string, string> = new Map(); // userId -> lobbyId
 const lastPersistedActivityAt: Map<string, number> = new Map();
-const DEFAULT_MAX_PLAYERS_PER_LOBBY = 75;
+const DEFAULT_MAX_PLAYERS_PER_LOBBY = 30;
+
+export type PlayerRemovalReason = 'inactive' | 'disconnected_timeout' | 'left';
 
 interface LobbyRuntimeMeta {
   sessionMode: SessionMode | null;
@@ -65,7 +71,11 @@ export function generateLobbyCode(): string {
 /**
  * Create a new lobby
  */
-export async function createLobby(username: string, sessionId?: string): Promise<{ lobby: Lobby; user: User }> {
+export async function createLobby(
+  username: string,
+  sessionId?: string,
+  options?: { isPublic?: boolean; publicSessionKey?: string }
+): Promise<{ lobby: Lobby; user: User }> {
   // Generate unique lobby code
   let code = generateLobbyCode();
   let attempts = 0;
@@ -89,6 +99,8 @@ export async function createLobby(username: string, sessionId?: string): Promise
       session_id: sessionId ?? null,
       status: 'waiting',
       question_count: 0,
+      is_public: options?.isPublic ?? false,
+      public_session_key: options?.publicSessionKey ?? null,
     })
     .select()
     .single();
@@ -120,18 +132,7 @@ export async function createLobby(username: string, sessionId?: string): Promise
     .update({ host_id: user.id })
     .eq('id', lobby.id);
 
-  // Initialize leaderboard entry for host
-  await supabase.from('leaderboard').insert({
-    lobby_id: lobby.id,
-    user_id: user.id,
-    points: 0,
-    streak: 0,
-    max_streak: 0,
-    correct_answers: 0,
-    wrong_answers: 0,
-    questions_answered: 0,
-    accuracy: 0,
-  });
+  const bootstrap = await restoreOrBootstrapLeaderboard(lobby.id, user.id);
 
   // Initialize in-memory state
   const lobbyState: LobbyState = {
@@ -144,13 +145,24 @@ export async function createLobby(username: string, sessionId?: string): Promise
     replaySpeed: null,
     isReplayComplete: false,
     isSimulation: false,
+    isPublic: options?.isPublic ?? false,
     players: [{ id: user.id, username, isHost: true, connected: true }],
     currentQuestion: null,
     latestResolution: null,
     questionCount: 0,
     minQuestions: MIN_QUESTIONS_PER_RACE,
     maxQuestions: MAX_QUESTIONS_PER_RACE,
-    leaderboard: [],
+    leaderboard: [{
+      userId: user.id,
+      username,
+      points: bootstrap.entry.points,
+      streak: bootstrap.entry.streak,
+      maxStreak: bootstrap.entry.maxStreak,
+      correctAnswers: bootstrap.entry.correctAnswers,
+      wrongAnswers: bootstrap.entry.wrongAnswers,
+      questionsAnswered: bootstrap.entry.questionsAnswered,
+      accuracy: bootstrap.entry.accuracy,
+    }],
   };
   lobbyStates.set(lobby.id, lobbyState);
   userLobbies.set(user.id, lobby.id);
@@ -161,7 +173,11 @@ export async function createLobby(username: string, sessionId?: string): Promise
 /**
  * Join an existing lobby
  */
-export async function joinLobby(lobbyCode: string, username: string): Promise<{ lobby: Lobby; user: User }> {
+export async function joinLobby(
+  lobbyCode: string,
+  username: string,
+  options?: { joinedAtLap?: number | null; restoreUserId?: string | null }
+): Promise<{ lobby: Lobby; user: User }> {
   // Find lobby by code
   const { data: lobby, error: lobbyError } = await supabase
     .from('lobbies')
@@ -212,6 +228,7 @@ export async function joinLobby(lobbyCode: string, username: string): Promise<{ 
       username,
       lobby_id: lobby.id,
       is_host: false,
+      joined_at_lap: options?.joinedAtLap ?? null,
     })
     .select()
     .single();
@@ -220,18 +237,10 @@ export async function joinLobby(lobbyCode: string, username: string): Promise<{ 
     throw new Error(`Failed to join lobby: ${userError?.message}`);
   }
 
-  // Initialize leaderboard entry
-  await supabase.from('leaderboard').insert({
-    lobby_id: lobby.id,
-    user_id: user.id,
-    points: 0,
-    streak: 0,
-    max_streak: 0,
-    correct_answers: 0,
-    wrong_answers: 0,
-    questions_answered: 0,
-    accuracy: 0,
+  const bootstrap = await restoreOrBootstrapLeaderboard(lobby.id, user.id, {
+    restoreUserId: options?.restoreUserId ?? null,
   });
+  const effectiveJoinedAtLap = bootstrap.joinedAtLap ?? options?.joinedAtLap ?? null;
 
   // Update in-memory state
   let lobbyState = lobbyStates.get(lobby.id);
@@ -244,6 +253,17 @@ export async function joinLobby(lobbyCode: string, username: string): Promise<{ 
       username,
       isHost: false,
       connected: true,
+      joinedAtLap: effectiveJoinedAtLap ?? undefined,
+    });
+    updateLeaderboardCache(lobby.id, user.id, {
+      username,
+      points: bootstrap.entry.points,
+      streak: bootstrap.entry.streak,
+      maxStreak: bootstrap.entry.maxStreak,
+      correctAnswers: bootstrap.entry.correctAnswers,
+      wrongAnswers: bootstrap.entry.wrongAnswers,
+      questionsAnswered: bootstrap.entry.questionsAnswered,
+      accuracy: bootstrap.entry.accuracy,
     });
     userLobbies.set(user.id, lobby.id);
   }
@@ -325,28 +345,35 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
     replaySpeed: lobbyRuntimeMeta.get(lobbyId)?.replaySpeed ?? null,
     isReplayComplete: lobbyRuntimeMeta.get(lobbyId)?.isReplayComplete ?? false,
     isSimulation: lobbyRuntimeMeta.get(lobbyId)?.isSimulation ?? false,
+    isPublic: (lobby as any).is_public ?? false,
     players: (users ?? []).map((u) => ({
       id: u.id,
       username: u.username,
       isHost: u.is_host,
       connected: true, // Assume connected on initial load
+      joinedAtLap: (u as any).joined_at_lap ?? undefined,
     })),
     currentQuestion: null, // Would need to fetch active question
     latestResolution: null,
     questionCount: lobby.question_count,
     minQuestions: MIN_QUESTIONS_PER_RACE,
     maxQuestions: MAX_QUESTIONS_PER_RACE,
-    leaderboard: (leaderboard ?? []).map((lb) => ({
-      userId: lb.user_id,
-      username: users?.find((u) => u.id === lb.user_id)?.username ?? '',
-      points: lb.points,
-      streak: lb.streak,
-      maxStreak: lb.max_streak,
-      correctAnswers: lb.correct_answers,
-      wrongAnswers: lb.wrong_answers,
-      questionsAnswered: lb.questions_answered,
-      accuracy: lb.accuracy,
-    })),
+    leaderboard: (leaderboard ?? []).map((lb) => {
+      const user = users?.find((u) => u.id === lb.user_id);
+      const joinedAtLap = (user as { joined_at_lap?: number | null } | undefined)?.joined_at_lap;
+      return {
+        userId: lb.user_id,
+        username: user?.username ?? '',
+        points: lb.points,
+        streak: lb.streak,
+        maxStreak: lb.max_streak,
+        correctAnswers: lb.correct_answers,
+        wrongAnswers: lb.wrong_answers,
+        questionsAnswered: lb.questions_answered,
+        accuracy: lb.accuracy,
+        joinedAtLap: joinedAtLap != null && joinedAtLap > 1 ? joinedAtLap : undefined,
+      };
+    }),
   };
 
   // Cache it
@@ -496,7 +523,10 @@ export function updatePlayerConnection(userId: string, connected: boolean): void
 /**
  * Remove player from lobby
  */
-export async function removePlayer(userId: string): Promise<RemovePlayerResult | null> {
+export async function removePlayer(
+  userId: string,
+  options?: { reason?: PlayerRemovalReason }
+): Promise<RemovePlayerResult | null> {
   const lobbyId = userLobbies.get(userId);
   if (!lobbyId) return null;
 
@@ -506,21 +536,37 @@ export async function removePlayer(userId: string): Promise<RemovePlayerResult |
     return null;
   }
 
+  const removedPlayer = lobbyState.players.find((player) => player.id === userId);
   const remainingPlayers = lobbyState.players.filter((player) => player.id !== userId);
   const nextHostId = lobbyState.hostId === userId
     ? remainingPlayers[0]?.id ?? null
     : lobbyState.hostId;
 
+  if ((options?.reason === 'inactive' || options?.reason === 'left') && removedPlayer?.username) {
+    await archiveLeaderboardForInactivePlayer({
+      lobbyId,
+      userId,
+      username: removedPlayer.username,
+      joinedAtLap: removedPlayer.joinedAtLap ?? null,
+    });
+  }
+
   // Delete from database
   await supabase.from('users').delete().eq('id', userId);
 
-  if (remainingPlayers.length === 0) {
+  const shouldDeleteLobby =
+    remainingPlayers.length === 0 &&
+    // Keep public active lobbies alive so new solo players can refill them.
+    // The stale-lobby cleanup will remove them after they go inactive.
+    !(lobbyState.isPublic && lobbyState.status === 'active');
+
+  if (shouldDeleteLobby) {
     await supabase.from('lobbies').delete().eq('id', lobbyId);
   } else if (nextHostId !== lobbyState.hostId) {
     await supabase.from('lobbies').update({ host_id: nextHostId }).eq('id', lobbyId);
   }
 
-  // Update cache
+  // Update in-memory cache
   const cachedLobbyState = lobbyStates.get(lobbyId);
   if (cachedLobbyState) {
     cachedLobbyState.players = remainingPlayers.map((player) => ({
@@ -534,7 +580,7 @@ export async function removePlayer(userId: string): Promise<RemovePlayerResult |
   userLobbies.delete(userId);
   lastPersistedActivityAt.delete(userId);
 
-  if (remainingPlayers.length === 0) {
+  if (shouldDeleteLobby) {
     clearLobbyRuntimeMeta(lobbyId);
     clearLobbyCache(lobbyId);
     return {
@@ -564,6 +610,17 @@ export function getUserLobby(userId: string): string | null {
 
 export function registerUserLobby(userId: string, lobbyId: string): void {
   userLobbies.set(userId, lobbyId);
+}
+
+/**
+ * Register an in-memory lobby state for a public lobby that was created
+ * directly by publicLobbyManager (bypassing the normal createLobby path).
+ */
+export function registerPublicLobbyState(state: LobbyState): void {
+  lobbyStates.set(state.id, state);
+  for (const player of state.players) {
+    userLobbies.set(player.id, state.id);
+  }
 }
 
 export async function getUserLobbyFromDatabase(userId: string): Promise<string | null> {

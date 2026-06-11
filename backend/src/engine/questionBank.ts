@@ -23,7 +23,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'OVR_OVERTAKE_MODE',
     category: 'OVERTAKE',
     difficulty: 'HARD',
-    template: '{driver1} has Overtake Mode armed — can they pass {driver2} in the next 2 laps?',
+    template: '{driver1} has Overtake Mode armed — can he pass {driver2} in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'overtakeOpportunity', params: {} },
@@ -51,7 +51,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'OVR_CLOSE_TO_1S',
     category: 'OVERTAKE',
     difficulty: 'EASY',
-    template: '{driver1} is hunting {driver2} down — will they be within 1 second in the next 2 laps?',
+    template: '{driver1} is hunting {driver2} down — will he be within 1 second in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'closingTrend', params: {} },
@@ -65,7 +65,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'OVR_GAIN_POSITION',
     category: 'OVERTAKE',
     difficulty: 'MEDIUM',
-    template: '{driver1} is on the charge — will they pick up at least one place in the next {windowSize} laps?',
+    template: '{driver1} is on the charge — will he pick up at least one place in the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'closingTrend', params: {} },
@@ -173,7 +173,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'GAP_SLASH_TWO',
     category: 'GAP_CLOSING',
     difficulty: 'HARD',
-    template: '{driver1} is closing fast — can they shave 2 seconds off {driver2} in the next {windowSize} laps?',
+    template: '{driver1} is closing fast — can he shave 2 seconds off {driver2} in the next {windowSize} laps?',
     windowSize: 3,
     triggers: [
       { type: 'closingTrend', params: {} },
@@ -215,7 +215,7 @@ export const QUESTION_BANK: Question[] = [
     id: 'GAP_SLIP_BACK',
     category: 'GAP_CLOSING',
     difficulty: 'MEDIUM',
-    template: 'Is {driver1} losing touch with {driver2} — will they slip back beyond 1 second in the next 2 laps?',
+    template: 'Is {driver1} losing touch with {driver2} — will he slip back beyond 1 second in the next 2 laps?',
     windowSize: 2,
     triggers: [
       { type: 'withinOneSecond', params: {} },

@@ -21,6 +21,8 @@ export interface Database {
           created_at: string;
           started_at: string | null;
           finished_at: string | null;
+          is_public: boolean;
+          public_session_key: string | null;
         };
         Insert: {
           id?: string;
@@ -33,6 +35,8 @@ export interface Database {
           created_at?: string;
           started_at?: string | null;
           finished_at?: string | null;
+          is_public?: boolean;
+          public_session_key?: string | null;
         };
         Update: {
           id?: string;
@@ -45,6 +49,8 @@ export interface Database {
           created_at?: string;
           started_at?: string | null;
           finished_at?: string | null;
+          is_public?: boolean;
+          public_session_key?: string | null;
         };
       };
       users: {
@@ -55,6 +61,7 @@ export interface Database {
           is_host: boolean;
           created_at: string;
           last_active_at: string;
+          joined_at_lap: number | null;
         };
         Insert: {
           id?: string;
@@ -63,6 +70,7 @@ export interface Database {
           is_host?: boolean;
           created_at?: string;
           last_active_at?: string;
+          joined_at_lap?: number | null;
         };
         Update: {
           id?: string;
@@ -71,6 +79,7 @@ export interface Database {
           is_host?: boolean;
           created_at?: string;
           last_active_at?: string;
+          joined_at_lap?: number | null;
         };
       };
       question_instances: {
@@ -277,6 +286,20 @@ export interface Database {
           p_instance_id: string;
         };
         Returns: boolean;
+      };
+      join_public_lobby_atomic: {
+        Args: {
+          p_session_key: string;
+          p_max_players: number;
+          p_username: string;
+          p_current_lap?: number | null;
+        };
+        Returns: Array<{
+          out_lobby_id: string | null;
+          out_lobby_code: string | null;
+          out_user_id: string | null;
+          result_code: string;
+        }>;
       };
     };
   };

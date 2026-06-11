@@ -98,6 +98,32 @@ describe('PresenceManager', () => {
     manager.stop();
   });
 
+  it('uses a longer inactivity threshold when configured per entry', async () => {
+    const onExpire = jest.fn();
+    const manager = new PresenceManager({
+      inactivityTimeoutMs: 5_000,
+      maxInactivityTimeoutMs: 20_000,
+      resolveInactivityTimeoutMs: async (entry) => (
+        entry.lobbyId === 'lobby-active' ? 20_000 : 5_000
+      ),
+      sweepIntervalMs: 1_000,
+      onExpire,
+    });
+
+    manager.upsertConnection({ userId: 'user-1', lobbyId: 'lobby-active', socketId: 'socket-1' });
+
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(onExpire).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(15_000);
+    expect(onExpire).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'user-1', lobbyId: 'lobby-active' }),
+      'inactive'
+    );
+
+    manager.stop();
+  });
+
   it('removes all tracked users for a lobby', () => {
     const manager = new PresenceManager({
       onExpire: jest.fn(),

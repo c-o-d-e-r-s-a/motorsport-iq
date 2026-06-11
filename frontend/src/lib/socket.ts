@@ -41,10 +41,10 @@ class SocketClient {
     this.socket = io(SOCKET_URL, {
       transports: ['polling', 'websocket'],
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 10000,
+      reconnectionDelayMax: 10000,
+      timeout: 20000,
     });
 
     this.setupEventHandlers();
@@ -108,6 +108,10 @@ class SocketClient {
       this.emit(SERVER_EVENTS.LOBBY_STATE, state);
     });
 
+    this.socket.on(SERVER_EVENTS.JOIN_RESULT, (data: { userId: string; username: string }) => {
+      this.emit(SERVER_EVENTS.JOIN_RESULT, data);
+    });
+
     this.socket.on(SERVER_EVENTS.LOBBY_LOOKUP, (data: LobbyLookupResult) => {
       this.emit(SERVER_EVENTS.LOBBY_LOOKUP, data);
     });
@@ -148,7 +152,7 @@ class SocketClient {
       this.emit(SERVER_EVENTS.SESSION_STARTED, data);
     });
 
-    this.socket.on(SERVER_EVENTS.PLAYER_JOINED, (data: { userId: string; username: string }) => {
+    this.socket.on(SERVER_EVENTS.PLAYER_JOINED, (data: { userId: string; username: string; joinedAtLap?: number }) => {
       this.emit(SERVER_EVENTS.PLAYER_JOINED, data);
     });
 
@@ -210,8 +214,20 @@ class SocketClient {
     this.socket?.emit(CLIENT_EVENTS.CREATE_LOBBY, { username, sessionId });
   }
 
-  joinLobby(lobbyCode: string, username: string): void {
-    this.socket?.emit(CLIENT_EVENTS.JOIN_LOBBY, { lobbyCode, username });
+  joinLobby(lobbyCode: string, username: string, options?: { restoreUserId?: string | null }): void {
+    this.socket?.emit(CLIENT_EVENTS.JOIN_LOBBY, {
+      lobbyCode,
+      username,
+      restoreUserId: options?.restoreUserId ?? undefined,
+    });
+  }
+
+  joinSolo(username: string, sessionKey: string, options?: { restoreUserId?: string | null }): void {
+    this.socket?.emit(CLIENT_EVENTS.JOIN_SOLO, {
+      username,
+      sessionKey,
+      restoreUserId: options?.restoreUserId ?? undefined,
+    });
   }
 
   lookupLobby(lobbyCode: string): void {
@@ -280,6 +296,17 @@ class SocketClient {
 
   sendPresencePing(): void {
     this.socket?.emit(CLIENT_EVENTS.PRESENCE_PING);
+  }
+
+  resumeFromBackground(): void {
+    if (!this.socket) {
+      this.connect();
+      return;
+    }
+
+    if (!this.socket.connected) {
+      this.socket.connect();
+    }
   }
 
   isConnected(): boolean {

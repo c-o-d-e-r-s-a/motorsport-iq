@@ -153,8 +153,19 @@ export async function startQuestionLifecycle(
   activeQuestions.set(instance.lobbyId, instance);
   setCurrentQuestion(instance.lobbyId, instance);
 
-  // Create in database
-  await createQuestionInstance(instance);
+  // Guard: verify the lobby still exists before writing — it may have been deleted
+  // between the trigger eligibility check and now (race condition when last player leaves).
+  try {
+    await createQuestionInstance(instance);
+  } catch (err: any) {
+    if (err?.message?.includes('violates foreign key constraint')) {
+      activeQuestions.delete(instance.lobbyId);
+      setCurrentQuestion(instance.lobbyId, null);
+      console.warn(`[LIFECYCLE] Lobby ${instance.lobbyId} was deleted before question could be persisted — aborting lifecycle`);
+      return;
+    }
+    throw err;
+  }
 
   // Increment question count
   await incrementQuestionCount(instance.lobbyId);

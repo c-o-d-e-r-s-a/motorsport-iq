@@ -489,6 +489,7 @@ describe('Home Status - Calendar Integration', () => {
           year: 2026,
           isCompleted: false,
           isLive: false,
+          isPreRace: false,
           mode: 'replay',
         },
         ...mockCanadianGPSessions,

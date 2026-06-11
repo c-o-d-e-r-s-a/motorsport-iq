@@ -15,7 +15,10 @@ export interface SignalOverrides {
 const DEFAULT_SIGNAL_OVERRIDES: Required<SignalOverrides> = {
   closingTrendThreshold: 0.1,
   closeBattleThreshold: 4.0,
-  lateRacePhasePercent: 0.6,
+  // "Final Stretch" questions should only appear in the genuinely late phase of
+  // the race (last ~15%). 60% was too early — users saw "Final Stretch" at lap
+  // 55/78 (~70%). Raising to 85% means Final Stretch starts at lap 67/78.
+  lateRacePhasePercent: 0.85,
   overtakeOpportunityMaxGap: 1.5,
   pitWindowStintLength: 18,
 };
