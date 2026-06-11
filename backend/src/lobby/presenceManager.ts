@@ -23,6 +23,7 @@ interface PresenceManagerOptions {
   onExpire: (entry: PresenceEntry, reason: PresenceExpiryReason) => Promise<void> | void;
 }
 
+// Minimum sweep threshold; server.ts supplies per-lobby limits via resolveInactivityTimeoutMs.
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_DISCONNECT_GRACE_MS = 2 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 30 * 1000;

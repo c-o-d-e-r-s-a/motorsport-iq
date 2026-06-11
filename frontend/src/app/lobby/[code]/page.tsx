@@ -225,6 +225,33 @@ export default function LobbyPage() {
     };
   }, [currentUserId]);
 
+  useEffect(() => {
+    const refreshPresence = () => {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+
+      const storedUserId = localStorage.getItem('msp_user_id');
+      const storedLobbyCode = localStorage.getItem('msp_lobby_code');
+      if (!storedUserId || storedLobbyCode?.toUpperCase() !== lobbyCode.toUpperCase()) {
+        return;
+      }
+
+      const socket = getSocketClient();
+      socket.connect();
+      socket.reconnectLobby(storedUserId, { dedupeWindowMs: 500 });
+      socket.sendPresencePing();
+    };
+
+    document.addEventListener('visibilitychange', refreshPresence);
+    window.addEventListener('focus', refreshPresence);
+
+    return () => {
+      document.removeEventListener('visibilitychange', refreshPresence);
+      window.removeEventListener('focus', refreshPresence);
+    };
+  }, [lobbyCode]);
+
   const handleCopyCode = useCallback(() => {
     navigator.clipboard.writeText(lobbyCode);
     setCopied(true);

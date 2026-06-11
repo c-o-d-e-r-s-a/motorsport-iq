@@ -35,6 +35,32 @@ describe('PresenceManager', () => {
     manager.stop();
   });
 
+  it('keeps default presence long enough for mobile app switching', async () => {
+    const onExpire = jest.fn();
+    const manager = new PresenceManager({
+      sweepIntervalMs: 1_000,
+      onExpire,
+    });
+
+    manager.upsertConnection({ userId: 'user-1', lobbyId: 'lobby-1', socketId: 'socket-1' });
+
+    await jest.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
+    expect(onExpire).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(onExpire).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        lobbyId: 'lobby-1',
+        socketId: 'socket-1',
+        connected: true,
+      }),
+      'inactive'
+    );
+
+    manager.stop();
+  });
+
   it('does not expire reconnected users within the disconnect grace period', async () => {
     const onExpire = jest.fn();
     const manager = new PresenceManager({

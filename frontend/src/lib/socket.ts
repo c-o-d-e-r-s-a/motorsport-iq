@@ -41,6 +41,8 @@ class SocketClient {
     this.socket = io(SOCKET_URL, {
       transports: ['polling', 'websocket'],
       reconnection: true,
+      // Mobile browsers can suspend the tab long enough to exhaust a small
+      // retry budget. Keep trying so returning to the app restores the lobby.
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 10000,

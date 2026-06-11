@@ -140,7 +140,9 @@ function parseAllowedOrigins(value: string | undefined): string[] {
 
 const allowedOrigins = parseAllowedOrigins(process.env.CORS_ORIGIN);
 const DEFAULT_PRESENCE_DISCONNECT_GRACE_MS = 2 * 60 * 1000;
-const DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_ACTIVE_MS = 20 * 60 * 1000;
+// Active races: mobile tabs may suspend heartbeats while users watch the broadcast.
+// Three hours covers F1's race time limit including stoppages.
+const DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_ACTIVE_MS = 3 * 60 * 60 * 1000;
 const DEFAULT_PRESENCE_INACTIVITY_TIMEOUT_WAITING_MS = 10 * 60 * 1000;
 
 function parsePositiveNumberEnv(value: string | undefined, fallback: number): number {
