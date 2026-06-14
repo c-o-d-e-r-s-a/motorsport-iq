@@ -62,9 +62,9 @@ const SOCKET_BASE = 'wss://livetiming.formula1.com/signalr/connect';
 const CONNECTION_DATA = encodeURIComponent(JSON.stringify([{ name: 'Streaming' }]));
 
 // F1 TrackStatus.Status numeric codes from livetiming feed.
-// Code 2 is often a local/sector yellow — we only treat race-control-backed
-// messages as full-track YELLOW. TrackStatus is trusted for GREEN, SC, VSC,
-// RED, and CHEQUERED transitions.
+// Code 2 is often a local/sector yellow. We keep local yellow incidents out of
+// global track status so a sector caution cannot suppress questions indefinitely.
+// TrackStatus is trusted for GREEN, SC, VSC, RED, and CHEQUERED transitions.
 const TRACK_STATUS_MAP: Record<string, TrackStatus> = {
   '1': 'GREEN',
   '4': 'SC',
@@ -722,13 +722,6 @@ export class F1SignalRClient {
       status = 'RED';
     } else if (message.includes('chequered')) {
       status = 'CHEQUERED';
-    } else if (
-      message.includes('yellow flag')
-      || message.includes('double yellow')
-      || message.includes('yellow in sector')
-      || (message.includes('yellow') && !message.includes('yellow card'))
-    ) {
-      status = 'YELLOW';
     } else if (message.includes('track clear') || message.includes('green flag') || message.includes('track is clear')) {
       status = 'GREEN';
     }
