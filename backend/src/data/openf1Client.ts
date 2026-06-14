@@ -13,6 +13,7 @@ import type {
 
 const OPENF1_BASE_URL = process.env.OPENF1_BASE_URL || 'https://api.openf1.org/v1';
 const OPENF1_API_KEY = process.env.OPENF1_API_KEY || ''; // Required for live-session telemetry when F1 SignalR auth is unavailable
+const OPENF1_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.OPENF1_REQUEST_TIMEOUT_MS ?? '', 10) || 12_000;
 
 export function hasOpenF1ApiKey(): boolean {
   return OPENF1_API_KEY.trim().length > 0;
@@ -197,7 +198,14 @@ export class OpenF1Client {
           headers['Authorization'] = `Bearer ${OPENF1_API_KEY}`;
         }
 
-        const response = await this.fetchImpl(url, { headers });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), OPENF1_REQUEST_TIMEOUT_MS);
+        let response: Response;
+        try {
+          response = await this.fetchImpl(url, { headers, signal: controller.signal });
+        } finally {
+          clearTimeout(timeout);
+        }
 
         if (response.status === 429 || response.status >= 500) {
           const retryAfterHeader = response.headers.get('retry-after');
@@ -271,7 +279,11 @@ export class OpenF1Client {
       { session_key: sessionKey },
       60_000
     );
-    return Array.isArray(laps) && laps.length > 0;
+    const hasTelemetry = Array.isArray(laps) && laps.length > 0;
+    if (!hasTelemetry) {
+      console.warn(`[OpenF1] No lap telemetry rows returned for session ${sessionKey}`);
+    }
+    return hasTelemetry;
   }
 
   async getDrivers(): Promise<OpenF1Driver[] | null> {
