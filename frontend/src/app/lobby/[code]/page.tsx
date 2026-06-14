@@ -87,10 +87,14 @@ export default function LobbyPage() {
         beginLobbyEntry(socket);
       }),
       socket.on(SERVER_EVENTS.LOBBY_LOOKUP, () => {
-        if (!localStorage.getItem('msp_user_id')) {
-          setShowJoinForm(true);
-          setIsLoading(false);
+        const storedSession = getStoredLobbySession();
+        if (storedSession?.lobbyCode.toUpperCase() === lobbyCode.toUpperCase()) {
+          return;
         }
+
+        clearLobbySession();
+        setShowJoinForm(true);
+        setIsLoading(false);
       }),
       socket.on('disconnected', ({ hidden }: { reason?: string; hidden?: boolean }) => {
         if (!hidden && document.visibilityState === 'visible') {
@@ -103,7 +107,7 @@ export default function LobbyPage() {
       }),
       socket.on(SERVER_EVENTS.JOIN_RESULT, (data: { userId: string; username: string }) => {
         joinedUserIdRef.current = data.userId;
-        localStorage.setItem('msp_username', data.username);
+        saveLobbySession({ userId: data.userId, username: data.username });
       }),
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);

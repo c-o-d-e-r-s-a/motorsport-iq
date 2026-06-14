@@ -1280,6 +1280,7 @@ io.on('connection', (socket) => {
       await touchUserActivity(user.id);
 
       const lobbyState = await getLobbyState(lobby.id);
+      socket.emit('join_result', { userId: user.id, username: user.username });
       socket.emit('lobby_state', lobbyState);
 
       console.log(`Lobby created: ${lobby.code} by ${data.username}`);
