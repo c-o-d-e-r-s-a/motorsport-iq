@@ -108,7 +108,7 @@ export default function Home() {
         // Store both immediately so the LOBBY_STATE handler can find the right player
         // even when the username was silently replaced (e.g. profanity filter).
         joinedUserIdRef.current = data.userId;
-        localStorage.setItem('msp_username', data.username);
+        saveLobbySession({ userId: data.userId, username: data.username });
       }),
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setIsLoading(false);

@@ -328,9 +328,13 @@ export default function GamePage() {
         beginLobbyEntry(socket);
       }),
       socket.on(SERVER_EVENTS.LOBBY_LOOKUP, () => {
-        if (!localStorage.getItem('msp_user_id')) {
-          setShowJoinForm(true);
+        const storedSession = getStoredLobbySession();
+        if (storedSession?.lobbyCode.toUpperCase() === lobbyCode.toUpperCase()) {
+          return;
         }
+
+        clearLobbySession();
+        setShowJoinForm(true);
       }),
       socket.on('disconnected', ({ hidden }: { reason?: string; hidden?: boolean }) => {
         setIsSocketConnected(false);
@@ -347,7 +351,7 @@ export default function GamePage() {
       socket.on(SERVER_EVENTS.JOIN_RESULT, (data: { userId: string; username: string }) => {
         // Server confirmed the actual userId and (possibly sanitized) username after a join.
         joinedUserIdFromServerRef.current = data.userId;
-        localStorage.setItem('msp_username', data.username);
+        saveLobbySession({ userId: data.userId, username: data.username });
       }),
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);
