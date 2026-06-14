@@ -18,7 +18,7 @@
 
 ## Question Lifecycle
 1. `TRIGGERED`: backend selected a valid structured prediction moment.
-2. `LIVE`: question is visible and answerable for 20 seconds.
+2. `LIVE`: question is visible and answerable for 45 seconds.
 3. `LOCKED`: answers are closed.
 4. `ACTIVE`: waiting for the lap-window outcome.
 5. `RESOLVED`: deterministic outcome computed from race data.

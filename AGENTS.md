@@ -6,7 +6,7 @@
 
 ## 🌟 Overview
 
-Real-time Formula 1 prediction companion web app. Users join private lobbies, receive live race prediction questions triggered by OpenF1 race data, answer within 20 seconds, and compete on a live leaderboard.
+Real-time Formula 1 prediction companion web app. Users join private lobbies, receive live race prediction questions triggered by OpenF1 race data, answer within 45 seconds, and compete on a live leaderboard.
 
 ---
 
@@ -149,16 +149,17 @@ motorsport-iq/
 ## 🎮 Question Lifecycle
 
 ```
-TRIGGERED (1s) → LIVE (20s answer window) → LOCKED → ACTIVE → RESOLVED → EXPLAINED
+TRIGGERED (1s) → LIVE (45s answer window) → LOCKED → ACTIVE → RESOLVED → EXPLAINED
 ```
 
 **Engine guardrails:**
 - One active question per lobby at a time
-- Min 8, max 15 questions per race (same for Sprint and GP)
+- GP pacing targets 8-15 questions; sprint-length races use a lower adaptive floor because the race is shorter
 - No questions on laps 1-3
 - No triggers during SC/VSC/RED flag
 - 1-lap cooldown after restarts, 2-lap cooldown after resolution
 - No consecutive same-category questions
+- Final Stretch (`FINISH_POSITION`) questions only appear in the last ~15% of race distance
 
 **Categories:** `OVERTAKE`, `PIT_WINDOW`, `GAP_CLOSING`, `FINISH_POSITION`
 

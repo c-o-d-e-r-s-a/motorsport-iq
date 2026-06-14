@@ -8,16 +8,27 @@ export const MAX_QUESTIONS_PER_RACE = 15;
 
 const LAPS_PER_QUESTION_CYCLE = 4;
 const SHORT_RACE_MAX_LAPS = 25;
+const SHORT_RACE_MIN_QUESTIONS = 5;
+const SHORT_RACE_LAPS_PER_TARGET_QUESTION = 4;
+const LAPS_PER_TARGET_QUESTION = 6;
+const TIER1_PROGRESS_THRESHOLD = 0.25;
+const TIER2_PROGRESS_THRESHOLD = 0.4;
+const TIER3_PROGRESS_THRESHOLD = 0.55;
+const FINAL_STRETCH_PROGRESS_THRESHOLD = 0.85;
 
 export type RelaxationTier = 'strict' | 'tier1' | 'tier2' | 'tier3' | 'urgency';
 
 export interface PacingState {
   tier: RelaxationTier;
   behindMin: boolean;
+  behindTarget: boolean;
   urgency: boolean;
   postResolutionCooldown: 0 | 1 | 2;
   questionsRemaining: number;
   eligibleLapsRemaining: number;
+  minimumQuestions: number;
+  targetQuestions: number;
+  expectedQuestionCount: number;
 }
 
 /**
@@ -28,32 +39,31 @@ export const TIER_SIGNAL_OVERRIDES: Record<RelaxationTier, SignalOverrides> = {
     closingTrendThreshold: 0.1,
     closeBattleThreshold: 4.0,
     // Mirrors the raised default — Final Stretch only in the last ~15% of the race.
-    lateRacePhasePercent: 0.85,
+    lateRacePhasePercent: FINAL_STRETCH_PROGRESS_THRESHOLD,
     overtakeOpportunityMaxGap: 1.5,
   },
   tier1: {
     closingTrendThreshold: 0.05,
     closeBattleThreshold: 4.0,
-    // Allow Final Stretch a bit earlier when behind on question count.
-    lateRacePhasePercent: 0.75,
+    lateRacePhasePercent: FINAL_STRETCH_PROGRESS_THRESHOLD,
     overtakeOpportunityMaxGap: 2.0,
   },
   tier2: {
     closingTrendThreshold: 0.05,
     closeBattleThreshold: 5.0,
-    lateRacePhasePercent: 0.65,
+    lateRacePhasePercent: FINAL_STRETCH_PROGRESS_THRESHOLD,
     overtakeOpportunityMaxGap: 2.5,
   },
   tier3: {
     closingTrendThreshold: 0.05,
     closeBattleThreshold: 5.0,
-    lateRacePhasePercent: 0.55,
+    lateRacePhasePercent: FINAL_STRETCH_PROGRESS_THRESHOLD,
     overtakeOpportunityMaxGap: 3.0,
   },
   urgency: {
     closingTrendThreshold: 0.05,
     closeBattleThreshold: 5.0,
-    lateRacePhasePercent: 0.55,
+    lateRacePhasePercent: FINAL_STRETCH_PROGRESS_THRESHOLD,
     overtakeOpportunityMaxGap: 3.0,
   },
 };
@@ -62,7 +72,7 @@ export const TIER_SIGNAL_OVERRIDES: Record<RelaxationTier, SignalOverrides> = {
 const SPRINT_CATCHUP_OVERRIDES: SignalOverrides = {
   closingTrendThreshold: 0.02,
   closeBattleThreshold: 7.5,
-  lateRacePhasePercent: 0.2,
+  lateRacePhasePercent: FINAL_STRETCH_PROGRESS_THRESHOLD,
   overtakeOpportunityMaxGap: 5.5,
   pitWindowStintLength: 12,
 };
@@ -135,24 +145,57 @@ function isShortRace(snapshot: RaceSnapshot): boolean {
   return snapshot.totalLaps !== null && snapshot.totalLaps <= SHORT_RACE_MAX_LAPS;
 }
 
-function isTier1Active(snapshot: RaceSnapshot, questionCount: number, behindMin: boolean): boolean {
+export function getPacingMinimumQuestionCount(snapshot: RaceSnapshot): number {
+  const totalLaps = snapshot.totalLaps;
+  if (!totalLaps || totalLaps <= 0) {
+    return MIN_QUESTIONS_PER_RACE;
+  }
+
+  if (!isShortRace(snapshot)) {
+    return MIN_QUESTIONS_PER_RACE;
+  }
+
+  return Math.min(
+    MIN_QUESTIONS_PER_RACE,
+    Math.max(SHORT_RACE_MIN_QUESTIONS, Math.ceil(totalLaps / SHORT_RACE_LAPS_PER_TARGET_QUESTION))
+  );
+}
+
+export function getPacingTargetQuestionCount(snapshot: RaceSnapshot): number {
+  const totalLaps = snapshot.totalLaps;
+  const minimumQuestions = getPacingMinimumQuestionCount(snapshot);
+  if (!totalLaps || totalLaps <= 0 || isShortRace(snapshot)) {
+    return minimumQuestions;
+  }
+
+  return Math.min(
+    MAX_QUESTIONS_PER_RACE,
+    Math.max(minimumQuestions, Math.ceil(totalLaps / LAPS_PER_TARGET_QUESTION))
+  );
+}
+
+function isTier1Active(snapshot: RaceSnapshot, questionCount: number, behindTarget: boolean): boolean {
   const progress = getRaceProgress(snapshot);
-  return (behindMin && progress >= 0.35)
+  return (behindTarget && progress >= TIER1_PROGRESS_THRESHOLD)
     || (isShortRace(snapshot) && snapshot.lapNumber >= 4 && questionCount === 0);
 }
 
-function isTier2Active(snapshot: RaceSnapshot, questionCount: number): boolean {
-  return questionCount < 6 && getRaceProgress(snapshot) >= 0.5;
+function isTier2Active(snapshot: RaceSnapshot, questionCount: number, behindTarget: boolean): boolean {
+  const progress = getRaceProgress(snapshot);
+  return (behindTarget && progress >= TIER2_PROGRESS_THRESHOLD)
+    || (questionCount < 6 && progress >= 0.5);
 }
 
-function isTier3Active(snapshot: RaceSnapshot, questionCount: number): boolean {
-  return questionCount < 7 && getRaceProgress(snapshot) >= 0.65;
+function isTier3Active(snapshot: RaceSnapshot, questionCount: number, behindTarget: boolean): boolean {
+  const progress = getRaceProgress(snapshot);
+  return (behindTarget && progress >= TIER3_PROGRESS_THRESHOLD)
+    || (questionCount < 7 && progress >= 0.65);
 }
 
 function isShortRaceBehindMin(snapshot: RaceSnapshot, questionCount: number): boolean {
   return isShortRace(snapshot)
     && snapshot.lapNumber >= 4
-    && questionCount < MIN_QUESTIONS_PER_RACE;
+    && questionCount < getPacingMinimumQuestionCount(snapshot);
 }
 
 export function getPacingState(
@@ -162,25 +205,29 @@ export function getPacingState(
 ): PacingState {
   const totalLaps = snapshot.totalLaps;
   const raceProgress = getRaceProgress(snapshot);
-  const expectedCount = totalLaps ? Math.floor(MIN_QUESTIONS_PER_RACE * raceProgress) : 0;
-  const behindMin = totalLaps ? questionCount < expectedCount : false;
-  const questionsRemaining = Math.max(0, MIN_QUESTIONS_PER_RACE - questionCount);
+  const minimumQuestions = getPacingMinimumQuestionCount(snapshot);
+  const targetQuestions = getPacingTargetQuestionCount(snapshot);
+  const expectedMinimumCount = totalLaps ? Math.floor(minimumQuestions * raceProgress) : 0;
+  const expectedQuestionCount = totalLaps ? Math.floor(targetQuestions * raceProgress) : 0;
+  const behindMin = totalLaps ? questionCount < expectedMinimumCount : false;
+  const behindTarget = totalLaps ? questionCount < expectedQuestionCount : false;
+  const questionsRemaining = Math.max(0, minimumQuestions - questionCount);
   const eligibleLapsRemaining = totalLaps
     ? Math.max(0, totalLaps - snapshot.lapNumber - 1)
     : 0;
   const cycleLaps = isShortRace(snapshot) ? 3 : LAPS_PER_QUESTION_CYCLE;
   const estimatedSlotsRemaining = Math.floor(eligibleLapsRemaining / cycleLaps);
-  const urgency = questionCount < MIN_QUESTIONS_PER_RACE
+  const urgency = questionCount < minimumQuestions
     && (questionsRemaining > estimatedSlotsRemaining || isShortRaceBehindMin(snapshot, questionCount));
 
   let tier: RelaxationTier = 'strict';
   if (urgency) {
     tier = 'urgency';
-  } else if (isTier3Active(snapshot, questionCount)) {
+  } else if (isTier3Active(snapshot, questionCount, behindTarget)) {
     tier = 'tier3';
-  } else if (isTier2Active(snapshot, questionCount)) {
+  } else if (isTier2Active(snapshot, questionCount, behindTarget)) {
     tier = 'tier2';
-  } else if (isTier1Active(snapshot, questionCount, behindMin)) {
+  } else if (isTier1Active(snapshot, questionCount, behindTarget)) {
     tier = 'tier1';
   }
 
@@ -189,32 +236,41 @@ export function getPacingState(
   return {
     tier,
     behindMin,
+    behindTarget,
     urgency,
     postResolutionCooldown: needsShortRaceCatchUp ? 0 : urgency ? 1 : 2,
     questionsRemaining,
     eligibleLapsRemaining,
+    minimumQuestions,
+    targetQuestions,
+    expectedQuestionCount,
   };
 }
 
 export function getTiersToTry(snapshot: RaceSnapshot, questionCount: number): RelaxationTier[] {
-  if (questionCount >= MIN_QUESTIONS_PER_RACE) {
+  const minimumQuestions = getPacingMinimumQuestionCount(snapshot);
+  if (questionCount >= minimumQuestions) {
     return ['strict'];
   }
 
-  if (isShortRace(snapshot) && snapshot.lapNumber >= 4 && questionCount < MIN_QUESTIONS_PER_RACE) {
+  const pacing = getPacingState(snapshot, questionCount);
+  if (pacing.urgency) {
+    return ['strict', 'tier1', 'tier2', 'tier3', 'urgency'];
+  }
+
+  if (isShortRace(snapshot) && snapshot.lapNumber >= 4 && questionCount < minimumQuestions) {
     return ['strict', 'tier1', 'tier2', 'tier3'];
   }
 
-  const pacing = getPacingState(snapshot, questionCount);
   const tiers: RelaxationTier[] = ['strict'];
 
-  if (isTier1Active(snapshot, questionCount, pacing.behindMin)) {
+  if (isTier1Active(snapshot, questionCount, pacing.behindTarget)) {
     tiers.push('tier1');
   }
-  if (isTier2Active(snapshot, questionCount)) {
+  if (isTier2Active(snapshot, questionCount, pacing.behindTarget)) {
     tiers.push('tier2');
   }
-  if (isTier3Active(snapshot, questionCount)) {
+  if (isTier3Active(snapshot, questionCount, pacing.behindTarget)) {
     tiers.push('tier3');
   }
 
@@ -518,7 +574,7 @@ function resolveTierOverrides(
   tier: RelaxationTier
 ): SignalOverrides {
   const base = { ...TIER_SIGNAL_OVERRIDES[tier] };
-  if (isShortRace(snapshot) && questionCount < MIN_QUESTIONS_PER_RACE && tier !== 'strict') {
+  if (isShortRace(snapshot) && questionCount < getPacingMinimumQuestionCount(snapshot) && tier !== 'strict') {
     return { ...base, ...SPRINT_CATCHUP_OVERRIDES };
   }
 
@@ -529,6 +585,232 @@ function resolveTierOverrides(
   return base;
 }
 
+function shouldUseEngagementFallback(
+  snapshot: RaceSnapshot,
+  questionCount: number,
+  tier: RelaxationTier
+): boolean {
+  if (tier === 'strict' || questionCount >= getPacingMinimumQuestionCount(snapshot)) {
+    return false;
+  }
+
+  const pacing = getPacingState(snapshot, questionCount);
+  if (!pacing.behindTarget && !pacing.urgency && !isShortRaceBehindMin(snapshot, questionCount)) {
+    return false;
+  }
+
+  // Tier 1 only adds conservative state-based prompts. Wider fallback
+  // categories wait until the race is clearly behind the engagement pace.
+  if (tier === 'tier1') {
+    return questionCount === 0 || getRaceProgress(snapshot) >= 0.3 || isShortRace(snapshot);
+  }
+
+  return true;
+}
+
+function findQuestion(questionId: string): Question | null {
+  return QUESTION_BANK.find((question) => question.id === questionId) ?? null;
+}
+
+function getGapToCarAhead(driver1: DriverState, driver2: DriverState | null): number | null {
+  if (driver1.interval !== null) {
+    return driver1.interval;
+  }
+
+  if (driver1.gap !== null && driver2 && driver2.gap !== null) {
+    return Math.abs(driver1.gap - driver2.gap);
+  }
+
+  return null;
+}
+
+function getDriverForGapQuestion(driver: DriverState, gapToAhead: number | null): DriverState {
+  if (driver.interval !== null || gapToAhead === null) {
+    return driver;
+  }
+
+  return { ...driver, interval: gapToAhead };
+}
+
+function getFallbackPitTyreAgeThreshold(tier: RelaxationTier): number {
+  switch (tier) {
+    case 'tier1':
+      return 15;
+    case 'tier2':
+      return 13;
+    default:
+      return 11;
+  }
+}
+
+function pushFallbackCandidate(
+  candidates: QuestionCandidate[],
+  questionId: string,
+  context: TriggerContext,
+  lastCategory: QuestionCategory | null,
+  driver1: DriverState,
+  driver2: DriverState | null,
+  scoreBoost = 0
+): void {
+  const question = findQuestion(questionId);
+  if (!question || question.category === lastCategory) {
+    return;
+  }
+
+  const candidate: QuestionCandidate = {
+    question,
+    driver1,
+    driver2,
+    score: calculateQuestionScore(question, driver1, driver2, context) + scoreBoost,
+  };
+
+  if (isPlausibleCandidate(candidate, context.tier)) {
+    candidates.push(candidate);
+  }
+}
+
+function buildEngagementFallbackCandidates(
+  context: TriggerContext,
+  lastCategory: QuestionCategory | null
+): QuestionCandidate[] {
+  const { snapshot, tier } = context;
+  const candidates: QuestionCandidate[] = [];
+  const progress = getRaceProgress(snapshot);
+  const pitTyreAgeThreshold = getFallbackPitTyreAgeThreshold(tier);
+  const allowWiderGapPrompts = tier === 'tier2' || tier === 'tier3' || tier === 'urgency';
+  const allowPositionPrompts = (tier === 'tier3' || tier === 'urgency')
+    && progress >= FINAL_STRETCH_PROGRESS_THRESHOLD;
+
+  for (const driver of snapshot.drivers) {
+    if (driver.retired || driver.inPit || driver.position <= 0) {
+      continue;
+    }
+
+    const driverAhead = getDriverAhead(snapshot, driver);
+    const gapToAhead = getGapToCarAhead(driver, driverAhead);
+    const gapDriver = getDriverForGapQuestion(driver, gapToAhead);
+
+    if (driverAhead && gapToAhead !== null) {
+      if (driver.interval !== null && gapToAhead <= 1.2) {
+        pushFallbackCandidate(
+          candidates,
+          'GAP_STAY_CLOSE',
+          context,
+          lastCategory,
+          driver,
+          driverAhead,
+          14
+        );
+      }
+
+      if (gapToAhead > 1.0 && gapToAhead <= 2.5) {
+        pushFallbackCandidate(
+          candidates,
+          'OVR_CLOSE_TO_1S',
+          context,
+          lastCategory,
+          gapDriver,
+          driverAhead,
+          10
+        );
+      }
+
+      if (allowWiderGapPrompts && gapToAhead >= 1.4 && gapToAhead <= 5.5) {
+        pushFallbackCandidate(
+          candidates,
+          'GAP_REDUCE_1S',
+          context,
+          lastCategory,
+          gapDriver,
+          driverAhead,
+          8
+        );
+      }
+
+      if (
+        tier === 'urgency'
+        && driver.position >= 4
+        && driver.position <= 15
+        && gapToAhead <= 5.0
+      ) {
+        pushFallbackCandidate(
+          candidates,
+          'OVR_GAIN_POSITION',
+          context,
+          lastCategory,
+          gapDriver,
+          driverAhead,
+          4
+        );
+      }
+    }
+
+    if (driver.tyreAge >= pitTyreAgeThreshold && driver.pitCount < 3) {
+      pushFallbackCandidate(
+        candidates,
+        'PIT_STOP_NEXT_3',
+        context,
+        lastCategory,
+        driver,
+        driverAhead,
+        6
+      );
+
+      if (allowWiderGapPrompts && driver.tyreAge >= pitTyreAgeThreshold + 1) {
+        pushFallbackCandidate(
+          candidates,
+          'PIT_STAY_OUT_NEXT_3',
+          context,
+          lastCategory,
+          driver,
+          driverAhead,
+          4
+        );
+      }
+    }
+
+    if (allowPositionPrompts) {
+      if (driver.position <= 5) {
+        pushFallbackCandidate(
+          candidates,
+          'FIN_TOP_5',
+          context,
+          lastCategory,
+          driver,
+          driverAhead,
+          4
+        );
+      }
+
+      if (driver.position >= 8 && driver.position <= 12) {
+        pushFallbackCandidate(
+          candidates,
+          'FIN_POINTS_HOLD',
+          context,
+          lastCategory,
+          driver,
+          driverAhead,
+          4
+        );
+      }
+
+      if (driver.position >= 2 && driver.position <= 3) {
+        pushFallbackCandidate(
+          candidates,
+          'FIN_PODIUM_HOLD',
+          context,
+          lastCategory,
+          driver,
+          driverAhead,
+          2
+        );
+      }
+    }
+  }
+
+  return candidates;
+}
+
 function gatherCandidates(
   snapshot: RaceSnapshot,
   previousSnapshot: RaceSnapshot | null,
@@ -536,7 +818,9 @@ function gatherCandidates(
   tier: RelaxationTier,
   questionCount: number
 ): QuestionCandidate[] {
-  const shortRaceCatchup = isShortRace(snapshot) && questionCount < MIN_QUESTIONS_PER_RACE && tier !== 'strict';
+  const shortRaceCatchup = isShortRace(snapshot)
+    && questionCount < getPacingMinimumQuestionCount(snapshot)
+    && tier !== 'strict';
   const signals = calculateDerivedSignals(
     snapshot,
     previousSnapshot,
@@ -553,7 +837,16 @@ function gatherCandidates(
     allCandidates = allCandidates.concat(evaluateAllTriggers(question, context, tier));
   }
 
-  return allCandidates.filter((candidate) => isPlausibleCandidate(candidate, tier));
+  const plausibleCandidates = allCandidates.filter((candidate) => isPlausibleCandidate(candidate, tier));
+  if (plausibleCandidates.length > 0) {
+    return plausibleCandidates;
+  }
+
+  if (!shouldUseEngagementFallback(snapshot, questionCount, tier)) {
+    return plausibleCandidates;
+  }
+
+  return buildEngagementFallbackCandidates(context, lastCategory);
 }
 
 function buildQuestionInstance(
