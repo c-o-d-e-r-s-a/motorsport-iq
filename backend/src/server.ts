@@ -227,6 +227,24 @@ const staleLobbySweepIntervalMs = parsePositiveNumberEnv(
   DEFAULT_STALE_LOBBY_SWEEP_INTERVAL_MS
 );
 
+function parseOptionalPositiveNumber(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isUsernameModerationEnabledForConfig(): boolean {
+  const rawValue = process.env.USERNAME_MODERATION_ENABLED;
+  if (!rawValue) {
+    return true;
+  }
+
+  return !['0', 'false', 'off', 'no'].includes(rawValue.trim().toLowerCase());
+}
+
 async function assertActiveLobbyCapacity(): Promise<void> {
   const { count: activeLobbyCount, error } = await supabase
     .from('lobbies')
@@ -414,6 +432,45 @@ app.get('/health/scaling', (_req, res) => {
       FF_JOB_QUEUE: process.env.FF_JOB_QUEUE === 'true',
     },
     metrics: metrics.snapshot(),
+  });
+});
+
+app.get('/health/config', (_req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    cors: {
+      allowedOrigins,
+    },
+    limits: {
+      maxPlayersPerLobby: getDefaultMaxPlayers(),
+      maxActiveLobbies,
+      staleLobbyTimeoutMs,
+      staleLobbySweepIntervalMs,
+      lapWorkConcurrency,
+      presenceDbWriteMinIntervalMs,
+    },
+    openf1: {
+      baseUrl: process.env.OPENF1_BASE_URL || 'https://api.openf1.org/v1',
+      hasApiKey: Boolean(process.env.OPENF1_API_KEY?.trim()),
+      requestTimeoutMs: parseOptionalPositiveNumber(process.env.OPENF1_REQUEST_TIMEOUT_MS) ?? 12_000,
+    },
+    liveTiming: {
+      hasToken: Boolean(process.env.F1_LIVE_TIMING_TOKEN?.trim()),
+      broadcastDelayMs: LIVE_BROADCAST_DELAY_MS,
+    },
+    moderation: {
+      usernameModerationEnabled: isUsernameModerationEnabledForConfig(),
+      hasGroqModerationKey: Boolean(process.env.GROQ_MODERATION_KEY?.trim()),
+      hasGroqApiKey: Boolean(process.env.GROQ_API_KEY?.trim()),
+    },
+    featureFlags: {
+      FF_BATCH_SCORING,
+      FF_PRESENCE_WRITE_THROTTLE,
+      FF_DELTA_LOBBY_STATE,
+      FF_REDIS_ADAPTER: process.env.FF_REDIS_ADAPTER === 'true',
+      FF_JOB_QUEUE: process.env.FF_JOB_QUEUE === 'true',
+    },
   });
 });
 
@@ -1129,6 +1186,8 @@ async function startSessionForLobby(
   sessionIdStr: string,
   replaySpeed?: number | null
 ): Promise<void> {
+  const startTime = Date.now();
+  console.log(`[session_start] Starting lobby=${lobbyId} requestedSession=${sessionIdStr}`);
   const requestedKey = parseInt(sessionIdStr, 10);
   const calendarSession = Number.isFinite(requestedKey) ? getCalendarSession(requestedKey) : null;
   let session = calendarSession
@@ -1157,6 +1216,7 @@ async function startSessionForLobby(
 
   if (isCompleted) {
     const hasTelemetry = await sessionLookupClient.sessionHasTelemetry(session.session_key);
+    console.log(`[session_start] Telemetry check session=${session.session_key} hasTelemetry=${hasTelemetry}`);
     if (!hasTelemetry) {
       throw new Error('No race telemetry is available for this session.');
     }
@@ -1190,6 +1250,8 @@ async function startSessionForLobby(
   if (snapshot) {
     emitRaceSnapshotToLobbies(snapshot, new Set([lobbyId]));
   }
+
+  console.log(`[session_start] Started lobby=${lobbyId} session=${session.session_key} mode=${runtime.mode} in ${Date.now() - startTime}ms`);
 }
 
 async function maybeActivatePublicLobby(
@@ -1385,15 +1447,18 @@ io.on('connection', (socket) => {
    * Handles matchmaking, username sanitization, atomic slot claim, and auto-start.
    */
   socket.on('join_solo', async (data: { username: string; sessionKey: string; restoreUserId?: string }) => {
+    const joinStartTime = Date.now();
     try {
       if (!data.username?.trim() || !data.sessionKey) {
         emitSocketError(socket, 'Username and sessionKey are required', 'VALIDATION_ERROR');
         return;
       }
 
+      console.log(`[join_solo] request session=${data.sessionKey} restore=${Boolean(data.restoreUserId)}`);
       const sanitizedUsername = await sanitizeUsernameForPublic(data.username.trim());
       const sessionKey = data.sessionKey;
       const maxPlayers = getDefaultMaxPlayers();
+      console.log(`[join_solo] sanitized username session=${sessionKey} changed=${sanitizedUsername !== data.username.trim()}`);
 
       const requestedKey = parseInt(sessionKey, 10);
       const calendarSession = Number.isFinite(requestedKey) ? getCalendarSession(requestedKey) : null;
@@ -1419,6 +1484,7 @@ io.on('connection', (socket) => {
 
       // Resolve lap before join (replay runtimes are per-lobby, not per-session).
       const currentLap = await resolveLateJoinLapForPublicSession(sessionKey);
+      console.log(`[join_solo] resolved late-join lap session=${sessionKey} lap=${currentLap ?? 'n/a'}`);
 
       // Try to atomically join an existing public lobby
       const joinResult = await joinExistingPublicLobby(
@@ -1427,6 +1493,7 @@ io.on('connection', (socket) => {
         currentLap,
         maxPlayers
       );
+      console.log(`[join_solo] atomic join result session=${sessionKey} result=${joinResult === 'NEEDS_NEW_LOBBY' ? 'NEEDS_NEW_LOBBY' : 'OK'}`);
 
       let lobbyId: string;
       let userId: string;
@@ -1555,9 +1622,11 @@ io.on('connection', (socket) => {
         ? (shouldAutoStart ? 'created+started' : 'created+waiting')
         : 'joined';
       console.log(`[join_solo] ${finalUsername} ${label} public lobby ${lobbyState?.code ?? lobbyId} (session=${sessionKey} lap=${currentLap ?? 'n/a'})`);
+      console.log(`[join_solo] completed session=${sessionKey} lobby=${lobbyState?.code ?? lobbyId} in ${Date.now() - joinStartTime}ms`);
       metrics.incrementCounter(isNewLobby ? 'lobby.solo_created_total' : 'lobby.solo_joined_total');
     } catch (error) {
       const message = (error as Error).message;
+      console.error(`[join_solo] failed session=${data.sessionKey ?? 'unknown'} after ${Date.now() - joinStartTime}ms:`, message);
       const code = message.includes('active-lobby capacity') ? 'VALIDATION_ERROR' : 'UNKNOWN';
       emitSocketError(socket, message, code);
     }
@@ -1567,7 +1636,9 @@ io.on('connection', (socket) => {
    * Start the session (host only)
    */
   socket.on('start_session', async (data: { lobbyId: string; sessionId: string; userId?: string | null; replaySpeed?: number | null }) => {
+    const startTime = Date.now();
     try {
+      console.log(`[start_session] request lobby=${data.lobbyId} session=${data.sessionId}`);
       const lobbyState = await getLobbyState(data.lobbyId);
       if (!lobbyState) {
         throw new Error('Lobby not found');
@@ -1593,6 +1664,7 @@ io.on('connection', (socket) => {
       if (!session) {
         throw new Error('Session not found');
       }
+      console.log(`[start_session] resolved lobby=${lobbyState.code} requested=${data.sessionId} session=${session.session_key}`);
 
       // For race-style sessions we require either a completed session (replay)
       // OR an active live window. Calendar-backed sessions in the future are
@@ -1609,6 +1681,7 @@ io.on('connection', (socket) => {
       if (isCompleted) {
         const yearSessions = await sessionLookupClient.getSessions(session.year) ?? [];
         session = resolveSessionForReplay(session, yearSessions);
+        console.log(`[start_session] replay resolved lobby=${lobbyState.code} session=${session.session_key}`);
       }
 
       if (isSessionCancelled(session)) {
@@ -1619,6 +1692,7 @@ io.on('connection', (socket) => {
 
       if (isCompleted) {
         const hasTelemetry = await sessionLookupClient.sessionHasTelemetry(session.session_key);
+        console.log(`[start_session] telemetry lobby=${lobbyState.code} session=${session.session_key} hasTelemetry=${hasTelemetry}`);
         if (!hasTelemetry) {
           throw new Error(
             'No race telemetry is available for this session. Try another weekend or a different season.'
@@ -1661,7 +1735,9 @@ io.on('connection', (socket) => {
       }
 
       console.log(`Session ${session.session_key} started for lobby ${lobbyState.code}`);
+      console.log(`[start_session] completed lobby=${lobbyState.code} session=${session.session_key} in ${Date.now() - startTime}ms`);
     } catch (error) {
+      console.error(`[start_session] failed lobby=${data.lobbyId} session=${data.sessionId} after ${Date.now() - startTime}ms:`, (error as Error).message);
       emitSocketError(socket, (error as Error).message);
     }
   });
