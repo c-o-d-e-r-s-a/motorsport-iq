@@ -1139,6 +1139,53 @@ function emitSessionCatchUp(
   }
 }
 
+async function ensureActiveLobbyRuntime(
+  lobbyId: string,
+  lobbyState: LobbyState
+): Promise<void> {
+  if (lobbyState.status !== 'active' || !lobbyState.sessionId) {
+    return;
+  }
+
+  if (runtimeManager.getRuntimeForLobby(lobbyId)) {
+    return;
+  }
+
+  try {
+    const requestedKey = parseInt(lobbyState.sessionId, 10);
+    const session = Number.isFinite(requestedKey)
+      ? getCalendarSession(requestedKey) ?? await sessionLookupClient.getSession(requestedKey)
+      : null;
+
+    if (!session) {
+      console.warn(`[runtime_recovery] Could not restore runtime for lobby=${lobbyId}; session=${lobbyState.sessionId} not found`);
+      return;
+    }
+
+    const runtime = await runtimeManager.attachLobbyToSession(lobbyId, session, {
+      replaySpeed: lobbyState.replaySpeed ? normalizeReplaySpeed(lobbyState.replaySpeed) : undefined,
+    });
+    setLobbyRuntimeMeta(lobbyId, {
+      sessionMode: runtime.mode,
+      replaySpeed: runtime.replaySpeed,
+      isReplayComplete: false,
+    });
+
+    console.log(`[runtime_recovery] Restored ${runtime.mode} runtime for lobby=${lobbyId} session=${session.session_key}`);
+
+    const snapshot = runtime.getCurrentSnapshot();
+    if (snapshot) {
+      emitRaceSnapshotToLobbies(snapshot, new Set([lobbyId]));
+    }
+  } catch (error) {
+    runtimeManager.detachLobbyFromSession(lobbyId);
+    console.error(
+      `[runtime_recovery] Failed to restore runtime for lobby=${lobbyId} session=${lobbyState.sessionId}:`,
+      (error as Error).message
+    );
+  }
+}
+
 /**
  * Resolve the current lap for a late public-lobby join.
  * Replay runtimes are keyed per lobby (not per session), so we must check the
@@ -1406,7 +1453,11 @@ io.on('connection', (socket) => {
       presenceManager.upsertConnection({ userId: user.id, lobbyId: lobby.id, socketId: socket.id });
       await touchUserActivity(user.id);
 
-      const lobbyState = await getLobbyState(lobby.id);
+      let lobbyState = await getLobbyState(lobby.id);
+      if (lobby.status === 'active' && lobbyState) {
+        await ensureActiveLobbyRuntime(lobby.id, lobbyState);
+        lobbyState = await getLobbyState(lobby.id) ?? lobbyState;
+      }
 
       // Tell the client their actual userId and (possibly sanitized) username before lobby_state.
       socket.emit('join_result', { userId: user.id, username: user.username });
@@ -1580,7 +1631,11 @@ io.on('connection', (socket) => {
       await touchUserActivity(userId);
 
       clearLobbyCache(lobbyId);
-      const lobbyState = await getLobbyState(lobbyId);
+      let lobbyState = await getLobbyState(lobbyId);
+      if (lobbyState?.status === 'active') {
+        await ensureActiveLobbyRuntime(lobbyId, lobbyState);
+        lobbyState = await getLobbyState(lobbyId) ?? lobbyState;
+      }
 
       // clearLobbyCache wipes the userLobbies map for every player in the lobby.
       // Re-register all players so that leave/kick flows can still find their lobbyId.
@@ -1860,6 +1915,8 @@ io.on('connection', (socket) => {
       await touchUserActivity(data.userId);
 
       socket.to(lobbyId).emit('player_reconnected', { userId: data.userId });
+
+      await ensureActiveLobbyRuntime(lobbyId, lobbyState);
 
       // Send current state
       const refreshedLobbyState = await getLobbyState(lobbyId);
