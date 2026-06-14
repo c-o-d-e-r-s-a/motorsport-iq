@@ -47,6 +47,7 @@ export class F1SignalRCoreClient {
   private connection: signalR.HubConnection | null = null;
   private intentionallyClosed = false;
   private reconnectAttempts = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private readonly processor: F1SignalRClient;
 
   constructor(private readonly options: F1SignalRClientOptions = {}) {
@@ -61,6 +62,10 @@ export class F1SignalRCoreClient {
 
   async stop(): Promise<void> {
     this.intentionallyClosed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.connection) {
       try {
         await this.connection.stop();
@@ -166,7 +171,11 @@ export class F1SignalRCoreClient {
     console.log(`[SignalR Core] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/5)...`);
     this.options.onConnectionLoss?.();
 
-    setTimeout(() => {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (!this.intentionallyClosed) {
         void this.connect();
       }

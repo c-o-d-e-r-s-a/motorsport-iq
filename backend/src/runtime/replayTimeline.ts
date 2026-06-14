@@ -32,11 +32,22 @@ const typeOrder: Record<ReplayEventType, number> = {
   lap: 4,
 };
 
-function getLapTimestamp(lap: OpenF1Lap): string {
-  if (lap.date_start && lap.lap_duration) {
-    return new Date(new Date(lap.date_start).getTime() + lap.lap_duration * 1000).toISOString();
+/** Lap replay events fire at lap completion (start + duration), not lap start. */
+function getLapCompletionTimestamp(lap: OpenF1Lap): number {
+  if (!lap.date_start) {
+    return Number.NaN;
   }
-  return lap.date_start;
+
+  const startMs = new Date(lap.date_start).getTime();
+  if (!Number.isFinite(startMs)) {
+    return Number.NaN;
+  }
+
+  if (lap.lap_duration != null && Number.isFinite(lap.lap_duration)) {
+    return startMs + lap.lap_duration * 1000;
+  }
+
+  return startMs;
 }
 
 export function determineReplayStartTime(raceControl: OpenF1RaceControl[]): number {
@@ -91,12 +102,12 @@ export function buildReplayTimeline(input: ReplayTimelineInput): ReplayEvent[] {
     })),
     ...input.laps.map((event) => ({
       type: 'lap' as const,
-      timestamp: new Date(getLapTimestamp(event)).getTime(),
+      timestamp: getLapCompletionTimestamp(event),
       sequence: sequence++,
       data: event,
     })),
   ]
-    .filter((event) => event.timestamp >= startTime)
+    .filter((event) => Number.isFinite(event.timestamp) && event.timestamp >= startTime)
     .sort((a, b) => {
       if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
       if (typeOrder[a.type] !== typeOrder[b.type]) return typeOrder[a.type] - typeOrder[b.type];

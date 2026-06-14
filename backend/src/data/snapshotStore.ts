@@ -48,10 +48,20 @@ function hasNewerTimestamp(
   return toTimestamp(incoming) >= toTimestamp(existing);
 }
 
+function cloneRaceSnapshot(snapshot: RaceSnapshot): RaceSnapshot {
+  return {
+    ...snapshot,
+    timestamp: new Date(snapshot.timestamp.getTime()),
+    drivers: snapshot.drivers.map((driver) => ({ ...driver })),
+  };
+}
+
 export class SnapshotStore {
   private sessionId: string | null = null;
   private currentSnapshot: RaceSnapshot | null = null;
   private previousSnapshot: RaceSnapshot | null = null;
+  /** Last snapshot before the displayed lap counter advanced — used for question triggers. */
+  private previousLapSnapshot: RaceSnapshot | null = null;
   private drivers: Map<number, DriverData> = new Map();
   private lapNumber = 0;
   private trackStatus: TrackStatus = 'GREEN';
@@ -66,6 +76,10 @@ export class SnapshotStore {
   private client: OpenF1Client;
   private hudSnapshotTimer: NodeJS.Timeout | null = null;
   private lastHudSnapshotAt = 0;
+  /** Drivers confirmed as retired (position went to 0 after being in the race). */
+  private retiredDrivers = new Set<number>();
+  /** Drivers that have had at least one valid position (> 0) reported during this session. */
+  private driverHadValidPosition = new Set<number>();
 
   constructor(client: OpenF1Client, options: SnapshotStoreOptions = {}) {
     this.client = client;
@@ -86,9 +100,12 @@ export class SnapshotStore {
     this.lapNumber = 0;
     this.currentSnapshot = null;
     this.previousSnapshot = null;
+    this.previousLapSnapshot = null;
     this.previousGaps.clear();
     this.trackStatus = 'GREEN';
     this.isReplayComplete = false;
+    this.retiredDrivers.clear();
+    this.driverHadValidPosition.clear();
     this.sessionMode = config?.sessionMode ?? 'live';
     this.openF1LapNumbering = config?.openF1LapNumbering ?? false;
     this.replaySpeed = config?.replaySpeed ?? null;
@@ -227,6 +244,10 @@ export class SnapshotStore {
     return this.previousSnapshot;
   }
 
+  getPreviousLapSnapshot(): RaceSnapshot | null {
+    return this.previousLapSnapshot;
+  }
+
   private ensureDriverEntry(driverNumber: number, sessionKey = 0, meetingKey = 0): DriverData {
     let driverData = this.drivers.get(driverNumber);
     if (driverData) return driverData;
@@ -258,21 +279,31 @@ export class SnapshotStore {
   }
 
   processLapCompletion(lap: OpenF1Lap): void {
+    const nextLap = this.openF1LapNumbering
+      ? lap.lap_number
+      : lap.lap_number + 1;
+    const lapAdvanced = nextLap > this.lapNumber;
+
+    if (lapAdvanced && this.currentSnapshot) {
+      this.previousLapSnapshot = cloneRaceSnapshot(this.currentSnapshot);
+    }
+
     const driverData = this.ensureDriverEntry(lap.driver_number, lap.session_key, lap.meeting_key);
     driverData.latestLap = lap;
 
-    // SignalR live timing reports completed laps (+1). OpenF1 replay/sim feeds use lap_number as-is.
-    const nextLap = this.sessionMode === 'live' && !this.openF1LapNumbering
-      ? lap.lap_number + 1
-      : lap.lap_number;
-    if (nextLap > this.lapNumber) {
+    if (lapAdvanced) {
       this.lapNumber = nextLap;
     }
 
     this.ensureActiveRaceLapFloor();
     this.buildSnapshot();
-    if (this.currentSnapshot) {
-      this.options.onLapComplete?.(this.currentSnapshot);
+
+    const shouldEmitLapComplete = this.sessionMode === 'live'
+      ? Boolean(this.currentSnapshot)
+      : lapAdvanced && Boolean(this.currentSnapshot);
+
+    if (shouldEmitLapComplete) {
+      this.options.onLapComplete?.(this.currentSnapshot!);
     }
   }
 
@@ -281,12 +312,21 @@ export class SnapshotStore {
       return;
     }
 
-    if (lapNumber > this.lapNumber) {
-      this.lapNumber = lapNumber;
+    const lapAdvanced = lapNumber > this.lapNumber;
+    if (!lapAdvanced) {
+      return;
     }
 
+    if (this.currentSnapshot) {
+      this.previousLapSnapshot = cloneRaceSnapshot(this.currentSnapshot);
+    }
+
+    this.lapNumber = lapNumber;
     this.ensureActiveRaceLapFloor();
-    this.scheduleHudSnapshotUpdate();
+    this.buildSnapshot();
+    if (this.currentSnapshot) {
+      this.options.onLapComplete?.(this.currentSnapshot);
+    }
   }
 
   processPositionUpdate(positions: OpenF1Position[]): void {
@@ -294,6 +334,20 @@ export class SnapshotStore {
       const driverData = this.ensureDriverEntry(pos.driver_number, pos.session_key, pos.meeting_key);
       if (hasNewerTimestamp(pos.date, driverData.latestPosition?.date)) {
         driverData.latestPosition = pos;
+      }
+
+      if (pos.position > 0) {
+        this.driverHadValidPosition.add(pos.driver_number);
+      } else if (
+        pos.position === 0
+        && this.lapNumber > 3
+        && this.driverHadValidPosition.has(pos.driver_number)
+      ) {
+        // Driver had a valid race position, now shows 0 — they have retired.
+        if (!this.retiredDrivers.has(pos.driver_number)) {
+          console.log(`[SnapshotStore] Driver #${pos.driver_number} marked as retired (position → 0 at lap ${this.lapNumber})`);
+          this.retiredDrivers.add(pos.driver_number);
+        }
       }
     }
     this.ensureActiveRaceLapFloor();
@@ -449,7 +503,7 @@ export class SnapshotStore {
         pitCount: data.pits.length,
         lastLapTime: data.latestLap?.lap_duration ?? null,
         inPit: false,
-        retired: false,
+        retired: this.retiredDrivers.has(driverNumber),
       });
 
       if (
@@ -547,7 +601,8 @@ export class SnapshotStore {
     }
 
     const elapsed = Date.now() - this.lastHudSnapshotAt;
-    if (elapsed >= HUD_SNAPSHOT_THROTTLE_MS && !this.hudSnapshotTimer) {
+    const throttleMs = this.sessionMode === 'replay' ? 0 : HUD_SNAPSHOT_THROTTLE_MS;
+    if (elapsed >= throttleMs && !this.hudSnapshotTimer) {
       this.buildSnapshot();
       return;
     }
@@ -556,7 +611,7 @@ export class SnapshotStore {
       return;
     }
 
-    const waitMs = Math.max(0, HUD_SNAPSHOT_THROTTLE_MS - elapsed);
+    const waitMs = Math.max(0, throttleMs - elapsed);
     this.hudSnapshotTimer = setTimeout(() => {
       this.hudSnapshotTimer = null;
       this.buildSnapshot();

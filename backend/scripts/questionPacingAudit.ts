@@ -101,9 +101,8 @@ async function auditSession(session: OpenF1Session): Promise<AuditResult | null>
   try {
     await store.initialize(session.session_key, {
       sessionMode: 'replay',
-      replaySpeed: 10,
+      replaySpeed: 1,
       skipDriverPreload: false,
-      openF1LapNumbering: true,
     });
   } catch (error) {
     console.warn(`[audit] Failed to initialize session ${session.session_key}:`, error);
@@ -170,7 +169,7 @@ async function auditSession(session: OpenF1Session): Promise<AuditResult | null>
         const lapBefore = store.getCurrentSnapshot()?.lapNumber ?? 0;
         store.processLapCompletion(event.data as OpenF1Lap);
         const snapshot = store.getCurrentSnapshot();
-        const previousSnapshot = store.getPreviousSnapshot();
+        const previousSnapshot = store.getPreviousLapSnapshot() ?? store.getPreviousSnapshot();
         if (!snapshot || snapshot.lapNumber <= lapBefore) {
           break;
         }

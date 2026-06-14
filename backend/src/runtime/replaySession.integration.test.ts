@@ -4,7 +4,9 @@ import { buildReplayTimeline } from './replayTimeline';
 import { selectQuestion } from '../engine/questionEngine';
 import type { OpenF1Interval, OpenF1Lap, OpenF1Pit, OpenF1Position, OpenF1RaceControl } from '../types';
 
-describe('historical replay question selection', () => {
+const describeOpenF1Integration = process.env.RUN_OPENF1_INTEGRATION === '1' ? describe : describe.skip;
+
+describeOpenF1Integration('historical replay question selection', () => {
   it('can select at least one question for the Melbourne 2026 race replay', async () => {
     const sessionKey = 11234;
     const client = new OpenF1Client();

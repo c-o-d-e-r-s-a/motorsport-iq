@@ -11,7 +11,7 @@ import {
 import {
   BaseRuntime,
   cloneLobbyIds,
-  computeReplayEventDelayMs,
+  computeAbsoluteReplayDelayMs,
   type RuntimeCallbacks,
   type SessionRuntime,
 } from './sessionRuntimeBase';
@@ -20,7 +20,7 @@ import { isSessionCompleted, toSessionInfo } from './sessionRuntimeInfo';
 
 export const SUPPORTED_REPLAY_SPEEDS = [1, 10] as const;
 export type ReplaySpeed = (typeof SUPPORTED_REPLAY_SPEEDS)[number];
-export const DEFAULT_REPLAY_SPEED: ReplaySpeed = 10;
+export const DEFAULT_REPLAY_SPEED: ReplaySpeed = 1;
 
 export function normalizeReplaySpeed(value: unknown): ReplaySpeed {
   if (typeof value === 'number' && (SUPPORTED_REPLAY_SPEEDS as readonly number[]).includes(value)) {
@@ -163,6 +163,8 @@ class LiveSessionRuntime extends BaseRuntime {
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[Live Runtime] SignalR Core handshake failed:', message);
+      await this.liveTimingClient.stop();
+      this.liveTimingClient = null;
 
       console.warn('[Live Runtime] Retrying with legacy /signalr WebSocket client...');
       this.liveTimingClient = new F1SignalRClient(callbacks);
@@ -198,7 +200,9 @@ class ReplaySessionRuntime extends BaseRuntime {
   private currentIndex = 0;
   private complete = false;
   private isPaused = false;
-  private pauseTimer: NodeJS.Timeout | null = null;
+  private replayTimelineOriginMs = 0;
+  private replayStartedAtMs = 0;
+  private pausedAtMs: number | null = null;
   private readonly playbackSpeed: ReplaySpeed;
 
   constructor(session: OpenF1Session, callbacks: RuntimeCallbacks, replaySpeed: ReplaySpeed = DEFAULT_REPLAY_SPEED) {
@@ -213,6 +217,7 @@ class ReplaySessionRuntime extends BaseRuntime {
     this.currentIndex = 0;
     this.complete = false;
     this.isPaused = false;
+    this.pausedAtMs = null;
     this.client.setSession(this.session.session_key);
     await this.snapshotStore.initialize(this.session.session_key, {
       sessionMode: 'replay',
@@ -239,7 +244,9 @@ class ReplaySessionRuntime extends BaseRuntime {
       raceControl: raceControl ?? [],
     });
 
-    this.runNext();
+    this.replayTimelineOriginMs = this.events[0]?.timestamp ?? 0;
+    this.replayStartedAtMs = Date.now();
+    this.scheduleEvent(0);
   }
 
   stop(): void {
@@ -247,10 +254,7 @@ class ReplaySessionRuntime extends BaseRuntime {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    if (this.pauseTimer) {
-      clearTimeout(this.pauseTimer);
-      this.pauseTimer = null;
-    }
+    this.pausedAtMs = null;
     this.started = false;
   }
 
@@ -261,23 +265,28 @@ class ReplaySessionRuntime extends BaseRuntime {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    this.pausedAtMs = Date.now();
   }
 
   resume(): void {
     if (!this.isPaused || !this.started) return;
+    if (this.pausedAtMs != null) {
+      this.replayStartedAtMs += Date.now() - this.pausedAtMs;
+      this.pausedAtMs = null;
+    }
     this.isPaused = false;
-    this.runNext();
+    this.scheduleEvent(this.currentIndex);
   }
 
   isPausedState(): boolean {
     return this.isPaused;
   }
 
-  private runNext(): void {
+  private scheduleEvent(index: number): void {
     if (!this.started || this.isPaused) return;
 
-    const currentEvent = this.events[this.currentIndex];
-    if (!currentEvent) {
+    const event = this.events[index];
+    if (!event) {
       if (!this.complete) {
         this.complete = true;
         this.snapshotStore.markReplayComplete();
@@ -286,17 +295,18 @@ class ReplaySessionRuntime extends BaseRuntime {
       return;
     }
 
-    applyReplayEvent(this.snapshotStore, currentEvent);
-    this.currentIndex += 1;
+    const delayMs = computeAbsoluteReplayDelayMs(
+      event,
+      this.replayTimelineOriginMs,
+      this.replayStartedAtMs,
+      this.playbackSpeed
+    );
 
-    const nextEvent = this.events[this.currentIndex];
-    if (!nextEvent) {
-      this.runNext();
-      return;
-    }
-
-    const delayMs = computeReplayEventDelayMs(currentEvent, nextEvent, this.playbackSpeed);
-    this.timer = setTimeout(() => this.runNext(), delayMs);
+    this.timer = setTimeout(() => {
+      applyReplayEvent(this.snapshotStore, event);
+      this.currentIndex = index + 1;
+      this.scheduleEvent(index + 1);
+    }, delayMs);
   }
 }
 

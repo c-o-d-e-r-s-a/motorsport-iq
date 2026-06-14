@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { deriveHomeOpenF1Status, type HomeOpenF1Status } from './homeStatus';
+import { deriveHomeOpenF1Status } from './homeStatus';
 import type { SessionInfo } from './types';
 
 describe('Home Status - Calendar Integration', () => {
@@ -489,6 +489,7 @@ describe('Home Status - Calendar Integration', () => {
           year: 2026,
           isCompleted: false,
           isLive: false,
+          isPreRace: false,
           mode: 'replay',
         },
         ...mockCanadianGPSessions,

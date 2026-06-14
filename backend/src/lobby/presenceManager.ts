@@ -11,17 +11,20 @@ export interface PresenceEntry {
 }
 
 interface PresenceManagerOptions {
+  /** Minimum inactivity window used to drive sweep checks. */
   inactivityTimeoutMs?: number;
+  /** Upper bound for stale-lobby presence checks. */
+  maxInactivityTimeoutMs?: number;
+  resolveInactivityTimeoutMs?: (
+    entry: PresenceEntry
+  ) => number | Promise<number>;
   disconnectGraceMs?: number;
   sweepIntervalMs?: number;
   onExpire: (entry: PresenceEntry, reason: PresenceExpiryReason) => Promise<void> | void;
 }
 
-// Mobile browsers aggressively throttle app timers and may suspend a tab's
-// application-level heartbeat while the user switches to the race broadcast.
-// Keep presence for a full race-window unless the user explicitly leaves the
-// lobby. Three hours covers F1's race time limit including stoppages.
-const DEFAULT_INACTIVITY_TIMEOUT_MS = 3 * 60 * 60 * 1000;
+// Minimum sweep threshold; server.ts supplies per-lobby limits via resolveInactivityTimeoutMs.
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_DISCONNECT_GRACE_MS = 2 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 30 * 1000;
 
@@ -29,12 +32,16 @@ export class PresenceManager {
   private readonly entries = new Map<string, PresenceEntry>();
   private readonly socketToUser = new Map<string, string>();
   private readonly inactivityTimeoutMs: number;
+  private readonly maxInactivityTimeoutMs: number;
+  private readonly resolveInactivityTimeoutMs?: PresenceManagerOptions['resolveInactivityTimeoutMs'];
   private readonly disconnectGraceMs: number;
   private readonly interval: NodeJS.Timeout;
   private readonly onExpire: PresenceManagerOptions['onExpire'];
 
   constructor(options: PresenceManagerOptions) {
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
+    this.maxInactivityTimeoutMs = options.maxInactivityTimeoutMs ?? this.inactivityTimeoutMs;
+    this.resolveInactivityTimeoutMs = options.resolveInactivityTimeoutMs;
     this.disconnectGraceMs = options.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS;
     this.onExpire = options.onExpire;
     this.interval = setInterval(() => {
@@ -106,7 +113,7 @@ export class PresenceManager {
         continue;
       }
 
-      if (now - entry.lastSeenAt < this.inactivityTimeoutMs) {
+      if (now - entry.lastSeenAt < this.maxInactivityTimeoutMs) {
         return true;
       }
     }
@@ -137,6 +144,14 @@ export class PresenceManager {
       }
 
       if (now - entry.lastSeenAt >= this.inactivityTimeoutMs) {
+        const threshold = this.resolveInactivityTimeoutMs
+          ? await this.resolveInactivityTimeoutMs(entry)
+          : this.inactivityTimeoutMs;
+
+        if (now - entry.lastSeenAt < threshold) {
+          continue;
+        }
+
         entry.expiring = true;
         await this.onExpire({ ...entry }, 'inactive');
         continue;

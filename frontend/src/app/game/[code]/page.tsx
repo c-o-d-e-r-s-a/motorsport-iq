@@ -19,6 +19,8 @@ import { cn } from '@/lib/cn';
 import { apiFetch } from '@/lib/api';
 import { useQuestionSound } from '@/hooks/useQuestionSound';
 import { useAnswerOutcomeSounds } from '@/hooks/useAnswerOutcomeSounds';
+import { useGameNotifications } from '@/hooks/useGameNotifications';
+import NotificationPopUpHint from '@/components/NotificationPopUpHint';
 import {
   SERVER_EVENTS,
   type CreateProblemReportInput,
@@ -34,6 +36,17 @@ import {
   type ServerErrorEvent,
   type StatHintKey,
 } from '@/lib/types';
+import { ANSWER_WINDOW_MS, resolveAnswerDeadline } from '@/lib/answerWindow';
+import { hasQuestionAlertHandled, markQuestionAlertHandled } from '@/lib/questionAlerts';
+import {
+  clearInactiveKickRestore,
+  clearLobbySession,
+  getInactiveKickRestore,
+  getStoredLobbySession,
+  saveLobbySession,
+  stashInactiveKickRestore,
+} from '@/lib/sessionPersistence';
+import { shareLobbyLink } from '@/lib/shareLobbyLink';
 import { Button, Brand, Card, Chip, Input } from '@/components/ui';
 
 const REPORT_REASON_OPTIONS: Array<{ value: ProblemReportReason; label: string }> = [
@@ -43,6 +56,9 @@ const REPORT_REASON_OPTIONS: Array<{ value: ProblemReportReason; label: string }
   { value: 'TELEMETRY_MISMATCH', label: 'Telemetry Mismatch' },
   { value: 'OTHER', label: 'Other' },
 ];
+
+const UNRESOLVED_QUESTION_STATES: QuestionState[] = ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'];
+const POST_RESOLUTION_QUESTION_STATES: QuestionState[] = ['RESOLVED', 'EXPLAINED', 'CLOSED'];
 
 export default function GamePage() {
   const params = useParams();
@@ -68,6 +84,7 @@ export default function GamePage() {
   const [reportSuccess, setReportSuccess] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [isSocketConnected, setIsSocketConnected] = useState<boolean>(() => getSocketClient().isConnected());
+  const [showReconnecting, setShowReconnecting] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [isLeaving, setIsLeaving] = useState(false);
   const [localCorrectAnswers, setLocalCorrectAnswers] = useState<number>(0);
@@ -77,33 +94,42 @@ export default function GamePage() {
   });
   const [showJoinForm, setShowJoinForm] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
+  const [shareLinkStatus, setShareLinkStatus] = useState<'shared' | 'copied' | null>(null);
+  // Set to true when a late joiner arrives and there is already an active LIVE question
+  const [lateJoinMidQuestion, setLateJoinMidQuestion] = useState(false);
 
   const { playSound } = useQuestionSound('/sounds/question-alert.mp3');
   const { playCorrectSound, playWrongSound } = useAnswerOutcomeSounds();
+
+  // Receives the actual userId and sanitized username from the server after joining.
+  // Needed because join_lobby/join_solo may sanitize profane names without telling the client.
+  const joinedUserIdFromServerRef = useRef<string | null>(null);
 
   // Track processed resolutions to prevent flickering from duplicate events
   const processedResolutionIds = useRef<Set<string>>(new Set());
   const acknowledgedAnswerIds = useRef<Set<string>>(new Set());
   const currentQuestionRef = useRef<QuestionEvent | null>(null);
   const questionStateRef = useRef<QuestionState | null>(null);
+  const resolutionRef = useRef<ResolutionEvent | null>(null);
   const submittedAnswersRef = useRef<Record<string, 'YES' | 'NO'>>({});
   const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
 
   const beginLobbyEntry = useCallback((socket: ReturnType<typeof getSocketClient>) => {
-    const storedUserId = localStorage.getItem('msp_user_id');
-    const storedLobbyCode = localStorage.getItem('msp_lobby_code');
+    const storedSession = getStoredLobbySession();
     const normalizedCode = lobbyCode.toUpperCase();
 
-    if (storedUserId && storedLobbyCode?.toUpperCase() === normalizedCode) {
-      socket.reconnectLobby(storedUserId);
+    if (storedSession && storedSession.lobbyCode.toUpperCase() === normalizedCode) {
+      // Bypass the SocketClient-level dedupe so React Strict Mode's double-invoke
+      // (and any other legitimate remount) always re-sends reconnect_lobby.
+      // SessionResume keeps its own 1.5 s + 2 s guards to prevent rapid-fire duplicates.
+      socket.reconnectLobby(storedSession.userId, { dedupeWindowMs: 0 });
       return;
     }
 
-    if (storedUserId) {
-      localStorage.removeItem('msp_user_id');
-      localStorage.removeItem('msp_lobby_code');
+    if (storedSession) {
+      clearLobbySession();
     }
 
     socket.lookupLobby(lobbyCode);
@@ -115,6 +141,10 @@ export default function GamePage() {
   useEffect(() => {
     questionStateRef.current = questionState;
   }, [questionState]);
+
+  useEffect(() => {
+    resolutionRef.current = resolution;
+  }, [resolution]);
 
   useEffect(() => {
     submittedAnswersRef.current = submittedAnswers;
@@ -139,12 +169,16 @@ export default function GamePage() {
         ? question.triggeredAt
         : new Date(question.triggeredAt).toISOString();
 
-      // Use server's answerDeadline if available, fallback to client calculation
-      const answerDeadline = question.answerDeadline
-        ? (typeof question.answerDeadline === 'string'
-            ? question.answerDeadline
-            : new Date(question.answerDeadline).toISOString())
-        : undefined;
+      // Use server's answerDeadline if available, fallback to trigger math when LIVE
+      const answerDeadline = resolveAnswerDeadline(
+        question.answerDeadline
+          ? (typeof question.answerDeadline === 'string'
+              ? question.answerDeadline
+              : new Date(question.answerDeadline).toISOString())
+          : undefined,
+        triggeredAt,
+        question.state
+      ) ?? undefined;
 
       return {
         instanceId: question.id,
@@ -162,10 +196,23 @@ export default function GamePage() {
 
     setQuestionState(question.state);
     setSuggestedStatKeys(question.suggestedStatKeys ?? []);
-    setResolution(null);
+    markQuestionAlertHandled(question.id);
+    // Only clear the resolution panel when hydrating a still-active question.
+    if (UNRESOLVED_QUESTION_STATES.includes(question.state)) {
+      setResolution(null);
+    }
     if (question.state !== 'LIVE') {
       setIsProcessingAnswer(false);
     }
+  });
+
+  const restoreResolutionFromLobby = useEffectEvent((latestResolution: ResolutionEvent) => {
+    processedResolutionIds.current.add(latestResolution.instanceId);
+    setCurrentQuestion(null);
+    setSuggestedStatKeys([]);
+    setIsProcessingAnswer(false);
+    setResolution(latestResolution);
+    setQuestionState('RESOLVED');
   });
 
   const handleSocketError = useEffectEvent(({ message, code }: ServerErrorEvent) => {
@@ -176,10 +223,14 @@ export default function GamePage() {
       || normalizedMessage.includes('session expired');
 
     if (isSessionExpired) {
-      localStorage.removeItem('msp_user_id');
-      localStorage.removeItem('msp_lobby_code');
+      const kickedUserId = localStorage.getItem('msp_user_id');
+      if (kickedUserId) {
+        stashInactiveKickRestore(kickedUserId, lobbyCode);
+      }
+      clearLobbySession();
+      setLobbyState(null);
       setShowJoinForm(true);
-      setConnectionNotice('Enter your driver name to rejoin this session.');
+      setConnectionNotice('You were away for a while. Re-enter your driver name to restore your score.');
       return;
     }
 
@@ -219,6 +270,7 @@ export default function GamePage() {
   useEffect(() => {
     const refreshPresence = () => {
       if (document.visibilityState === 'hidden') {
+        getSocketClient().sendPresencePing();
         return;
       }
 
@@ -229,9 +281,10 @@ export default function GamePage() {
       }
 
       const socket = getSocketClient();
-      socket.connect();
-      socket.reconnectLobby(storedUserId, { dedupeWindowMs: 500 });
-      socket.sendPresencePing();
+      if (!socket.isConnected()) {
+        setConnectionNotice('Reconnecting to live race server…');
+      }
+      socket.resumeAfterBackground();
     };
 
     document.addEventListener('visibilitychange', refreshPresence);
@@ -242,6 +295,27 @@ export default function GamePage() {
       window.removeEventListener('focus', refreshPresence);
     };
   }, [lobbyCode]);
+
+  useEffect(() => {
+    if (isSocketConnected) {
+      setShowReconnecting(false);
+      return undefined;
+    }
+
+    if (document.visibilityState === 'hidden') {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState === 'visible' && !getSocketClient().isConnected()) {
+        setShowReconnecting(true);
+      }
+    }, 1500);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isSocketConnected]);
 
   useEffect(() => {
     const socket = getSocketClient();
@@ -258,15 +332,22 @@ export default function GamePage() {
           setShowJoinForm(true);
         }
       }),
-      socket.on('disconnected', () => {
+      socket.on('disconnected', ({ hidden }: { reason?: string; hidden?: boolean }) => {
         setIsSocketConnected(false);
-        setConnectionNotice('Connection lost. Reconnecting to live race server…');
+        if (!hidden && document.visibilityState === 'visible') {
+          setConnectionNotice('Connection lost. Reconnecting to live race server…');
+        }
         setIsProcessingAnswer(false);
       }),
       socket.on('connection_error', ({ message }: { message: string }) => {
         setIsSocketConnected(false);
         setConnectionNotice(message);
         setIsProcessingAnswer(false);
+      }),
+      socket.on(SERVER_EVENTS.JOIN_RESULT, (data: { userId: string; username: string }) => {
+        // Server confirmed the actual userId and (possibly sanitized) username after a join.
+        joinedUserIdFromServerRef.current = data.userId;
+        localStorage.setItem('msp_username', data.username);
       }),
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);
@@ -275,24 +356,69 @@ export default function GamePage() {
         setIsJoining(false);
 
         const storedUsername = localStorage.getItem('msp_username');
-        const joinedUser = state.players.find(
-          (player) => player.username === joinUsernameRef.current.trim() || player.username === storedUsername
-        );
+        // Prefer matching by userId from join_result so sanitized usernames always resolve correctly.
+        const joinedUser = joinedUserIdFromServerRef.current
+          ? state.players.find((player) => player.id === joinedUserIdFromServerRef.current)
+          : state.players.find(
+              (player) => player.username === joinUsernameRef.current.trim() || player.username === storedUsername
+            );
+
+        joinedUserIdFromServerRef.current = null;
+
         if (joinedUser) {
-          localStorage.setItem('msp_user_id', joinedUser.id);
           localStorage.setItem('msp_username', joinedUser.username);
-          localStorage.setItem('msp_lobby_code', state.code);
+          saveLobbySession({
+            userId: joinedUser.id,
+            username: joinedUser.username,
+            lobbyCode: state.code,
+            lobbyStatus: state.status === 'waiting' ? 'waiting' : 'active',
+          });
+          clearInactiveKickRestore();
+        }
+
+        // Detect late-join during an active LIVE question — show waiting state instead of
+        // the question card so the player doesn't get only a few seconds to answer.
+        const myId = joinedUser?.id ?? localStorage.getItem('msp_user_id');
+        const me = state.players.find((p) => p.id === myId);
+        if (
+          me?.joinedAtLap &&
+          me.joinedAtLap > 1 &&
+          state.currentQuestion &&
+          state.currentQuestion.state === 'LIVE'
+        ) {
+          setLateJoinMidQuestion(true);
         }
         if (state.currentQuestion) {
+          const serverQuestion = state.currentQuestion;
+
+          // Server keeps currentQuestion through EXPLAINED (~10s). Reconnecting on
+          // tab focus must not hydrate that as an active question — it clears the
+          // resolution panel the user already received in the background.
+          if (POST_RESOLUTION_QUESTION_STATES.includes(serverQuestion.state)) {
+            if (state.latestResolution) {
+              restoreResolutionFromLobby(state.latestResolution);
+            } else {
+              setCurrentQuestion(null);
+              setSuggestedStatKeys([]);
+              setIsProcessingAnswer(false);
+            }
+            return;
+          }
+
           const current = currentQuestionRef.current;
           const currentState = questionStateRef.current;
-          const hasRealtimeActiveQuestion = Boolean(
+          // Only skip hydration when local state has a DIFFERENT, still-active
+          // question — meaning real-time events are already ahead of this snapshot.
+          // If the instanceIds match, or local has no active question, always
+          // hydrate so a reconnect never leaves the client stuck on stale state.
+          const hasConflictingLocalQuestion = Boolean(
             current
             && currentState
-            && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(currentState)
+            && UNRESOLVED_QUESTION_STATES.includes(currentState)
+            && current.instanceId !== serverQuestion.id
           );
 
-          if (!hasRealtimeActiveQuestion || current?.instanceId === state.currentQuestion.id) {
+          if (!hasConflictingLocalQuestion) {
             hydrateQuestionFromLobby(state);
           }
           return;
@@ -305,17 +431,17 @@ export default function GamePage() {
             activeInstanceId
             && activeInstanceId !== state.latestResolution.instanceId
             && activeState
-            && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(activeState)
+            && UNRESOLVED_QUESTION_STATES.includes(activeState)
           );
 
           if (hasConflictingActiveQuestion) {
             return;
           }
 
-          if (!processedResolutionIds.current.has(state.latestResolution.instanceId)) {
-            processedResolutionIds.current.add(state.latestResolution.instanceId);
-            setResolution(state.latestResolution);
-            setQuestionState('RESOLVED');
+          const alreadyShowingThisResolution = resolutionRef.current?.instanceId
+            === state.latestResolution.instanceId;
+          if (!alreadyShowingThisResolution) {
+            restoreResolutionFromLobby(state.latestResolution);
           }
         }
       }),
@@ -335,25 +461,37 @@ export default function GamePage() {
         setReportError(null);
         setReportNote('');
         setReportReason('WRONG_ANSWER');
+        // New question arrived — this one they see from the start, clear late-join gate
+        setLateJoinMidQuestion(false);
 
-        playSound();
+        // Guard against playing the sound twice: reconnect catch-up re-sends
+        // question_event for the already-active question, but the user already
+        // heard it the first time (or saw it hydrated from lobby_state).
+        if (hasQuestionAlertHandled(event.instanceId)) {
+          return;
+        }
+
+        const isForeground = document.visibilityState === 'visible' && document.hasFocus();
+        if (isForeground) {
+          markQuestionAlertHandled(event.instanceId);
+          playSound();
+        }
       }),
       socket.on(
         SERVER_EVENTS.QUESTION_STATE,
         (data: QuestionStateEvent) => {
           setQuestionState(data.state);
-          if (data.answerDeadline) {
-            setCurrentQuestion((current) => {
-              if (!current || current.instanceId !== data.instanceId) {
-                return current;
-              }
+          setCurrentQuestion((current) => {
+            if (!current || current.instanceId !== data.instanceId) {
+              return current;
+            }
 
-              return {
-                ...current,
-                answerDeadline: data.answerDeadline ?? current.answerDeadline,
-              };
-            });
-          }
+            return {
+              ...current,
+              state: data.state,
+              answerDeadline: data.answerDeadline ?? current.answerDeadline,
+            };
+          });
           if (data.state !== 'LIVE') {
             setIsProcessingAnswer(false);
           }
@@ -401,7 +539,7 @@ export default function GamePage() {
         const hasUnresolvedQuestion = Boolean(
           activeQuestion
           && activeState
-          && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(activeState)
+          && UNRESOLVED_QUESTION_STATES.includes(activeState)
           && activeQuestion.instanceId !== event.instanceId
         );
 
@@ -409,9 +547,11 @@ export default function GamePage() {
           return;
         }
 
-        // Deduplicate: skip if already processed this resolution
-        if (processedResolutionIds.current.has(event.instanceId)) {
-          console.log(`[RESOLUTION] Skipping duplicate for ${event.instanceId}`);
+        const alreadyShowingThisResolution = resolutionRef.current?.instanceId === event.instanceId;
+        const isDuplicateEvent = processedResolutionIds.current.has(event.instanceId);
+
+        // Deduplicate replays, but re-apply if the UI lost resolution (tab-focus reconnect).
+        if (isDuplicateEvent && alreadyShowingThisResolution) {
           return;
         }
         processedResolutionIds.current.add(event.instanceId);
@@ -428,14 +568,16 @@ export default function GamePage() {
         setReportNote('');
         setReportReason('WRONG_ANSWER');
 
-        // Check if user submitted an answer and play appropriate sound
-        const userAnswer = submittedAnswersRef.current[event.instanceId];
-        if (userAnswer) {
-          if (userAnswer === event.correctAnswer) {
-            setLocalCorrectAnswers((prev) => prev + 1);
-            playCorrectSound();
-          } else {
-            playWrongSound();
+        // Check if user submitted an answer and play appropriate sound (first delivery only)
+        if (!isDuplicateEvent) {
+          const userAnswer = submittedAnswersRef.current[event.instanceId];
+          if (userAnswer) {
+            if (userAnswer === event.correctAnswer) {
+              setLocalCorrectAnswers((prev) => prev + 1);
+              playCorrectSound();
+            } else {
+              playWrongSound();
+            }
           }
         }
       }),
@@ -452,11 +594,12 @@ export default function GamePage() {
       socket.on(SERVER_EVENTS.FEED_STATUS, ({ stalled }: { stalled: boolean }) => {
         setFeedStalled(stalled);
       }),
-      socket.on(SERVER_EVENTS.PLAYER_JOINED, (data: { userId: string; username: string }) => {
+      socket.on(SERVER_EVENTS.PLAYER_JOINED, (data: { userId: string; username: string; joinedAtLap?: number }) => {
         setLobbyState((prev) => (prev ? applyPlayerJoined(prev, data) : prev));
       }),
       socket.on(SERVER_EVENTS.PLAYER_LEFT, (data: { userId: string }) => {
         setLobbyState((prev) => (prev ? applyPlayerLeft(prev, data) : prev));
+        setLeaderboard((prev) => prev.filter((entry) => entry.userId !== data.userId));
       }),
       socket.on(SERVER_EVENTS.PLAYER_DISCONNECTED, (data: { userId: string }) => {
         setLobbyState((prev) => (prev ? applyPlayerDisconnected(prev, data) : prev));
@@ -472,9 +615,14 @@ export default function GamePage() {
         handleSocketError(payload);
       }),
       socket.on(SERVER_EVENTS.PRESENCE_EXPIRED, () => {
-        localStorage.removeItem('msp_user_id');
-        localStorage.removeItem('msp_lobby_code');
-        router.push('/');
+        const kickedUserId = localStorage.getItem('msp_user_id');
+        if (kickedUserId) {
+          stashInactiveKickRestore(kickedUserId, lobbyCode);
+        }
+        clearLobbySession();
+        setLobbyState(null);
+        setShowJoinForm(true);
+        setConnectionNotice('You were away for a while. Re-enter your driver name to restore your score.');
       }),
     ];
 
@@ -567,21 +715,36 @@ export default function GamePage() {
     }
   }, [currentUserId, isSubmittingReport, reportNote, reportReason, resolution]);
 
+  const handleShareLobby = useCallback(async () => {
+    const shareUrl = lobbyState?.shareUrl ?? `${window.location.origin}/lobby/${lobbyCode}`;
+    try {
+      const result = await shareLobbyLink({ url: shareUrl, code: lobbyCode });
+      if (result === 'cancelled') return;
+      setShareLinkStatus(result);
+      setTimeout(() => setShareLinkStatus(null), 2500);
+    } catch {
+      setError('Could not share. Try copying the code manually.');
+    }
+  }, [lobbyCode, lobbyState?.shareUrl]);
+
   const handleLeaveSession = useCallback(async () => {
     setIsLeaving(true);
     try {
+      const userId = localStorage.getItem('msp_user_id');
+      if (userId && lobbyCode) {
+        stashInactiveKickRestore(userId, lobbyCode);
+      }
       await new Promise<void>((resolve) => {
         getSocketClient().leaveLobby();
         // Give socket time to send event
         setTimeout(resolve, 300);
       });
     } finally {
-      localStorage.removeItem('msp_user_id');
-      localStorage.removeItem('msp_lobby_code');
+      clearLobbySession();
       getSocketClient().disconnect();
       router.push('/');
     }
-  }, [router]);
+  }, [router, lobbyCode]);
 
   const currentSubmittedAnswer = currentQuestion
     ? submittedAnswers[currentQuestion.instanceId] ?? null
@@ -592,7 +755,7 @@ export default function GamePage() {
   const hasActiveQuestion = Boolean(
     currentQuestion
     && questionState
-    && ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'].includes(questionState)
+    && UNRESOLVED_QUESTION_STATES.includes(questionState)
   );
   const raceHasEnded = Boolean(
     hasRaceCompleted
@@ -608,6 +771,25 @@ export default function GamePage() {
     currentQuestion && ['TRIGGERED', 'LOCKED', 'ACTIVE'].includes(questionState ?? '')
   );
 
+  const notificationsEnabled = Boolean(
+    lobbyState
+    && !showJoinForm
+    && lobbyState.status === 'active'
+    && currentUserId
+  );
+
+  const {
+    showPrompt: showNotificationPrompt,
+    showPopUpHint: showNotificationPopUpHint,
+    enableNotifications,
+    dismissPrompt: dismissNotificationPrompt,
+  } = useGameNotifications({
+    lobbyCode,
+    enabled: notificationsEnabled,
+    playerId: currentUserId ?? undefined,
+    playQuestionSound: playSound,
+  });
+
   const handleJoinSession = useCallback(() => {
     if (!joinUsername.trim()) {
       setError('Please enter a username');
@@ -617,17 +799,19 @@ export default function GamePage() {
     setError(null);
     setIsJoining(true);
     localStorage.setItem('msp_username', joinUsername.trim());
-    getSocketClient().joinLobby(lobbyCode, joinUsername.trim());
+    getSocketClient().joinLobby(lobbyCode, joinUsername.trim(), {
+      restoreUserId: getInactiveKickRestore(lobbyCode),
+    });
   }, [joinUsername, lobbyCode]);
 
-  if (showJoinForm && !lobbyState) {
+  if (showJoinForm) {
     return (
       <main className="app-bg pad-safe-top pad-safe-bottom flex min-h-dvh items-center justify-center p-5">
         <Card tone="elevated" className="w-full max-w-md animate-fade-up rounded-[var(--radius-lg)]">
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-accent)]">Join the race</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-accent)]">Rejoin the race</p>
           <h1 className="mt-2 font-display text-5xl font-bold uppercase tracking-tight">{lobbyCode}</h1>
           <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
-            This race is already underway. Enter your driver name to jump in.
+            {connectionNotice ?? 'This race is already underway. Enter your driver name to jump back in.'}
           </p>
           <Input
             id="game-join-name"
@@ -678,6 +862,32 @@ export default function GamePage() {
             <div className="flex items-center gap-2">
               <Brand variant="mark" className="h-8 w-8" />
               {lobbyState.isSimulation && <Chip tone="info">Sim</Chip>}
+              <button
+                type="button"
+                onClick={handleShareLobby}
+                aria-label={`Share lobby link for ${lobbyCode}`}
+                className="group inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[var(--radius-pill)] border border-[var(--color-border)]/70 px-2.5 transition-colors hover:border-[var(--color-accent)]/40 hover:bg-[var(--color-muted)]/40 active:scale-[0.98]"
+              >
+                {shareLinkStatus === 'shared' ? (
+                  <span className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-[var(--color-go)]">
+                    Shared
+                  </span>
+                ) : shareLinkStatus === 'copied' ? (
+                  <span className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-[var(--color-go)]">
+                    Copied
+                  </span>
+                ) : (
+                  <>
+                    <span className="text-[0.62rem] font-semibold uppercase tracking-[0.2em] text-[var(--color-faint-fg)] transition-colors group-hover:text-[var(--color-muted-fg)]">
+                      Share
+                    </span>
+                    <span className="h-2.5 w-px bg-[var(--color-border)]" aria-hidden />
+                    <span className="font-mono text-[0.7rem] font-bold tracking-[0.18em] text-[var(--color-muted-fg)] transition-colors group-hover:text-[var(--color-fg)]">
+                      {lobbyCode}
+                    </span>
+                  </>
+                )}
+              </button>
             </div>
             <Button variant="ghost" size="sm" onClick={handleLeaveSession} disabled={isLeaving}>
               {isLeaving ? 'Leaving…' : 'Leave'}
@@ -688,7 +898,7 @@ export default function GamePage() {
               snapshot={raceSnapshot}
               raceCompletedLap={raceCompletedLap}
               feedStalled={feedStalled}
-              connected={isSocketConnected}
+              connected={isSocketConnected && !showReconnecting}
               highlightTrackStatus={suggestedStatKeys.includes('TRACK_STATUS')}
             />
           </div>
@@ -700,6 +910,33 @@ export default function GamePage() {
           <p className="rounded-[var(--radius-sm)] bg-[var(--color-muted)] px-4 py-2.5 text-sm text-[var(--color-muted-fg)]">
             {connectionNotice}
           </p>
+        </div>
+      )}
+
+      {showNotificationPrompt && (
+        <div className="mx-auto w-full max-w-5xl px-4 pt-3">
+          <div className="flex flex-col gap-3 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-[var(--color-fg)]">
+              Get alerted when you switch apps — we&apos;ll notify you when a new question appears.
+            </p>
+            <div className="flex shrink-0 gap-2">
+              <Button type="button" variant="ghost" size="sm" onClick={dismissNotificationPrompt}>
+                Not now
+              </Button>
+              <Button type="button" size="sm" onClick={() => void enableNotifications()}>
+                Enable alerts
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showNotificationPopUpHint && (
+        <div className="mx-auto w-full max-w-5xl px-4 pt-3">
+          <div className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+            <p className="text-sm font-semibold text-[var(--color-fg)]">Alerts enabled</p>
+            <NotificationPopUpHint visible />
+          </div>
         </div>
       )}
 
@@ -817,24 +1054,47 @@ export default function GamePage() {
               );
             }
 
+            // 3a. Late joiner arrived while a LIVE question was already running
+            if (lateJoinMidQuestion && currentQuestion && questionState === 'LIVE') {
+              return (
+                <Card key="late-join-waiting" tone="elevated" className="py-14 text-center md:py-20 animate-pop-in">
+                  <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
+                    <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+                  </span>
+                  <p className="font-display text-3xl font-bold uppercase md:text-4xl">
+                    Waiting for next question
+                  </p>
+                  <p className="mx-auto mt-3 max-w-sm text-sm text-[var(--color-muted-fg)]">
+                    A question is already in progress. You&apos;ll be able to answer from the very
+                    next one — hang tight.
+                  </p>
+                </Card>
+              );
+            }
+
             // 3. Live question
             if (currentQuestion && questionState === 'LIVE') {
+              const answerDeadline = resolveAnswerDeadline(
+                currentQuestion.answerDeadline,
+                currentQuestion.triggeredAt,
+                questionState
+              );
+
               return (
                 <Card
                   key={`question-live-${currentQuestion.instanceId}`}
                   tone="elevated"
                   className="relative animate-pop-in"
                 >
-                  <div className="mb-5 flex justify-center">
-                    <CountdownTimer
-                      deadline={
-                        currentQuestion.answerDeadline
-                          ?? new Date(new Date(currentQuestion.triggeredAt).getTime() + 45_000).toISOString()
-                      }
-                      totalDurationMs={45_000}
-                      size="lg"
-                    />
-                  </div>
+                  {answerDeadline && (
+                    <div className="mb-5 flex justify-center">
+                      <CountdownTimer
+                        deadline={answerDeadline}
+                        totalDurationMs={ANSWER_WINDOW_MS}
+                        size="lg"
+                      />
+                    </div>
+                  )}
                   <QuestionCard
                     questionText={currentQuestion.questionText}
                     category={currentQuestion.category}
@@ -895,7 +1155,7 @@ export default function GamePage() {
                     : 'Questions appear as the race throws up the right moments. Stay sharp.'}
                 </p>
                 <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
-                  {lobbyState.questionCount}/10 questions
+                  Questions asked: {lobbyState.questionCount}
                 </p>
               </Card>
             );
@@ -912,7 +1172,7 @@ export default function GamePage() {
 
           {/* Leaderboard on mobile */}
           <div className="mt-5 lg:hidden">
-            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} />
+            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} players={lobbyState.players} />
           </div>
         </div>
 
@@ -924,7 +1184,7 @@ export default function GamePage() {
             highlighted={tireStatsHighlighted}
           />
           <div className="sticky top-[150px]">
-            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} />
+            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} players={lobbyState.players} />
           </div>
         </aside>
       </div>

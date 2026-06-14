@@ -2,7 +2,7 @@ import type { LobbyState } from './types';
 
 export function applyPlayerJoined(
   state: LobbyState,
-  data: { userId: string; username: string }
+  data: { userId: string; username: string; joinedAtLap?: number }
 ): LobbyState {
   if (state.players.some((player) => player.id === data.userId)) {
     return applyPlayerReconnected(state, { userId: data.userId });
@@ -12,7 +12,13 @@ export function applyPlayerJoined(
     ...state,
     players: [
       ...state.players,
-      { id: data.userId, username: data.username, isHost: false, connected: true },
+      { 
+        id: data.userId, 
+        username: data.username, 
+        isHost: false, 
+        connected: true,
+        joinedAtLap: data.joinedAtLap,
+      },
     ],
   };
 }
@@ -24,6 +30,7 @@ export function applyPlayerLeft(
   return {
     ...state,
     players: state.players.filter((player) => player.id !== data.userId),
+    leaderboard: state.leaderboard.filter((entry) => entry.userId !== data.userId),
   };
 }
 

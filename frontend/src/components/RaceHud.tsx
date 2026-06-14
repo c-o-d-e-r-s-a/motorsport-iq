@@ -20,6 +20,7 @@ export default function RaceHud({
   highlightTrackStatus = false,
 }: RaceHudProps) {
   const hasCompleted = raceCompletedLap !== null;
+  const lapToShow = snapshot?.lapNumber ?? null;
 
   return (
     <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -32,7 +33,7 @@ export default function RaceHud({
             <span className="font-bold text-[var(--color-fg)]">
               {hasCompleted
                 ? raceCompletedLap
-                : `${snapshot.lapNumber}${snapshot.totalLaps ? `/${snapshot.totalLaps}` : ''}`}
+                : `${lapToShow}${snapshot.totalLaps ? `/${snapshot.totalLaps}` : ''}`}
             </span>
           </Chip>
 

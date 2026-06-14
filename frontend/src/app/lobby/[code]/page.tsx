@@ -18,6 +18,15 @@ import {
 } from '@/lib/sessionDisplay';
 import { Button, Brand, Card, Chip, Dialog, Input } from '@/components/ui';
 import { cn } from '@/lib/cn';
+import {
+  clearInactiveKickRestore,
+  clearLobbySession,
+  getInactiveKickRestore,
+  getStoredLobbySession,
+  saveLobbySession,
+  stashInactiveKickRestore,
+} from '@/lib/sessionPersistence';
+import { resolveJoinedPlayer } from '@/lib/resolveJoinedPlayer';
 
 export default function LobbyPage() {
   const params = useParams();
@@ -43,22 +52,21 @@ export default function LobbyPage() {
   const [showJoinForm, setShowJoinForm] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
   const joinUsernameRef = useRef(joinUsername);
+  const joinedUserIdRef = useRef<string | null>(null);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
 
   const beginLobbyEntry = useCallback((socket: ReturnType<typeof getSocketClient>) => {
-    const storedUserId = localStorage.getItem('msp_user_id');
-    const storedLobbyCode = localStorage.getItem('msp_lobby_code');
+    const storedSession = getStoredLobbySession();
     const normalizedCode = lobbyCode.toUpperCase();
 
-    if (storedUserId && storedLobbyCode?.toUpperCase() === normalizedCode) {
-      socket.reconnectLobby(storedUserId);
+    if (storedSession && storedSession.lobbyCode.toUpperCase() === normalizedCode) {
+      socket.reconnectLobby(storedSession.userId, { dedupeWindowMs: 0 });
       return;
     }
 
-    if (storedUserId) {
-      localStorage.removeItem('msp_user_id');
-      localStorage.removeItem('msp_lobby_code');
+    if (storedSession) {
+      clearLobbySession();
     }
 
     socket.lookupLobby(lobbyCode);
@@ -84,12 +92,18 @@ export default function LobbyPage() {
           setIsLoading(false);
         }
       }),
-      socket.on('disconnected', () => {
-        setIsReconnecting(true);
+      socket.on('disconnected', ({ hidden }: { reason?: string; hidden?: boolean }) => {
+        if (!hidden && document.visibilityState === 'visible') {
+          setIsReconnecting(true);
+        }
       }),
       socket.on('connection_error', ({ message }: { message: string }) => {
         setIsReconnecting(true);
         setConnectionNotice(message);
+      }),
+      socket.on(SERVER_EVENTS.JOIN_RESULT, (data: { userId: string; username: string }) => {
+        joinedUserIdRef.current = data.userId;
+        localStorage.setItem('msp_username', data.username);
       }),
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);
@@ -97,21 +111,26 @@ export default function LobbyPage() {
         setShowJoinForm(false);
         setIsJoining(false);
 
-        const storedUsername = localStorage.getItem('msp_username');
-        const joinedUser = state.players.find(
-          (player) => player.username === joinUsernameRef.current.trim() || player.username === storedUsername
-        );
+        const joinedUser = resolveJoinedPlayer(state, {
+          userId: joinedUserIdRef.current,
+          typedUsername: joinUsernameRef.current,
+        });
+        joinedUserIdRef.current = null;
         if (joinedUser) {
-          localStorage.setItem('msp_user_id', joinedUser.id);
-          localStorage.setItem('msp_username', joinedUser.username);
-          localStorage.setItem('msp_lobby_code', state.code);
+          saveLobbySession({
+            userId: joinedUser.id,
+            username: joinedUser.username,
+            lobbyCode: state.code,
+            lobbyStatus: state.status === 'waiting' ? 'waiting' : 'active',
+          });
+          clearInactiveKickRestore();
         }
 
         if (state.status === 'active') {
           router.push(`/game/${state.code}`);
         }
       }),
-      socket.on(SERVER_EVENTS.PLAYER_JOINED, (data: { userId: string; username: string }) => {
+      socket.on(SERVER_EVENTS.PLAYER_JOINED, (data: { userId: string; username: string; joinedAtLap?: number }) => {
         setLobbyState((prev) => (prev ? applyPlayerJoined(prev, data) : prev));
       }),
       socket.on(SERVER_EVENTS.PLAYER_LEFT, (data: { userId: string }) => {
@@ -157,11 +176,15 @@ export default function LobbyPage() {
           || message.toLowerCase().includes('session expired');
 
         if (isSessionExpired) {
-          localStorage.removeItem('msp_user_id');
-          localStorage.removeItem('msp_lobby_code');
+          const kickedUserId = localStorage.getItem('msp_user_id');
+          if (kickedUserId) {
+            stashInactiveKickRestore(kickedUserId, lobbyCode);
+          }
+          clearLobbySession();
+          setLobbyState(null);
           setShowJoinForm(true);
           setIsLoading(false);
-          setConnectionNotice('Enter your driver name to join this lobby.');
+          setConnectionNotice('You were away for a while. Re-enter your driver name to restore your score.');
           return;
         }
 
@@ -171,9 +194,15 @@ export default function LobbyPage() {
         setIsLoading(false);
       }),
       socket.on(SERVER_EVENTS.PRESENCE_EXPIRED, () => {
-        localStorage.removeItem('msp_user_id');
-        localStorage.removeItem('msp_lobby_code');
-        router.push('/');
+        const kickedUserId = localStorage.getItem('msp_user_id');
+        if (kickedUserId) {
+          stashInactiveKickRestore(kickedUserId, lobbyCode);
+        }
+        clearLobbySession();
+        setLobbyState(null);
+        setShowJoinForm(true);
+        setIsLoading(false);
+        setConnectionNotice('You were away for a while. Re-enter your driver name to restore your score.');
       }),
     ];
 
@@ -208,6 +237,7 @@ export default function LobbyPage() {
   useEffect(() => {
     const refreshPresence = () => {
       if (document.visibilityState === 'hidden') {
+        getSocketClient().sendPresencePing();
         return;
       }
 
@@ -217,10 +247,7 @@ export default function LobbyPage() {
         return;
       }
 
-      const socket = getSocketClient();
-      socket.connect();
-      socket.reconnectLobby(storedUserId, { dedupeWindowMs: 500 });
-      socket.sendPresencePing();
+      getSocketClient().resumeAfterBackground();
     };
 
     document.addEventListener('visibilitychange', refreshPresence);
@@ -261,15 +288,20 @@ export default function LobbyPage() {
     setError(null);
     setIsJoining(true);
     localStorage.setItem('msp_username', joinUsername.trim());
-    getSocketClient().joinLobby(lobbyCode, joinUsername.trim());
+    getSocketClient().joinLobby(lobbyCode, joinUsername.trim(), {
+      restoreUserId: getInactiveKickRestore(lobbyCode),
+    });
   }, [joinUsername, lobbyCode]);
 
   const handleLeaveLobby = useCallback(() => {
-    localStorage.removeItem('msp_user_id');
-    localStorage.removeItem('msp_lobby_code');
+    const userId = localStorage.getItem('msp_user_id');
+    if (userId && lobbyCode) {
+      stashInactiveKickRestore(userId, lobbyCode);
+    }
+    clearLobbySession();
     getSocketClient().leaveLobby();
     router.push('/');
-  }, [router]);
+  }, [router, lobbyCode]);
 
   const handleStartGame = useCallback((sessionKey?: string) => {
     const key = sessionKey ?? selectedSession;
@@ -335,6 +367,11 @@ export default function LobbyPage() {
     || (Boolean(liveSessionInList) && displaySessions.length === 1);
   const preRaceOnlyMode = isPreRacePlayableWindow(sessions)
     || (Boolean(preRaceSessionInList) && displaySessions.length === 1);
+  const isPublicWaiting = Boolean(lobbyState?.isPublic && lobbyState.status === 'waiting');
+  const publicWaitingSession = preRaceSessionInList
+    ?? displaySessions.find((session) => String(session.session_key) === lobbyState?.sessionId)
+    ?? sessions.find((session) => String(session.session_key) === lobbyState?.sessionId)
+    ?? null;
 
   const years = useMemo(() => {
     const currentYear = new Date().getFullYear();
@@ -355,14 +392,14 @@ export default function LobbyPage() {
     );
   }
 
-  if (showJoinForm && !lobbyState) {
+  if (showJoinForm) {
     return (
       <main className="app-bg pad-safe-top pad-safe-bottom flex min-h-dvh items-center justify-center p-5">
         <Card tone="elevated" className="w-full max-w-md animate-fade-up rounded-[var(--radius-lg)]">
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-accent)]">Join lobby</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-accent)]">Rejoin lobby</p>
           <h1 className="mt-2 font-display text-5xl font-bold uppercase tracking-tight">{lobbyCode}</h1>
           <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
-            Enter your driver name to join. If the race is already live, you&apos;ll jump straight in.
+            {connectionNotice ?? 'Enter your driver name to join. If the race is already live, you\'ll jump straight in.'}
           </p>
           <Input
             id="join-name"
@@ -461,7 +498,7 @@ export default function LobbyPage() {
                 />
                 <p className="flex-1 truncate font-display text-lg font-semibold uppercase">{player.username}</p>
                 <div className="flex gap-1.5">
-                  {player.isHost && <Chip tone="accent">Host</Chip>}
+                  {player.isHost && !lobbyState.isPublic && <Chip tone="accent">Host</Chip>}
                   {player.id === currentUserId && <Chip tone="neutral">You</Chip>}
                 </div>
               </div>
@@ -471,7 +508,32 @@ export default function LobbyPage() {
 
         {/* Session setup / standby */}
         <section className="animate-fade-up delay-2 mt-6">
-          {isHost ? (
+          {isPublicWaiting ? (
+            <div className="rounded-[var(--radius-lg)] border border-[var(--color-warn)]/40 bg-[rgba(255,196,0,0.08)] p-8 text-center">
+              <p className="font-display text-2xl font-semibold uppercase text-[var(--color-warn)]">
+                Race has not started yet
+              </p>
+              {publicWaitingSession ? (
+                <>
+                  <p className="mt-2 font-display text-lg font-semibold uppercase">
+                    {publicWaitingSession.location}
+                  </p>
+                  <p className="mt-1 text-sm text-[var(--color-muted-fg)]">
+                    {publicWaitingSession.session_name} · {publicWaitingSession.country_name}
+                  </p>
+                </>
+              ) : (
+                <p className="mt-2 text-sm text-[var(--color-muted-fg)]">
+                  Waiting for the session to go live…
+                </p>
+              )}
+              <p className="mt-4 text-sm text-[var(--color-muted-fg)]">
+                You&apos;re in the shared lobby with {lobbyState.players.length}{' '}
+                {lobbyState.players.length === 1 ? 'racer' : 'racers'}.
+                Everyone drops into the race automatically when lights go out.
+              </p>
+            </div>
+          ) : isHost ? (
             <>
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="font-display text-lg font-semibold uppercase tracking-wide">Pick a session</h2>
@@ -593,8 +655,8 @@ export default function LobbyPage() {
         </section>
       </div>
 
-      {/* Sticky start bar (host) */}
-      {isHost && (
+      {/* Sticky start bar (private lobby host only) */}
+      {isHost && !lobbyState.isPublic && (
         <div className="pad-safe-bottom fixed inset-x-0 bottom-0 z-20 border-t border-[var(--color-border)] bg-[var(--color-bg-2)]/90 px-5 pt-3 backdrop-blur">
           <div className="mx-auto max-w-3xl">
             <Button

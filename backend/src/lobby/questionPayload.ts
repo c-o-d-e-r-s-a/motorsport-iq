@@ -5,6 +5,7 @@ import type {
   QuestionEvent,
   QuestionInstanceState,
 } from '../types';
+import { computeLiveAnswerDeadlineFromTrigger } from './answerWindow';
 
 const UNRESOLVED_STATES: ReadonlySet<InstanceState> = new Set(['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE']);
 
@@ -34,9 +35,15 @@ export function buildQuestionEventPayload(
     suggestedStatKeys: instance.suggestedStatKeys ?? [],
   };
 
-  const answerDeadline = options.answerDeadline ?? instance.answerDeadline ?? null;
+  const answerDeadline = options.answerDeadline ?? instance.answerDeadline ?? (
+    instance.state === 'LIVE'
+      ? computeLiveAnswerDeadlineFromTrigger(instance.triggeredAt)
+      : null
+  );
   if (answerDeadline) {
-    payload.answerDeadline = answerDeadline.toISOString();
+    payload.answerDeadline = answerDeadline instanceof Date
+      ? answerDeadline.toISOString()
+      : answerDeadline;
   }
 
   return payload;

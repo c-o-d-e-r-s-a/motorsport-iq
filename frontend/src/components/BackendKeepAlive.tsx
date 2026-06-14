@@ -16,7 +16,7 @@ async function pingBackend(): Promise<void> {
 
 /**
  * Keeps the production Render backend warm while users have the app open.
- * Scheduled GitHub Actions pings cover idle periods (see keep-backend-warm.yml).
+ * cron-job.org pings cover idle periods when no production tab is open.
  */
 export function BackendKeepAlive() {
   useEffect(() => {

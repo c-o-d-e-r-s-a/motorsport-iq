@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import { Barlow_Condensed, Inter } from 'next/font/google';
 import { BackendKeepAlive } from '@/components/BackendKeepAlive';
+import { SessionResume } from '@/components/SessionResume';
 import { ThemeProvider } from '@/lib/theme/ThemeProvider';
 import Script from 'next/script';
 import './globals.css';
@@ -55,6 +56,7 @@ export default function RootLayout({
       <body className={`${inter.variable} ${barlowCondensed.variable} font-body antialiased`}>
         <ThemeProvider>
           <BackendKeepAlive />
+          <SessionResume />
           {children}
         </ThemeProvider>
         <Script

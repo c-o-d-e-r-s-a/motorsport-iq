@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useEffect, useState } from 'react';
+import { computeCountdownSeconds } from '@/lib/answerWindow';
 
 interface CountdownTimerProps {
   deadline: Date | string;
@@ -41,7 +42,7 @@ export default function CountdownTimer({
   }, [deadlineTime, onExpire]);
 
   const progress = Math.max(0, Math.min(1, timeRemaining / totalDurationMs));
-  const seconds = Math.ceil(timeRemaining / 1000);
+  const seconds = computeCountdownSeconds(timeRemaining, totalDurationMs);
   const isUrgent = seconds <= 10 && !isExpired;
 
   const dims = size === 'sm' ? 64 : size === 'md' ? 96 : 132;

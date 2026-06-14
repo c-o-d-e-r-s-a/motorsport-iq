@@ -1,18 +1,24 @@
 'use client';
 
 import { Card } from '@/components/ui';
-import type { LeaderboardEntry } from '@/lib/types';
+import type { LeaderboardEntry, PlayerState } from '@/lib/types';
 import { cn } from '@/lib/cn';
 
 interface LeaderboardProps {
   entries: LeaderboardEntry[];
   currentUserId?: string;
   maxEntries?: number;
+  players?: PlayerState[];
 }
 
 const RANK_ACCENT = ['#ffd400', '#cfd6e0', '#d98a4a'];
 
-export default function Leaderboard({ entries, currentUserId, maxEntries = 10 }: LeaderboardProps) {
+export default function Leaderboard({
+  entries,
+  currentUserId,
+  maxEntries = 10,
+  players,
+}: LeaderboardProps) {
   const sortedEntries = [...entries]
     .sort((a, b) => {
       if (b.points !== a.points) return b.points - a.points;
@@ -41,6 +47,10 @@ export default function Leaderboard({ entries, currentUserId, maxEntries = 10 }:
             const isCurrentUser = entry.userId === currentUserId;
             const medal = rank <= 3 ? RANK_ACCENT[rank - 1] : null;
 
+            const player = players?.find((p) => p.id === entry.userId);
+            const joinedAtLap = player?.joinedAtLap ?? entry.joinedAtLap;
+            const showJoinedBadge = joinedAtLap != null && joinedAtLap > 1;
+
             return (
               <li
                 key={entry.userId}
@@ -66,10 +76,17 @@ export default function Leaderboard({ entries, currentUserId, maxEntries = 10 }:
                     {entry.username}
                     {isCurrentUser && <span className="ml-1.5 text-[var(--color-accent)]">· you</span>}
                   </p>
-                  <p className="text-xs text-[var(--color-muted-fg)]">
-                    {entry.accuracy.toFixed(0)}% accuracy
-                    {entry.streak > 1 ? ` · ${entry.streak} streak` : ''}
-                  </p>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <p className="text-xs text-[var(--color-muted-fg)]">
+                      {entry.accuracy.toFixed(0)}% accuracy
+                      {entry.streak > 1 ? ` · ${entry.streak} streak` : ''}
+                    </p>
+                    {showJoinedBadge && (
+                      <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
+                        · Joined lap {joinedAtLap}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="shrink-0 text-right">
                   <span className="font-display text-xl font-bold leading-none">{entry.points}</span>

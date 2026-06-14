@@ -1,5 +1,5 @@
 import { OpenF1Client } from '../data/openf1Client';
-import { computeReplayEventDelayMs } from './sessionRuntimeBase';
+import { computeAbsoluteReplayDelayMs, computeReplayEventDelayMs } from './sessionRuntimeBase';
 import type { ReplayEvent } from './replayTimeline';
 
 describe('computeReplayEventDelayMs', () => {
@@ -36,6 +36,19 @@ describe('computeReplayEventDelayMs', () => {
     };
 
     expect(computeReplayEventDelayMs(current, next, 1)).toBe(0);
+  });
+
+  it('absolute replay delay compensates for elapsed wall time since start', () => {
+    const event: ReplayEvent = {
+      type: 'position',
+      timestamp: 5_000,
+      sequence: 0,
+      data: {} as ReplayEvent['data'],
+    };
+    const startedAt = Date.now() - 3_000;
+
+    expect(computeAbsoluteReplayDelayMs(event, 0, startedAt, 1)).toBe(2_000);
+    expect(computeAbsoluteReplayDelayMs(event, 0, startedAt, 10)).toBe(0);
   });
 });
 
@@ -150,6 +163,8 @@ describe('SimulatedLiveSessionRuntime scheduling', () => {
 
     expect(runtime.mode).toBe('live');
     expect(runtime.replaySpeed).toBeNull();
+
+    await jest.advanceTimersByTimeAsync(0);
 
     const scheduledDelays = setTimeoutSpy.mock.calls
       .map((call) => call[1])
