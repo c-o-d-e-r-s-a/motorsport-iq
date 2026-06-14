@@ -280,4 +280,14 @@ export const CLIENT_EVENTS = {
   GET_SESSIONS: 'get_sessions',
   LEAVE_LOBBY: 'leave_lobby',
   PRESENCE_PING: 'presence_ping',
+  REGISTER_PUSH_SUBSCRIPTION: 'register_push_subscription',
+  UNREGISTER_PUSH_SUBSCRIPTION: 'unregister_push_subscription',
 } as const;
+
+export interface PushSubscriptionPayload {
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+}

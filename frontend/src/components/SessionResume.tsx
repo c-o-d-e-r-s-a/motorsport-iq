@@ -39,9 +39,7 @@ export function SessionResume() {
     }
 
     const socket = getSocketClient();
-    socket.resumeFromBackground();
-    socket.reconnectLobby(session.userId);
-    socket.sendPresencePing();
+    socket.resumeAfterBackground();
   }, []);
 
   useEffect(() => {

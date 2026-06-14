@@ -1,0 +1,17 @@
+<svg width="192" height="192" viewBox="0 0 192 192" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Motorsport IQ mark — white-only alpha silhouette, ~20% padding -->
+  <g transform="translate(44 42) scale(0.46)">
+    <path
+      d="M36 44H104L120 68L136 44H204V196H166V100L123 160H116L74 101V196H36V44Z"
+      fill="#FFFFFF"
+    />
+    <path
+      d="M144 28H224"
+      stroke="#FFFFFF"
+      stroke-width="10"
+      stroke-linecap="square"
+    />
+    <circle cx="235" cy="178" r="59" fill="#FFFFFF" />
+    <rect x="282" y="44" width="52" height="152" fill="#FFFFFF" />
+  </g>
+</svg>

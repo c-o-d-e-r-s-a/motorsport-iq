@@ -37,7 +37,10 @@ describe('PresenceManager', () => {
 
   it('keeps default presence long enough for mobile app switching', async () => {
     const onExpire = jest.fn();
+    const activeRaceTimeoutMs = 3 * 60 * 60 * 1000;
     const manager = new PresenceManager({
+      inactivityTimeoutMs: activeRaceTimeoutMs,
+      maxInactivityTimeoutMs: activeRaceTimeoutMs,
       sweepIntervalMs: 1_000,
       onExpire,
     });

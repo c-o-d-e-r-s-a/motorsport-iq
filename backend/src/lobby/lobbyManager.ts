@@ -9,6 +9,7 @@ import { enrichLobbyState } from './shareUrl';
 import {
   archiveLeaderboardForInactivePlayer,
   restoreOrBootstrapLeaderboard,
+  type LeaderboardBootstrapResult,
 } from './leaderboardArchive';
 import { MIN_QUESTIONS_PER_RACE, MAX_QUESTIONS_PER_RACE } from '../engine/questionEngine';
 import type {
@@ -173,6 +174,25 @@ export async function createLobby(
 /**
  * Join an existing lobby
  */
+function normalizeJoinedAtLapForDisplay(joinedAtLap: number | null | undefined): number | undefined {
+  if (joinedAtLap == null || joinedAtLap <= 1) {
+    return undefined;
+  }
+
+  return joinedAtLap;
+}
+
+function resolveJoinedAtLapForJoin(
+  bootstrap: LeaderboardBootstrapResult,
+  requestedJoinedAtLap: number | null | undefined
+): number | null {
+  if (bootstrap.restored) {
+    return bootstrap.joinedAtLap;
+  }
+
+  return requestedJoinedAtLap ?? null;
+}
+
 export async function joinLobby(
   lobbyCode: string,
   username: string,
@@ -221,14 +241,18 @@ export async function joinLobby(
     throw new Error('Lobby is full');
   }
 
-  // Create user
+  // Create user — score restores keep their original join lap, not the rejoin lap.
+  const initialJoinedAtLap = options?.restoreUserId
+    ? null
+    : (options?.joinedAtLap ?? null);
+
   const { data: user, error: userError } = await supabase
     .from('users')
     .insert({
       username,
       lobby_id: lobby.id,
       is_host: false,
-      joined_at_lap: options?.joinedAtLap ?? null,
+      joined_at_lap: initialJoinedAtLap,
     })
     .select()
     .single();
@@ -240,7 +264,17 @@ export async function joinLobby(
   const bootstrap = await restoreOrBootstrapLeaderboard(lobby.id, user.id, {
     restoreUserId: options?.restoreUserId ?? null,
   });
-  const effectiveJoinedAtLap = bootstrap.joinedAtLap ?? options?.joinedAtLap ?? null;
+  const effectiveJoinedAtLap = resolveJoinedAtLapForJoin(bootstrap, options?.joinedAtLap);
+
+  if (effectiveJoinedAtLap !== initialJoinedAtLap) {
+    trackDbWrite('users.joined_at_lap');
+    await supabase
+      .from('users')
+      .update({ joined_at_lap: effectiveJoinedAtLap })
+      .eq('id', user.id);
+  }
+
+  const displayJoinedAtLap = normalizeJoinedAtLapForDisplay(effectiveJoinedAtLap);
 
   // Update in-memory state
   let lobbyState = lobbyStates.get(lobby.id);
@@ -253,7 +287,7 @@ export async function joinLobby(
       username,
       isHost: false,
       connected: true,
-      joinedAtLap: effectiveJoinedAtLap ?? undefined,
+      joinedAtLap: displayJoinedAtLap,
     });
     updateLeaderboardCache(lobby.id, user.id, {
       username,
@@ -264,6 +298,7 @@ export async function joinLobby(
       wrongAnswers: bootstrap.entry.wrongAnswers,
       questionsAnswered: bootstrap.entry.questionsAnswered,
       accuracy: bootstrap.entry.accuracy,
+      joinedAtLap: displayJoinedAtLap,
     });
     userLobbies.set(user.id, lobby.id);
   }
@@ -351,7 +386,7 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
       username: u.username,
       isHost: u.is_host,
       connected: true, // Assume connected on initial load
-      joinedAtLap: (u as any).joined_at_lap ?? undefined,
+      joinedAtLap: normalizeJoinedAtLapForDisplay((u as { joined_at_lap?: number | null }).joined_at_lap),
     })),
     currentQuestion: null, // Would need to fetch active question
     latestResolution: null,
@@ -371,7 +406,7 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
         wrongAnswers: lb.wrong_answers,
         questionsAnswered: lb.questions_answered,
         accuracy: lb.accuracy,
-        joinedAtLap: joinedAtLap != null && joinedAtLap > 1 ? joinedAtLap : undefined,
+        joinedAtLap: normalizeJoinedAtLapForDisplay(joinedAtLap),
       };
     }),
   };
@@ -562,7 +597,7 @@ export async function removePlayer(
 
   if (shouldDeleteLobby) {
     await supabase.from('lobbies').delete().eq('id', lobbyId);
-  } else if (nextHostId !== lobbyState.hostId) {
+  } else if (nextHostId !== lobbyState.hostId && !lobbyState.isPublic) {
     await supabase.from('lobbies').update({ host_id: nextHostId }).eq('id', lobbyId);
   }
 
@@ -621,6 +656,11 @@ export function registerPublicLobbyState(state: LobbyState): void {
   for (const player of state.players) {
     userLobbies.set(player.id, state.id);
   }
+}
+
+export function hasPlayersInLobby(lobbyId: string): boolean {
+  const lobbyState = lobbyStates.get(lobbyId);
+  return Boolean(lobbyState && lobbyState.players.length > 0);
 }
 
 export async function getUserLobbyFromDatabase(userId: string): Promise<string | null> {

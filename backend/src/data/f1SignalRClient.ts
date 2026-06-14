@@ -163,6 +163,7 @@ export class F1SignalRClient {
   private intentionallyClosed = false;
   private reconnectAttempts = 0;
   private keepAliveTimer: NodeJS.Timeout | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private lastMessageAt = 0;
   private cookies: string = '';
   private lastCompletedLapByDriver = new Map<number, number>();
@@ -187,6 +188,10 @@ export class F1SignalRClient {
   async stop(): Promise<void> {
     this.intentionallyClosed = true;
     if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
       try {
         this.ws.close();
@@ -287,9 +292,46 @@ export class F1SignalRClient {
           console.error(`[SignalR] WS unexpected-response status=${res.statusCode} body=${body.slice(0, 300)}`);
         });
       });
+
+      await new Promise<void>((resolve, reject) => {
+        const ws = this.ws;
+        if (!ws) {
+          reject(new Error('WebSocket was not initialized'));
+          return;
+        }
+
+        const cleanup = (): void => {
+          ws.off('open', onOpen);
+          ws.off('error', onError);
+          ws.off('unexpected-response', onUnexpectedResponse);
+          ws.off('close', onClose);
+        };
+        const onOpen = (): void => {
+          cleanup();
+          resolve();
+        };
+        const onError = (error: Error): void => {
+          cleanup();
+          reject(error);
+        };
+        const onUnexpectedResponse = (_req: unknown, res: { statusCode?: number }): void => {
+          cleanup();
+          reject(new Error(`WebSocket unexpected response ${res.statusCode ?? 'unknown'}`));
+        };
+        const onClose = (code: number, reason: Buffer): void => {
+          cleanup();
+          reject(new Error(`WebSocket closed before open code=${code} reason=${reason.toString()}`));
+        };
+
+        ws.once('open', onOpen);
+        ws.once('error', onError);
+        ws.once('unexpected-response', onUnexpectedResponse);
+        ws.once('close', onClose);
+      });
     } catch (err) {
       console.error('[SignalR] connect() threw:', err instanceof Error ? err.message : err);
       this.scheduleReconnect();
+      throw err;
     }
   }
 
@@ -303,8 +345,12 @@ export class F1SignalRClient {
     const delay = Math.min(30000, 2000 * 2 ** (this.reconnectAttempts - 1));
     console.log(`[SignalR] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/5)...`);
     this.options.onConnectionLoss?.();
-    setTimeout(() => {
-      if (!this.intentionallyClosed) this.connect();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.intentionallyClosed) void this.connect();
     }, delay);
   }
 

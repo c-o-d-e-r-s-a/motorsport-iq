@@ -19,6 +19,8 @@ import { cn } from '@/lib/cn';
 import { apiFetch } from '@/lib/api';
 import { useQuestionSound } from '@/hooks/useQuestionSound';
 import { useAnswerOutcomeSounds } from '@/hooks/useAnswerOutcomeSounds';
+import { useGameNotifications } from '@/hooks/useGameNotifications';
+import NotificationPopUpHint from '@/components/NotificationPopUpHint';
 import {
   SERVER_EVENTS,
   type CreateProblemReportInput,
@@ -34,7 +36,8 @@ import {
   type ServerErrorEvent,
   type StatHintKey,
 } from '@/lib/types';
-import { shareLobbyLink } from '@/lib/shareLobbyLink';
+import { ANSWER_WINDOW_MS, resolveAnswerDeadline } from '@/lib/answerWindow';
+import { hasQuestionAlertHandled, markQuestionAlertHandled } from '@/lib/questionAlerts';
 import {
   clearInactiveKickRestore,
   clearLobbySession,
@@ -43,6 +46,7 @@ import {
   saveLobbySession,
   stashInactiveKickRestore,
 } from '@/lib/sessionPersistence';
+import { shareLobbyLink } from '@/lib/shareLobbyLink';
 import { Button, Brand, Card, Chip, Input } from '@/components/ui';
 
 const REPORT_REASON_OPTIONS: Array<{ value: ProblemReportReason; label: string }> = [
@@ -80,6 +84,7 @@ export default function GamePage() {
   const [reportSuccess, setReportSuccess] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [isSocketConnected, setIsSocketConnected] = useState<boolean>(() => getSocketClient().isConnected());
+  const [showReconnecting, setShowReconnecting] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [isLeaving, setIsLeaving] = useState(false);
   const [localCorrectAnswers, setLocalCorrectAnswers] = useState<number>(0);
@@ -103,9 +108,6 @@ export default function GamePage() {
   // Track processed resolutions to prevent flickering from duplicate events
   const processedResolutionIds = useRef<Set<string>>(new Set());
   const acknowledgedAnswerIds = useRef<Set<string>>(new Set());
-  // Track question instances that have already played the alert sound so that
-  // reconnect catch-up (which re-sends question_event) doesn't play it twice.
-  const soundPlayedQuestionIds = useRef<Set<string>>(new Set());
   const currentQuestionRef = useRef<QuestionEvent | null>(null);
   const questionStateRef = useRef<QuestionState | null>(null);
   const resolutionRef = useRef<ResolutionEvent | null>(null);
@@ -167,12 +169,16 @@ export default function GamePage() {
         ? question.triggeredAt
         : new Date(question.triggeredAt).toISOString();
 
-      // Use server's answerDeadline if available, fallback to client calculation
-      const answerDeadline = question.answerDeadline
-        ? (typeof question.answerDeadline === 'string'
-            ? question.answerDeadline
-            : new Date(question.answerDeadline).toISOString())
-        : undefined;
+      // Use server's answerDeadline if available, fallback to trigger math when LIVE
+      const answerDeadline = resolveAnswerDeadline(
+        question.answerDeadline
+          ? (typeof question.answerDeadline === 'string'
+              ? question.answerDeadline
+              : new Date(question.answerDeadline).toISOString())
+          : undefined,
+        triggeredAt,
+        question.state
+      ) ?? undefined;
 
       return {
         instanceId: question.id,
@@ -190,6 +196,7 @@ export default function GamePage() {
 
     setQuestionState(question.state);
     setSuggestedStatKeys(question.suggestedStatKeys ?? []);
+    markQuestionAlertHandled(question.id);
     // Only clear the resolution panel when hydrating a still-active question.
     if (UNRESOLVED_QUESTION_STATES.includes(question.state)) {
       setResolution(null);
@@ -263,6 +270,7 @@ export default function GamePage() {
   useEffect(() => {
     const refreshPresence = () => {
       if (document.visibilityState === 'hidden') {
+        getSocketClient().sendPresencePing();
         return;
       }
 
@@ -273,9 +281,10 @@ export default function GamePage() {
       }
 
       const socket = getSocketClient();
-      socket.connect();
-      socket.reconnectLobby(storedUserId, { dedupeWindowMs: 500 });
-      socket.sendPresencePing();
+      if (!socket.isConnected()) {
+        setConnectionNotice('Reconnecting to live race server…');
+      }
+      socket.resumeAfterBackground();
     };
 
     document.addEventListener('visibilitychange', refreshPresence);
@@ -286,6 +295,27 @@ export default function GamePage() {
       window.removeEventListener('focus', refreshPresence);
     };
   }, [lobbyCode]);
+
+  useEffect(() => {
+    if (isSocketConnected) {
+      setShowReconnecting(false);
+      return undefined;
+    }
+
+    if (document.visibilityState === 'hidden') {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState === 'visible' && !getSocketClient().isConnected()) {
+        setShowReconnecting(true);
+      }
+    }, 1500);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isSocketConnected]);
 
   useEffect(() => {
     const socket = getSocketClient();
@@ -302,9 +332,11 @@ export default function GamePage() {
           setShowJoinForm(true);
         }
       }),
-      socket.on('disconnected', () => {
+      socket.on('disconnected', ({ hidden }: { reason?: string; hidden?: boolean }) => {
         setIsSocketConnected(false);
-        setConnectionNotice('Connection lost. Reconnecting to live race server…');
+        if (!hidden && document.visibilityState === 'visible') {
+          setConnectionNotice('Connection lost. Reconnecting to live race server…');
+        }
         setIsProcessingAnswer(false);
       }),
       socket.on('connection_error', ({ message }: { message: string }) => {
@@ -435,8 +467,13 @@ export default function GamePage() {
         // Guard against playing the sound twice: reconnect catch-up re-sends
         // question_event for the already-active question, but the user already
         // heard it the first time (or saw it hydrated from lobby_state).
-        if (!soundPlayedQuestionIds.current.has(event.instanceId)) {
-          soundPlayedQuestionIds.current.add(event.instanceId);
+        if (hasQuestionAlertHandled(event.instanceId)) {
+          return;
+        }
+
+        const isForeground = document.visibilityState === 'visible' && document.hasFocus();
+        if (isForeground) {
+          markQuestionAlertHandled(event.instanceId);
           playSound();
         }
       }),
@@ -444,18 +481,17 @@ export default function GamePage() {
         SERVER_EVENTS.QUESTION_STATE,
         (data: QuestionStateEvent) => {
           setQuestionState(data.state);
-          if (data.answerDeadline) {
-            setCurrentQuestion((current) => {
-              if (!current || current.instanceId !== data.instanceId) {
-                return current;
-              }
+          setCurrentQuestion((current) => {
+            if (!current || current.instanceId !== data.instanceId) {
+              return current;
+            }
 
-              return {
-                ...current,
-                answerDeadline: data.answerDeadline ?? current.answerDeadline,
-              };
-            });
-          }
+            return {
+              ...current,
+              state: data.state,
+              answerDeadline: data.answerDeadline ?? current.answerDeadline,
+            };
+          });
           if (data.state !== 'LIVE') {
             setIsProcessingAnswer(false);
           }
@@ -710,11 +746,6 @@ export default function GamePage() {
     }
   }, [router, lobbyCode]);
 
-  // Determine if this user is a late joiner (joined after lap 1)
-  const isLateJoiner = Boolean(
-    lobbyState?.players.find((p) => p.id === currentUserId)?.joinedAtLap
-  );
-
   const currentSubmittedAnswer = currentQuestion
     ? submittedAnswers[currentQuestion.instanceId] ?? null
     : null;
@@ -739,6 +770,25 @@ export default function GamePage() {
   const showQuestionWaitingState = Boolean(
     currentQuestion && ['TRIGGERED', 'LOCKED', 'ACTIVE'].includes(questionState ?? '')
   );
+
+  const notificationsEnabled = Boolean(
+    lobbyState
+    && !showJoinForm
+    && lobbyState.status === 'active'
+    && currentUserId
+  );
+
+  const {
+    showPrompt: showNotificationPrompt,
+    showPopUpHint: showNotificationPopUpHint,
+    enableNotifications,
+    dismissPrompt: dismissNotificationPrompt,
+  } = useGameNotifications({
+    lobbyCode,
+    enabled: notificationsEnabled,
+    playerId: currentUserId ?? undefined,
+    playQuestionSound: playSound,
+  });
 
   const handleJoinSession = useCallback(() => {
     if (!joinUsername.trim()) {
@@ -848,7 +898,7 @@ export default function GamePage() {
               snapshot={raceSnapshot}
               raceCompletedLap={raceCompletedLap}
               feedStalled={feedStalled}
-              connected={isSocketConnected}
+              connected={isSocketConnected && !showReconnecting}
               highlightTrackStatus={suggestedStatKeys.includes('TRACK_STATUS')}
             />
           </div>
@@ -860,6 +910,33 @@ export default function GamePage() {
           <p className="rounded-[var(--radius-sm)] bg-[var(--color-muted)] px-4 py-2.5 text-sm text-[var(--color-muted-fg)]">
             {connectionNotice}
           </p>
+        </div>
+      )}
+
+      {showNotificationPrompt && (
+        <div className="mx-auto w-full max-w-5xl px-4 pt-3">
+          <div className="flex flex-col gap-3 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-[var(--color-fg)]">
+              Get alerted when you switch apps — we&apos;ll notify you when a new question appears.
+            </p>
+            <div className="flex shrink-0 gap-2">
+              <Button type="button" variant="ghost" size="sm" onClick={dismissNotificationPrompt}>
+                Not now
+              </Button>
+              <Button type="button" size="sm" onClick={() => void enableNotifications()}>
+                Enable alerts
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showNotificationPopUpHint && (
+        <div className="mx-auto w-full max-w-5xl px-4 pt-3">
+          <div className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+            <p className="text-sm font-semibold text-[var(--color-fg)]">Alerts enabled</p>
+            <NotificationPopUpHint visible />
+          </div>
         </div>
       )}
 
@@ -997,22 +1074,27 @@ export default function GamePage() {
 
             // 3. Live question
             if (currentQuestion && questionState === 'LIVE') {
+              const answerDeadline = resolveAnswerDeadline(
+                currentQuestion.answerDeadline,
+                currentQuestion.triggeredAt,
+                questionState
+              );
+
               return (
                 <Card
                   key={`question-live-${currentQuestion.instanceId}`}
                   tone="elevated"
                   className="relative animate-pop-in"
                 >
-                  <div className="mb-5 flex justify-center">
-                    <CountdownTimer
-                      deadline={
-                        currentQuestion.answerDeadline
-                          ?? new Date(new Date(currentQuestion.triggeredAt).getTime() + 45_000).toISOString()
-                      }
-                      totalDurationMs={45_000}
-                      size="lg"
-                    />
-                  </div>
+                  {answerDeadline && (
+                    <div className="mb-5 flex justify-center">
+                      <CountdownTimer
+                        deadline={answerDeadline}
+                        totalDurationMs={ANSWER_WINDOW_MS}
+                        size="lg"
+                      />
+                    </div>
+                  )}
                   <QuestionCard
                     questionText={currentQuestion.questionText}
                     category={currentQuestion.category}

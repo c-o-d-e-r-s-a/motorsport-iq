@@ -34,6 +34,7 @@ import {
   touchUserActivityThrottled,
   flushUserActivity,
   clearLobbyCache,
+  hasPlayersInLobby,
 } from './lobby/lobbyManager';
 import { restoreOrBootstrapLeaderboard } from './lobby/leaderboardArchive';
 import {
@@ -45,10 +46,16 @@ import {
   findActivePublicLobbyId,
   findWaitingPublicLobbyIds,
   patchUserJoinedAtLap,
+  shouldAutoActivatePublicLobby,
 } from './lobby/publicLobbyManager';
 import { PublicLobbyAutoStartScheduler } from './lobby/publicLobbyAutoStart';
+import {
+  LIVE_BROADCAST_DELAY_MS,
+  scheduleDelayedLiveSnapshotEmit,
+  scheduleLiveBroadcastAction,
+} from './runtime/liveBroadcastDelay';
 import type { LobbyState as LobbyStateType } from './types';
-import { buildLobbyShareUrl } from './lobby/shareUrl';
+import { buildLobbyShareUrl, getPublicAppOrigin } from './lobby/shareUrl';
 import {
   startQuestionLifecycle,
   submitAnswer,
@@ -59,6 +66,7 @@ import {
   clearAllTimers,
   clearLobbyLifecycle,
 } from './lobby/lifecycleManager';
+import { resolveLiveAnswerDeadline } from './lobby/answerWindow';
 import { LobbyLifecycleQueue } from './lobby/lifecycleQueue';
 import { OpenF1Client } from './data/openf1Client';
 import {
@@ -114,7 +122,16 @@ import {
   FF_PRESENCE_WRITE_THROTTLE,
   SIMULATION_ENABLED,
 } from './runtime/featureFlags';
-
+import {
+  getVapidPublicKey,
+  initPushNotifications,
+  loadPushSubscriptionsFromDatabase,
+  registerPushSubscription,
+  sendQuestionPushToPlayers,
+  unregisterPushSubscriptionByEndpoint,
+  type PushSubscriptionRecord,
+} from './notifications/pushManager';
+import { RaceReminderScheduler } from './notifications/raceReminderScheduler';
 const app = express();
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:3000',
@@ -404,6 +421,58 @@ app.get('/metrics', (_req, res) => {
   res.json(metrics.snapshot());
 });
 
+app.get('/push/vapid-public-key', (_req, res) => {
+  const publicKey = getVapidPublicKey();
+  if (!publicKey) {
+    res.status(503).json({ error: 'Push notifications are not configured' });
+    return;
+  }
+
+  res.json({ publicKey });
+});
+
+app.post('/push/subscribe', async (req, res) => {
+  try {
+    const { subscription, subscriberId, playerId } = req.body as {
+      subscription?: PushSubscriptionRecord;
+      subscriberId?: string;
+      playerId?: string;
+    };
+
+    const resolvedSubscriberId = playerId?.trim() || subscriberId?.trim();
+
+    if (
+      !resolvedSubscriberId
+      || !subscription?.endpoint
+      || !subscription.keys?.p256dh
+      || !subscription.keys?.auth
+    ) {
+      res.status(400).json({ error: 'subscription and subscriberId are required' });
+      return;
+    }
+
+    await registerPushSubscription(resolvedSubscriberId, subscription);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+app.post('/push/unsubscribe', async (req, res) => {
+  try {
+    const { endpoint } = req.body as { endpoint?: string };
+    if (!endpoint?.trim()) {
+      res.status(400).json({ error: 'endpoint is required' });
+      return;
+    }
+
+    await unregisterPushSubscriptionByEndpoint(endpoint.trim());
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 app.post('/reports', async (req, res) => {
   try {
     const { instanceId, userId, reason, note } = req.body as CreateProblemReportInput;
@@ -506,38 +575,52 @@ if (bootstrapSessions.length > 0) {
 }
 startSeasonCalendarRefresh(async (year) => sessionLookupClient.getSessions(year));
 const lifecycleQueue = new LobbyLifecycleQueue();
+async function processLapCompleteForLobby(lobbyId: string, snapshot: RaceSnapshot): Promise<void> {
+  const lockKey = `lap:${lobbyId}:${snapshot.lapNumber}`;
+  const lockToken = await distributedLocks.acquire(lockKey, 20_000);
+  if (!lockToken) {
+    metrics.incrementCounter('runtime.lap_lock_skipped_total');
+    return;
+  }
+
+  await lifecycleQueue.enqueue(lobbyId, async () => {
+    try {
+      await checkAndResolveQuestion(lobbyId, snapshot);
+      await checkAndTriggerQuestion(lobbyId, snapshot);
+    } catch (err) {
+      console.error(`[LAP_PROCESSING] Unhandled error for lobby=${lobbyId} lap=${snapshot.lapNumber}:`, err);
+    }
+    metrics.setGauge('runtime.lifecycle_active_lobbies', lifecycleQueue.getActiveLobbyCount());
+    metrics.setGauge('runtime.lifecycle_pending_tasks', lifecycleQueue.getPendingTaskCount());
+  }).finally(async () => {
+    await distributedLocks.release(lockKey, lockToken);
+  });
+}
+
+async function processLapCompleteForLobbies(snapshot: RaceSnapshot, lobbyIds: Set<string>): Promise<void> {
+  const lobbyIdList = [...lobbyIds];
+  await metrics.trackAsync('runtime.lap_complete_processing_ms', async () => {
+    await runWithConcurrency(lobbyIdList, lapWorkConcurrency, async (lobbyId) => {
+      await processLapCompleteForLobby(lobbyId, snapshot);
+    });
+  });
+}
+
 const runtimeManager = new SessionRuntimeManager({
   onSnapshotUpdate: (snapshot, lobbyIds) => {
     metrics.setGauge('runtime.live_lobbies', lobbyIds.size);
-    broadcastRaceSnapshot(snapshot, lobbyIds);
+    emitRaceSnapshotToLobbies(snapshot, lobbyIds);
   },
   onLapComplete: async (snapshot, lobbyIds) => {
     metrics.incrementCounter('runtime.lap_complete_events_total');
     metrics.setGauge('runtime.lap_complete_lobby_count', lobbyIds.size);
-    const lobbyIdList = [...lobbyIds];
-    await metrics.trackAsync('runtime.lap_complete_processing_ms', async () => {
-      await runWithConcurrency(lobbyIdList, lapWorkConcurrency, async (lobbyId) => {
-        const lockKey = `lap:${lobbyId}:${snapshot.lapNumber}`;
-        const lockToken = await distributedLocks.acquire(lockKey, 20_000);
-        if (!lockToken) {
-          metrics.incrementCounter('runtime.lap_lock_skipped_total');
-          return;
-        }
 
-        await lifecycleQueue.enqueue(lobbyId, async () => {
-          try {
-            await checkAndResolveQuestion(lobbyId, snapshot);
-            await checkAndTriggerQuestion(lobbyId, snapshot);
-          } catch (err) {
-            console.error(`[LAP_PROCESSING] Unhandled error for lobby=${lobbyId} lap=${snapshot.lapNumber}:`, err);
-          }
-          metrics.setGauge('runtime.lifecycle_active_lobbies', lifecycleQueue.getActiveLobbyCount());
-          metrics.setGauge('runtime.lifecycle_pending_tasks', lifecycleQueue.getPendingTaskCount());
-        }).finally(async () => {
-          await distributedLocks.release(lockKey, lockToken);
-        });
-      });
-    });
+    if (snapshot.sessionMode === 'live' && LIVE_BROADCAST_DELAY_MS > 0) {
+      scheduleLiveBroadcastAction(() => processLapCompleteForLobbies(snapshot, lobbyIds));
+      return;
+    }
+
+    await processLapCompleteForLobbies(snapshot, lobbyIds);
   },
   onFeedStall: (stalled, lobbyIds) => {
     for (const lobbyId of lobbyIds) {
@@ -631,6 +714,12 @@ const publicLobbyAutoStartScheduler = new PublicLobbyAutoStartScheduler({
   onSweep: sweepWaitingPublicLobbies,
 });
 
+const raceReminderScheduler = new RaceReminderScheduler({
+  onSweepError: (error) => {
+    console.error('[RaceReminder] sweep failed:', error);
+  },
+});
+
 const lobbyCleanupScheduler = new LobbyCleanupScheduler({
   staleThresholdMs: staleLobbyTimeoutMs,
   sweepIntervalMs: staleLobbySweepIntervalMs,
@@ -668,6 +757,30 @@ function emitQuestionEvent(lobbyId: string, payload: unknown): void {
   metrics.incrementCounter('socket.question_event_total');
 }
 
+async function notifyLobbyPlayersOfQuestion(
+  lobbyId: string,
+  instanceId: string,
+  questionText: string
+): Promise<void> {
+  const lobbyState = await getLobbyState(lobbyId);
+  if (!lobbyState) {
+    return;
+  }
+
+  const gameUrl = `${getPublicAppOrigin(process.env.CORS_ORIGIN)}/game/${encodeURIComponent(lobbyState.code.toUpperCase())}`;
+  const playerIds = lobbyState.players.map((player) => player.id);
+
+  await sendQuestionPushToPlayers(
+    playerIds,
+    {
+      instanceId,
+      questionText,
+      lobbyCode: lobbyState.code,
+    },
+    gameUrl
+  );
+}
+
 function emitQuestionState(lobbyId: string, payload: unknown): void {
   const startedAt = Date.now();
   io.to(lobbyId).emit('question_state', payload);
@@ -681,6 +794,7 @@ function emitQuestionState(lobbyId: string, payload: unknown): void {
 async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot): Promise<void> {
   const lobbyState = await getLobbyState(lobbyId);
   if (!lobbyState || lobbyState.status !== 'active') return;
+  if (lobbyState.players.length === 0 || !hasPlayersInLobby(lobbyId)) return;
 
   const existingQuestion = getActiveQuestion(lobbyId);
   if (existingQuestion) {
@@ -701,8 +815,11 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
     return;
   }
 
-  // Try to select a new question
-  const previousSnapshot = runtimeManager.getRuntimeForLobby(lobbyId)?.getPreviousSnapshot() ?? null;
+  // Replay uses lap-boundary snapshots; live keeps throttled tick snapshots as fallback.
+  const runtime = runtimeManager.getRuntimeForLobby(lobbyId);
+  const previousSnapshot = snapshot.sessionMode === 'replay'
+    ? runtime?.getPreviousLapSnapshot?.() ?? null
+    : runtime?.getPreviousLapSnapshot?.() ?? runtime?.getPreviousSnapshot() ?? null;
 
   // ──── AI TRIGGER DETECTION — high-visibility logs for scenario/debug testing ──
   if (snapshot.trackStatus === 'YELLOW' || snapshot.trackStatus === 'SC' || snapshot.trackStatus === 'VSC') {
@@ -761,6 +878,8 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
       suggestedStatKeys: [],
     });
 
+    void notifyLobbyPlayersOfQuestion(lobbyId, newQuestion.id, fallbackText);
+
     // Stat hints only — question copy stays on the curated bank template.
     generateSuggestedStatKeys({
       questionText: fallbackText,
@@ -795,13 +914,23 @@ async function checkAndResolveQuestion(lobbyId: string, snapshot: RaceSnapshot):
   );
 }
 
+function getLiveAnswerDeadlineIso(instance: QuestionInstanceState): string | undefined {
+  if (instance.state !== 'LIVE') {
+    return undefined;
+  }
+
+  return resolveLiveAnswerDeadline(
+    instance.triggeredAt,
+    getAnswerDeadline(instance.id),
+    instance.answerDeadline ?? null
+  ).toISOString();
+}
+
 /**
  * Handle question state change
  */
 function handleStateChange(lobbyId: string, instance: QuestionInstanceState): void {
-  const answerDeadline = instance.state === 'LIVE'
-    ? getAnswerDeadline(instance.id)?.toISOString()
-    : undefined;
+  const answerDeadline = getLiveAnswerDeadlineIso(instance);
 
   console.log(
     `[QUESTION_STATE] lobby=${lobbyId} instance=${instance.id} state=${instance.state}`
@@ -815,9 +944,9 @@ function handleStateChange(lobbyId: string, instance: QuestionInstanceState): vo
     answerDeadline,
   });
 
-  // Pause/resume replay when question goes LIVE/LOCKED
+  // Pause fast-forward replays during the answer window; 1× stays in sync with F1 TV.
   const runtime = runtimeManager.getRuntimeForLobby(lobbyId);
-  if (runtime?.mode === 'replay') {
+  if (runtime?.mode === 'replay' && runtime.replaySpeed !== 1) {
     if (instance.state === 'LIVE') {
       runtime.pause?.();
     } else if (instance.state === 'LOCKED') {
@@ -832,8 +961,9 @@ function handleStateChange(lobbyId: string, instance: QuestionInstanceState): vo
   }
 
   if (instance.state === 'CANCELLED') {
-    // Resume replay if question is cancelled
-    if (runtime?.mode === 'replay') {
+    // Resume fast-forward replay if question is cancelled
+    const runtime = runtimeManager.getRuntimeForLobby(lobbyId);
+    if (runtime?.mode === 'replay' && runtime.replaySpeed !== 1) {
       runtime.resume?.();
     }
     io.to(lobbyId).emit('question_cancelled', {
@@ -890,6 +1020,10 @@ function broadcastRaceSnapshot(snapshot: RaceSnapshot, lobbyIds: Set<string>): v
   }
 }
 
+function emitRaceSnapshotToLobbies(snapshot: RaceSnapshot, lobbyIds: Set<string>): void {
+  scheduleDelayedLiveSnapshotEmit(snapshot, () => broadcastRaceSnapshot(snapshot, lobbyIds));
+}
+
 /**
  * Get question category
  */
@@ -914,18 +1048,28 @@ function emitSessionCatchUp(
   if (lobbyState.sessionId) {
     const snapshot = runtimeManager.getRuntimeForLobby(lobbyId)?.getCurrentSnapshot();
     if (snapshot) {
-      socket.emit('race_snapshot_update', toRaceSnapshotEvent(snapshot));
+      scheduleDelayedLiveSnapshotEmit(snapshot, () => {
+        socket.emit('race_snapshot_update', toRaceSnapshotEvent(snapshot));
+      });
     }
   }
 
   const activeQuestion = getActiveQuestion(lobbyId);
   if (activeQuestion && isUnresolvedQuestionState(activeQuestion.state)) {
+    const liveDeadline = activeQuestion.state === 'LIVE'
+      ? resolveLiveAnswerDeadline(
+        activeQuestion.triggeredAt,
+        getAnswerDeadline(activeQuestion.id),
+        activeQuestion.answerDeadline ?? null
+      )
+      : null;
+
     socket.emit('question_event', buildQuestionEventPayload(
       activeQuestion,
       getQuestionCategory(activeQuestion.questionId),
       getQuestionDifficulty(activeQuestion.questionId),
       {
-        answerDeadline: activeQuestion.state === 'LIVE' ? getAnswerDeadline(activeQuestion.id) : null,
+        answerDeadline: liveDeadline,
       }
     ));
 
@@ -933,9 +1077,7 @@ function emitSessionCatchUp(
       instanceId: activeQuestion.id,
       state: activeQuestion.state,
       cancelledReason: activeQuestion.cancelledReason,
-      answerDeadline: activeQuestion.state === 'LIVE'
-        ? getAnswerDeadline(activeQuestion.id)?.toISOString()
-        : undefined,
+      answerDeadline: liveDeadline?.toISOString(),
     });
     return;
   }
@@ -1024,8 +1166,8 @@ async function startSessionForLobby(
   await setLobbySession(lobbyId, String(session.session_key));
   setLatestResolution(lobbyId, null);
 
-  const requestedReplaySpeed = isCompleted && replaySpeed != null
-    ? normalizeReplaySpeed(replaySpeed)
+  const requestedReplaySpeed = isCompleted
+    ? normalizeReplaySpeed(replaySpeed ?? 1)
     : undefined;
 
   const runtime = await runtimeManager.attachLobbyToSession(lobbyId, session, {
@@ -1046,7 +1188,7 @@ async function startSessionForLobby(
 
   const snapshot = runtime.getCurrentSnapshot();
   if (snapshot) {
-    broadcastRaceSnapshot(snapshot, new Set([lobbyId]));
+    emitRaceSnapshotToLobbies(snapshot, new Set([lobbyId]));
   }
 }
 
@@ -1070,7 +1212,7 @@ async function maybeActivatePublicLobby(
   }
 
   const now = Date.now();
-  if (!isSessionLive(session, now) && !isSessionCompleted(session, now)) {
+  if (!shouldAutoActivatePublicLobby(lobbyState.status, isSessionLive(session, now), isSessionCompleted(session, now))) {
     return false;
   }
 
@@ -1177,9 +1319,10 @@ io.on('connection', (socket) => {
   socket.on('join_lobby', async (data: { lobbyCode: string; username: string; restoreUserId?: string }) => {
     try {
       // For mid-race joins, record the current lap so the leaderboard can show a "Joined lap X" badge.
+      // Rejoins after inactivity restore preserve the original join lap from the archive.
       const existingLobby = await getLobbyByCode(data.lobbyCode);
       let joinedAtLap: number | null = null;
-      if (existingLobby?.status === 'active') {
+      if (existingLobby?.status === 'active' && !data.restoreUserId) {
         const runtime = runtimeManager.getRuntimeForLobby(existingLobby.id)
           ?? runtimeManager.getRuntime(existingLobby.session_id ?? '');
         const lap = runtime?.getCurrentSnapshot()?.lapNumber ?? null;
@@ -1326,8 +1469,9 @@ io.on('connection', (socket) => {
             await startSessionForLobby(lobbyId, sessionKey, 1);
           } catch (startError) {
             console.error(`[join_solo] Failed to auto-start session ${sessionKey} for lobby ${lobbyId}:`, (startError as Error).message);
-            emitSocketError(socket, (startError as Error).message);
-            return;
+            await updateLobbyStatus(lobbyId, 'waiting').catch(() => undefined);
+            runtimeManager.detachLobbyFromSession(lobbyId);
+            clearLobbyCache(lobbyId);
           }
         }
       } else {
@@ -1336,13 +1480,15 @@ io.on('connection', (socket) => {
         finalUsername = joinResult.username;
         joinedAtLap = joinResult.joinedAtLap;
 
-        // Re-resolve from the lobby runtime and patch DB if the pre-join lookup missed it.
-        const runtimeLap = await resolveLateJoinLapForPublicSession(sessionKey, lobbyId);
-        if (runtimeLap != null && runtimeLap !== joinedAtLap) {
-          joinedAtLap = runtimeLap;
-          await patchUserJoinedAtLap(userId, runtimeLap);
-        } else if (runtimeLap != null) {
-          joinedAtLap = runtimeLap;
+        // Fresh joins record the current lap; score restores keep their original join lap.
+        if (!data.restoreUserId) {
+          const runtimeLap = await resolveLateJoinLapForPublicSession(sessionKey, lobbyId);
+          if (runtimeLap != null && runtimeLap !== joinedAtLap) {
+            joinedAtLap = runtimeLap;
+            await patchUserJoinedAtLap(userId, runtimeLap);
+          } else if (runtimeLap != null) {
+            joinedAtLap = runtimeLap;
+          }
         }
       }
 
@@ -1351,8 +1497,6 @@ io.on('connection', (socket) => {
           await maybeActivatePublicLobby(lobbyId, sessionKey, 1);
         } catch (startError) {
           console.error(`[join_solo] Failed to activate waiting lobby ${lobbyId}:`, (startError as Error).message);
-          emitSocketError(socket, (startError as Error).message);
-          return;
         }
       }
 
@@ -1360,9 +1504,15 @@ io.on('connection', (socket) => {
       currentLobbyId = lobbyId;
 
       socket.join(lobbyId);
-      await restoreOrBootstrapLeaderboard(lobbyId, userId, {
+      const bootstrap = await restoreOrBootstrapLeaderboard(lobbyId, userId, {
         restoreUserId: data.restoreUserId ?? null,
       });
+
+      if (bootstrap.restored) {
+        joinedAtLap = bootstrap.joinedAtLap;
+        await patchUserJoinedAtLap(userId, bootstrap.joinedAtLap);
+      }
+
       presenceManager.upsertConnection({ userId, lobbyId, socketId: socket.id });
       await touchUserActivity(userId);
 
@@ -1422,6 +1572,10 @@ io.on('connection', (socket) => {
         throw new Error('Lobby not found');
       }
 
+      if (lobbyState.isPublic) {
+        throw new Error('Public lobbies start automatically when the session goes live');
+      }
+
       const actingUserId = currentUserId ?? data.userId ?? null;
       if (!actingUserId || lobbyState.hostId !== actingUserId) {
         throw new Error('Only the host can start the session');
@@ -1476,8 +1630,8 @@ io.on('connection', (socket) => {
       await setLobbySession(data.lobbyId, String(session.session_key));
       setLatestResolution(data.lobbyId, null);
 
-      const requestedReplaySpeed = isCompleted && data.replaySpeed != null
-        ? normalizeReplaySpeed(data.replaySpeed)
+      const requestedReplaySpeed = isCompleted
+        ? normalizeReplaySpeed(data.replaySpeed ?? 1)
         : undefined;
       const runtime = await runtimeManager.attachLobbyToSession(data.lobbyId, session, {
         replaySpeed: requestedReplaySpeed,
@@ -1502,7 +1656,7 @@ io.on('connection', (socket) => {
 
       const snapshot = runtime.getCurrentSnapshot();
       if (snapshot) {
-        broadcastRaceSnapshot(snapshot, new Set([data.lobbyId]));
+        emitRaceSnapshotToLobbies(snapshot, new Set([data.lobbyId]));
       }
 
       console.log(`Session ${session.session_key} started for lobby ${lobbyState.code}`);
@@ -1659,6 +1813,16 @@ io.on('connection', (socket) => {
     await markUserActive(currentUserId);
   });
 
+  socket.on('register_push_subscription', (data: { subscription?: PushSubscriptionRecord }) => {
+    if (!currentUserId || !data.subscription?.endpoint || !data.subscription.keys?.p256dh || !data.subscription.keys?.auth) {
+      return;
+    }
+
+    void registerPushSubscription(currentUserId, data.subscription).catch((error) => {
+      console.warn(`[Push] Failed to register subscription for user=${currentUserId}:`, error);
+    });
+  });
+
   /**
    * Get available sessions.
    *
@@ -1781,6 +1945,7 @@ io.on('connection', (socket) => {
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully...');
   publicLobbyAutoStartScheduler.stop();
+  raceReminderScheduler.stop();
   lobbyCleanupScheduler.stop();
   presenceManager.stop();
   stopSeasonCalendarRefresh();
@@ -1796,6 +1961,7 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully...');
   publicLobbyAutoStartScheduler.stop();
+  raceReminderScheduler.stop();
   lobbyCleanupScheduler.stop();
   presenceManager.stop();
   stopSeasonCalendarRefresh();
@@ -1809,11 +1975,16 @@ process.on('SIGINT', () => {
 });
 
 // Start server
+initPushNotifications();
+void loadPushSubscriptionsFromDatabase();
 httpServer.listen(PORT, () => {
   console.log(`Motorsport IQ server running on port ${PORT}`);
   console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
   console.log(`[SCALING] Redis adapter: ${redisRuntime ? 'enabled' : 'disabled'}`);
   console.log(`[SCALING] Lap concurrency: ${lapWorkConcurrency}`);
+  console.log(
+    `[LIVE] F1 TV broadcast delay: ${LIVE_BROADCAST_DELAY_MS > 0 ? `${LIVE_BROADCAST_DELAY_MS}ms` : 'disabled'}`
+  );
   console.log(
     `[SCALING] Presence: activeInactivity=${presenceInactivityTimeoutActiveMs}ms`
     + ` waitingInactivity=${presenceInactivityTimeoutWaitingMs}ms`
@@ -1822,6 +1993,7 @@ httpServer.listen(PORT, () => {
   console.log(`[SCALING] Stale lobby cleanup: timeout=${staleLobbyTimeoutMs}ms sweep=${staleLobbySweepIntervalMs}ms`);
   console.log(`[SCALING] Feature flags: batchScoring=${FF_BATCH_SCORING}, presenceThrottle=${FF_PRESENCE_WRITE_THROTTLE}, deltaLobbyState=${FF_DELTA_LOBBY_STATE}`);
   publicLobbyAutoStartScheduler.start();
+  raceReminderScheduler.start();
   lobbyCleanupScheduler.start();
 });
 

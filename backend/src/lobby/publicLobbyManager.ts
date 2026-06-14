@@ -7,10 +7,16 @@ export { sanitizeUsernameForPublic } from './usernameSanitizer';
 const DEFAULT_MAX_PLAYERS_PER_LOBBY = 30;
 
 export function normalizeLateJoinLap(lap: number | null | undefined): number | null {
-  if (lap == null || !Number.isFinite(lap) || lap <= 1) {
+  if (lap == null || !Number.isFinite(lap)) {
     return null;
   }
-  return Math.floor(lap);
+
+  const normalized = Math.floor(lap);
+  if (normalized <= 1) {
+    return null;
+  }
+
+  return normalized;
 }
 
 export async function findWaitingPublicLobbyIds(sessionKey: string): Promise<string[]> {
@@ -48,7 +54,7 @@ export async function findActivePublicLobbyId(sessionKey: string): Promise<strin
   return data?.id ?? null;
 }
 
-export async function patchUserJoinedAtLap(userId: string, joinedAtLap: number): Promise<void> {
+export async function patchUserJoinedAtLap(userId: string, joinedAtLap: number | null): Promise<void> {
   trackDbWrite('users.joined_at_lap');
   const { error } = await supabase
     .from('users')
@@ -131,6 +137,15 @@ export async function joinExistingPublicLobby(
     isNewLobby: false,
     joinedAtLap: lapForDb,
   };
+}
+
+/** Whether a waiting public lobby should transition to active for the current session window. */
+export function shouldAutoActivatePublicLobby(
+  lobbyStatus: string,
+  isLive: boolean,
+  isCompleted: boolean
+): boolean {
+  return lobbyStatus === 'waiting' && (isLive || isCompleted);
 }
 
 /**

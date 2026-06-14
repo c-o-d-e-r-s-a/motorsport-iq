@@ -5,7 +5,9 @@ import { buildReplayTimeline } from '../runtime/replayTimeline';
 import { selectQuestion } from '../engine/questionEngine';
 import type { OpenF1Interval, OpenF1Lap, OpenF1Pit, OpenF1Position, OpenF1RaceControl } from '../types';
 
-describe('Canadian GP simulation question selection', () => {
+const describeOpenF1Integration = process.env.RUN_OPENF1_INTEGRATION === '1' ? describe : describe.skip;
+
+describeOpenF1Integration('Canadian GP simulation question selection', () => {
   it('can select at least one question after lap 3 using live session semantics', async () => {
     const lookupClient = new OpenF1Client();
     const resolvedSession = getCalendarSession(DEFAULT_SIMULATION_SESSION_KEY)

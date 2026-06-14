@@ -119,4 +119,65 @@ describe('replayTimeline', () => {
       'lap',
     ]);
   });
+
+  it('keeps lap events when lap_duration is zero (uses completion timestamp)', () => {
+    const sessionStart = '2024-11-03T15:50:00+00:00';
+    const timeline = buildReplayTimeline({
+      raceControl: [
+        {
+          date: sessionStart,
+          session_key: 1,
+          meeting_key: 1,
+          category: 'SessionStatus',
+          flag: null as never,
+          scope: null as never,
+          sector: 0 as never,
+          driver_number: 0 as never,
+          message: 'SESSION STARTED',
+          lap_number: 1,
+        },
+      ],
+      positions: [],
+      intervals: [],
+      pits: [],
+      laps: [
+        {
+          session_key: 1,
+          meeting_key: 1,
+          driver_number: 1,
+          lap_number: 1,
+          lap_duration: 0,
+          lap_time: null,
+          is_pit_out_lap: false,
+          date_start: sessionStart,
+          duration_sector_1: null,
+          duration_sector_2: null,
+          duration_sector_3: null,
+          segments_sector_1: [],
+          segments_sector_2: [],
+          segments_sector_3: [],
+        },
+        {
+          session_key: 1,
+          meeting_key: 1,
+          driver_number: 1,
+          lap_number: 2,
+          lap_duration: 90,
+          lap_time: null,
+          is_pit_out_lap: false,
+          date_start: '2024-11-03T15:51:30+00:00',
+          duration_sector_1: null,
+          duration_sector_2: null,
+          duration_sector_3: null,
+          segments_sector_1: [],
+          segments_sector_2: [],
+          segments_sector_3: [],
+        },
+      ],
+    });
+
+    const lapEvents = timeline.filter((event) => event.type === 'lap');
+    expect(lapEvents).toHaveLength(2);
+    expect(lapEvents.map((event) => (event.data as { lap_number: number }).lap_number)).toEqual([1, 2]);
+  });
 });

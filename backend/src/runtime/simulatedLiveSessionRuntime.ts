@@ -11,7 +11,7 @@ import {
 import {
   BaseRuntime,
   cloneLobbyIds,
-  computeReplayEventDelayMs,
+  computeAbsoluteReplayDelayMs,
   type RuntimeCallbacks,
 } from './sessionRuntimeBase';
 
@@ -20,6 +20,8 @@ export class SimulatedLiveSessionRuntime extends BaseRuntime {
   private timer: NodeJS.Timeout | null = null;
   private currentIndex = 0;
   private complete = false;
+  private replayTimelineOriginMs = 0;
+  private replayStartedAtMs = 0;
   readonly playbackSpeed: number;
 
   constructor(
@@ -84,7 +86,9 @@ export class SimulatedLiveSessionRuntime extends BaseRuntime {
       `[Simulated Live Runtime] Timeline ready: ${this.events.length} events at ${this.playbackSpeed}× speed`
     );
 
-    this.runNext();
+    this.replayTimelineOriginMs = this.events[0]?.timestamp ?? 0;
+    this.replayStartedAtMs = Date.now();
+    this.scheduleEvent(0);
   }
 
   stop(): void {
@@ -96,11 +100,11 @@ export class SimulatedLiveSessionRuntime extends BaseRuntime {
     console.log(`[Simulated Live Runtime] Tearing down session runtime: ${this.sessionId}`);
   }
 
-  private runNext(): void {
+  private scheduleEvent(index: number): void {
     if (!this.started) return;
 
-    const currentEvent = this.events[this.currentIndex];
-    if (!currentEvent) {
+    const event = this.events[index];
+    if (!event) {
       if (!this.complete) {
         this.complete = true;
         this.snapshotStore.markReplayComplete();
@@ -112,16 +116,17 @@ export class SimulatedLiveSessionRuntime extends BaseRuntime {
       return;
     }
 
-    applyReplayEvent(this.snapshotStore, currentEvent);
-    this.currentIndex += 1;
+    const delayMs = computeAbsoluteReplayDelayMs(
+      event,
+      this.replayTimelineOriginMs,
+      this.replayStartedAtMs,
+      this.playbackSpeed
+    );
 
-    const nextEvent = this.events[this.currentIndex];
-    if (!nextEvent) {
-      this.runNext();
-      return;
-    }
-
-    const delayMs = computeReplayEventDelayMs(currentEvent, nextEvent, this.playbackSpeed);
-    this.timer = setTimeout(() => this.runNext(), delayMs);
+    this.timer = setTimeout(() => {
+      applyReplayEvent(this.snapshotStore, event);
+      this.currentIndex = index + 1;
+      this.scheduleEvent(index + 1);
+    }, delayMs);
   }
 }

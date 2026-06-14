@@ -26,6 +26,7 @@ import {
   saveLobbySession,
   stashInactiveKickRestore,
 } from '@/lib/sessionPersistence';
+import { resolveJoinedPlayer } from '@/lib/resolveJoinedPlayer';
 
 export default function LobbyPage() {
   const params = useParams();
@@ -51,6 +52,7 @@ export default function LobbyPage() {
   const [showJoinForm, setShowJoinForm] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
   const joinUsernameRef = useRef(joinUsername);
+  const joinedUserIdRef = useRef<string | null>(null);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
 
@@ -90,12 +92,18 @@ export default function LobbyPage() {
           setIsLoading(false);
         }
       }),
-      socket.on('disconnected', () => {
-        setIsReconnecting(true);
+      socket.on('disconnected', ({ hidden }: { reason?: string; hidden?: boolean }) => {
+        if (!hidden && document.visibilityState === 'visible') {
+          setIsReconnecting(true);
+        }
       }),
       socket.on('connection_error', ({ message }: { message: string }) => {
         setIsReconnecting(true);
         setConnectionNotice(message);
+      }),
+      socket.on(SERVER_EVENTS.JOIN_RESULT, (data: { userId: string; username: string }) => {
+        joinedUserIdRef.current = data.userId;
+        localStorage.setItem('msp_username', data.username);
       }),
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         setLobbyState(state);
@@ -103,10 +111,11 @@ export default function LobbyPage() {
         setShowJoinForm(false);
         setIsJoining(false);
 
-        const storedUsername = localStorage.getItem('msp_username');
-        const joinedUser = state.players.find(
-          (player) => player.username === joinUsernameRef.current.trim() || player.username === storedUsername
-        );
+        const joinedUser = resolveJoinedPlayer(state, {
+          userId: joinedUserIdRef.current,
+          typedUsername: joinUsernameRef.current,
+        });
+        joinedUserIdRef.current = null;
         if (joinedUser) {
           saveLobbySession({
             userId: joinedUser.id,
@@ -228,6 +237,7 @@ export default function LobbyPage() {
   useEffect(() => {
     const refreshPresence = () => {
       if (document.visibilityState === 'hidden') {
+        getSocketClient().sendPresencePing();
         return;
       }
 
@@ -237,10 +247,7 @@ export default function LobbyPage() {
         return;
       }
 
-      const socket = getSocketClient();
-      socket.connect();
-      socket.reconnectLobby(storedUserId, { dedupeWindowMs: 500 });
-      socket.sendPresencePing();
+      getSocketClient().resumeAfterBackground();
     };
 
     document.addEventListener('visibilitychange', refreshPresence);

@@ -48,10 +48,20 @@ function hasNewerTimestamp(
   return toTimestamp(incoming) >= toTimestamp(existing);
 }
 
+function cloneRaceSnapshot(snapshot: RaceSnapshot): RaceSnapshot {
+  return {
+    ...snapshot,
+    timestamp: new Date(snapshot.timestamp.getTime()),
+    drivers: snapshot.drivers.map((driver) => ({ ...driver })),
+  };
+}
+
 export class SnapshotStore {
   private sessionId: string | null = null;
   private currentSnapshot: RaceSnapshot | null = null;
   private previousSnapshot: RaceSnapshot | null = null;
+  /** Last snapshot before the displayed lap counter advanced — used for question triggers. */
+  private previousLapSnapshot: RaceSnapshot | null = null;
   private drivers: Map<number, DriverData> = new Map();
   private lapNumber = 0;
   private trackStatus: TrackStatus = 'GREEN';
@@ -90,6 +100,7 @@ export class SnapshotStore {
     this.lapNumber = 0;
     this.currentSnapshot = null;
     this.previousSnapshot = null;
+    this.previousLapSnapshot = null;
     this.previousGaps.clear();
     this.trackStatus = 'GREEN';
     this.isReplayComplete = false;
@@ -233,6 +244,10 @@ export class SnapshotStore {
     return this.previousSnapshot;
   }
 
+  getPreviousLapSnapshot(): RaceSnapshot | null {
+    return this.previousLapSnapshot;
+  }
+
   private ensureDriverEntry(driverNumber: number, sessionKey = 0, meetingKey = 0): DriverData {
     let driverData = this.drivers.get(driverNumber);
     if (driverData) return driverData;
@@ -264,21 +279,31 @@ export class SnapshotStore {
   }
 
   processLapCompletion(lap: OpenF1Lap): void {
+    const nextLap = this.openF1LapNumbering
+      ? lap.lap_number
+      : lap.lap_number + 1;
+    const lapAdvanced = nextLap > this.lapNumber;
+
+    if (lapAdvanced && this.currentSnapshot) {
+      this.previousLapSnapshot = cloneRaceSnapshot(this.currentSnapshot);
+    }
+
     const driverData = this.ensureDriverEntry(lap.driver_number, lap.session_key, lap.meeting_key);
     driverData.latestLap = lap;
 
-    // SignalR live timing reports completed laps (+1). OpenF1 replay/sim feeds use lap_number as-is.
-    const nextLap = this.sessionMode === 'live' && !this.openF1LapNumbering
-      ? lap.lap_number + 1
-      : lap.lap_number;
-    if (nextLap > this.lapNumber) {
+    if (lapAdvanced) {
       this.lapNumber = nextLap;
     }
 
     this.ensureActiveRaceLapFloor();
     this.buildSnapshot();
-    if (this.currentSnapshot) {
-      this.options.onLapComplete?.(this.currentSnapshot);
+
+    const shouldEmitLapComplete = this.sessionMode === 'live'
+      ? Boolean(this.currentSnapshot)
+      : lapAdvanced && Boolean(this.currentSnapshot);
+
+    if (shouldEmitLapComplete) {
+      this.options.onLapComplete?.(this.currentSnapshot!);
     }
   }
 
@@ -287,12 +312,21 @@ export class SnapshotStore {
       return;
     }
 
-    if (lapNumber > this.lapNumber) {
-      this.lapNumber = lapNumber;
+    const lapAdvanced = lapNumber > this.lapNumber;
+    if (!lapAdvanced) {
+      return;
     }
 
+    if (this.currentSnapshot) {
+      this.previousLapSnapshot = cloneRaceSnapshot(this.currentSnapshot);
+    }
+
+    this.lapNumber = lapNumber;
     this.ensureActiveRaceLapFloor();
-    this.scheduleHudSnapshotUpdate();
+    this.buildSnapshot();
+    if (this.currentSnapshot) {
+      this.options.onLapComplete?.(this.currentSnapshot);
+    }
   }
 
   processPositionUpdate(positions: OpenF1Position[]): void {
@@ -567,7 +601,8 @@ export class SnapshotStore {
     }
 
     const elapsed = Date.now() - this.lastHudSnapshotAt;
-    if (elapsed >= HUD_SNAPSHOT_THROTTLE_MS && !this.hudSnapshotTimer) {
+    const throttleMs = this.sessionMode === 'replay' ? 0 : HUD_SNAPSHOT_THROTTLE_MS;
+    if (elapsed >= throttleMs && !this.hudSnapshotTimer) {
       this.buildSnapshot();
       return;
     }
@@ -576,7 +611,7 @@ export class SnapshotStore {
       return;
     }
 
-    const waitMs = Math.max(0, HUD_SNAPSHOT_THROTTLE_MS - elapsed);
+    const waitMs = Math.max(0, throttleMs - elapsed);
     this.hudSnapshotTimer = setTimeout(() => {
       this.hudSnapshotTimer = null;
       this.buildSnapshot();

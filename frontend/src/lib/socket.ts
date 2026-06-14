@@ -69,8 +69,13 @@ class SocketClient {
     });
 
     this.socket.on('disconnect', (reason: string) => {
-      this.emit('disconnected', { reason });
-      this.emit('reconnecting', { reason });
+      const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+      this.emit('disconnected', { reason, hidden });
+      // Avoid flashing "Reconnecting" while the tab is backgrounded — the socket
+      // often drops during app switches but restores when the user returns.
+      if (!hidden) {
+        this.emit('reconnecting', { reason });
+      }
     });
 
     this.socket.on('connect_error', (error: Error & { description?: unknown }) => {
@@ -97,7 +102,9 @@ class SocketClient {
     });
 
     this.socket.io.on('reconnect_attempt', (attempt: number) => {
-      this.emit('reconnecting', { attempt });
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        this.emit('reconnecting', { attempt });
+      }
     });
 
     this.socket.io.on('reconnect_failed', () => {
@@ -300,6 +307,17 @@ class SocketClient {
     this.socket?.emit(CLIENT_EVENTS.PRESENCE_PING);
   }
 
+  registerPushSubscription(subscription: {
+    endpoint: string;
+    keys: { p256dh: string; auth: string };
+  }): void {
+    this.socket?.emit(CLIENT_EVENTS.REGISTER_PUSH_SUBSCRIPTION, { subscription });
+  }
+
+  unregisterPushSubscription(): void {
+    this.socket?.emit(CLIENT_EVENTS.UNREGISTER_PUSH_SUBSCRIPTION);
+  }
+
   resumeFromBackground(): void {
     if (!this.socket) {
       this.connect();
@@ -309,6 +327,24 @@ class SocketClient {
     if (!this.socket.connected) {
       this.socket.connect();
     }
+  }
+
+  /**
+   * Called when the user returns to the app. Reconnects the transport only when
+   * needed; avoids redundant reconnect_lobby calls while the socket is healthy.
+   */
+  resumeAfterBackground(): void {
+    if (!this.socket) {
+      this.connect();
+      return;
+    }
+
+    if (this.socket.connected) {
+      this.sendPresencePing();
+      return;
+    }
+
+    this.socket.connect();
   }
 
   isConnected(): boolean {

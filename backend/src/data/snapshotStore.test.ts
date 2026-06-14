@@ -212,10 +212,10 @@ describe('SnapshotStore race control updates', () => {
       createStint({ stint_number: 2, lap_start: 20, lap_end: 40, compound: 'MEDIUM' }),
     ]);
 
-    store.processLapCompletion(createLap({ lap_number: 19 }));
+    store.processLapCompletion(createLap({ lap_number: 18 }));
     expect(store.getCurrentSnapshot()?.drivers[0]?.stintNumber).toBe(1);
 
-    store.processLapCompletion(createLap({ lap_number: 20 }));
+    store.processLapCompletion(createLap({ lap_number: 19 }));
     expect(store.getCurrentSnapshot()?.drivers[0]?.stintNumber).toBe(2);
     expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('MEDIUM');
   });
@@ -235,22 +235,22 @@ describe('SnapshotStore race control updates', () => {
     store.processLapCompletion(createLap({ lap_number: 3 }));
 
     const leader = store.getCurrentSnapshot()?.drivers[0];
-    expect(leader?.tyreAge).toBe(10);
+    expect(leader?.tyreAge).toBe(11);
     expect(leader?.tyreAge).toBeGreaterThan(store.getCurrentSnapshot()?.lapNumber ?? 0);
   });
 
-  it('uses completed lap numbers in replay mode and current lap in live mode', async () => {
+  it('uses F1 current-lap numbering in replay and live mode', async () => {
     const client = {
       getDrivers: jest.fn(async () => [createDriver()]),
       parseTrackStatus: jest.fn(() => 'GREEN' as const),
     } as any;
 
     const replayStore = new SnapshotStore(client);
-    await replayStore.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+    await replayStore.initialize(1001, { sessionMode: 'replay', replaySpeed: 1 });
     replayStore.processLapCompletion(createLap({ lap_number: 14 }));
-    expect(replayStore.getCurrentSnapshot()?.lapNumber).toBe(14);
+    expect(replayStore.getCurrentSnapshot()?.lapNumber).toBe(15);
     replayStore.syncLapNumber(99);
-    expect(replayStore.getCurrentSnapshot()?.lapNumber).toBe(14);
+    expect(replayStore.getCurrentSnapshot()?.lapNumber).toBe(15);
 
     const liveStore = new SnapshotStore(client);
     await liveStore.initialize(1002, { sessionMode: 'live', skipDriverPreload: true });
@@ -267,7 +267,59 @@ describe('SnapshotStore race control updates', () => {
     expect(simLiveStore.getCurrentSnapshot()?.lapNumber).toBe(1);
   });
 
-  it('emits HUD snapshot updates on telemetry changes with a 1s throttle', async () => {
+  it('fires onLapComplete only when the displayed lap advances and keeps lap-boundary snapshots', async () => {
+    const onLapComplete = jest.fn();
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client, { onLapComplete });
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 1 });
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+    store.processIntervalUpdate([createInterval({ interval: 1.0 })]);
+
+    store.processLapCompletion(createLap({ lap_number: 1 }));
+    expect(onLapComplete).toHaveBeenCalledTimes(1);
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(2);
+    expect(store.getPreviousLapSnapshot()?.lapNumber).toBe(1);
+
+    onLapComplete.mockClear();
+    store.processLapCompletion(createLap({ lap_number: 1, driver_number: 2 }));
+    expect(onLapComplete).not.toHaveBeenCalled();
+
+    store.processIntervalUpdate([createInterval({ interval: 0.6 })]);
+    store.processLapCompletion(createLap({ lap_number: 2 }));
+    expect(onLapComplete).toHaveBeenCalledTimes(1);
+    expect(store.getPreviousLapSnapshot()?.lapNumber).toBe(2);
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(3);
+  });
+
+  it('live mode emits onLapComplete for every lap completion and on syncLapNumber advance', async () => {
+    const onLapComplete = jest.fn();
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client, { onLapComplete });
+    await store.initialize(1002, { sessionMode: 'live', skipDriverPreload: true });
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+
+    store.processLapCompletion(createLap({ lap_number: 1 }));
+    expect(onLapComplete).toHaveBeenCalledTimes(1);
+
+    onLapComplete.mockClear();
+    store.processLapCompletion(createLap({ lap_number: 1, driver_number: 2 }));
+    expect(onLapComplete).toHaveBeenCalledTimes(1);
+
+    onLapComplete.mockClear();
+    store.syncLapNumber(5);
+    expect(onLapComplete).toHaveBeenCalledTimes(1);
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(5);
+  });
+
+  it('emits HUD snapshot updates on telemetry changes with a 1s throttle in live mode', async () => {
     const onSnapshotUpdate = jest.fn();
     const client = {
       getDrivers: jest.fn(async () => [createDriver()]),
@@ -275,7 +327,7 @@ describe('SnapshotStore race control updates', () => {
     } as any;
 
     const store = new SnapshotStore(client, { onSnapshotUpdate });
-    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+    await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
     store.processLapCompletion(createLap());
     onSnapshotUpdate.mockClear();
 

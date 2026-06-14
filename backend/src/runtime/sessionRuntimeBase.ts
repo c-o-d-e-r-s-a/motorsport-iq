@@ -25,6 +25,7 @@ export interface SessionRuntime {
   getLobbyIds(): Set<string>;
   getCurrentSnapshot(): RaceSnapshot | null;
   getPreviousSnapshot(): RaceSnapshot | null;
+  getPreviousLapSnapshot?(): RaceSnapshot | null;
   start(): Promise<void>;
   stop(): void;
   pause?(): void;
@@ -42,6 +43,18 @@ export function computeReplayEventDelayMs(
   playbackSpeed: number
 ): number {
   return Math.max(0, Math.round((nextEvent.timestamp - currentEvent.timestamp) / playbackSpeed));
+}
+
+/** Wall-clock delay until an event, anchored to replay start (compensates for processing time). */
+export function computeAbsoluteReplayDelayMs(
+  event: ReplayEvent,
+  timelineOriginMs: number,
+  replayStartedAtMs: number,
+  playbackSpeed: number
+): number {
+  const targetElapsedMs = (event.timestamp - timelineOriginMs) / playbackSpeed;
+  const actualElapsedMs = Date.now() - replayStartedAtMs;
+  return Math.max(0, Math.round(targetElapsedMs - actualElapsedMs));
 }
 
 export abstract class BaseRuntime implements SessionRuntime {
@@ -107,6 +120,10 @@ export abstract class BaseRuntime implements SessionRuntime {
 
   getPreviousSnapshot(): RaceSnapshot | null {
     return this.snapshotStore.getPreviousSnapshot();
+  }
+
+  getPreviousLapSnapshot(): RaceSnapshot | null {
+    return this.snapshotStore.getPreviousLapSnapshot();
   }
 
   protected async handleLapCompletion(lap: OpenF1Lap): Promise<void> {

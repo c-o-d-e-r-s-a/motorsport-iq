@@ -79,4 +79,11 @@ describe('questionPayload', () => {
     expect(payload.state).toBe('TRIGGERED');
     expect(payload.answerDeadline).toBeUndefined();
   });
+
+  it('derives live deadline from trigger when instance has no stored deadline', () => {
+    const instance = createInstance('LIVE');
+    const payload = buildQuestionEventPayload(instance, 'GAP_CLOSING', 'MEDIUM');
+
+    expect(payload.answerDeadline).toBe('2025-01-01T00:00:46.000Z');
+  });
 });

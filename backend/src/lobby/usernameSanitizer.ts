@@ -14,6 +14,7 @@ const groqApiKey = process.env.GROQ_MODERATION_KEY ?? process.env.GROQ_API_KEY;
 const groq = groqApiKey ? new Groq({ apiKey: groqApiKey }) : null;
 const GROQ_MODEL = process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile';
 const AI_MODERATION_TIMEOUT_MS = 2500;
+const DISABLED_VALUES = new Set(['0', 'false', 'off', 'no']);
 
 const AI_SYSTEM_PROMPT =
   'You are a strict content moderator for a family-friendly Formula 1 racing game. ' +
@@ -280,6 +281,12 @@ function randomRacerUsername(): string {
   return `Racer_${rand}`;
 }
 
+function isUsernameModerationEnabled(): boolean {
+  const rawValue = process.env.USERNAME_MODERATION_ENABLED;
+  if (!rawValue) return true;
+  return !DISABLED_VALUES.has(rawValue.trim().toLowerCase());
+}
+
 /**
  * Sanitize a username for use in a public lobby.
  *
@@ -305,6 +312,10 @@ function randomRacerUsername(): string {
  * On any unexpected error the safe Racer_XXXXXX fallback is returned.
  */
 export async function sanitizeUsernameForPublic(username: string): Promise<string> {
+  if (!isUsernameModerationEnabled()) {
+    return username;
+  }
+
   try {
     // Stage 1: fast synchronous pre-filter
     if (ruleBasedIsProfane(username)) {

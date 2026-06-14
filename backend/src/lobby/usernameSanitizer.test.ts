@@ -11,6 +11,24 @@ async function expectAllowed(name: string) {
   expect(await sanitizeUsernameForPublic(name)).toBe(name);
 }
 
+describe('moderation toggle', () => {
+  const previousValue = process.env.USERNAME_MODERATION_ENABLED;
+
+  afterEach(() => {
+    if (previousValue === undefined) {
+      delete process.env.USERNAME_MODERATION_ENABLED;
+    } else {
+      process.env.USERNAME_MODERATION_ENABLED = previousValue;
+    }
+  });
+
+  it('allows usernames unchanged when moderation is disabled', async () => {
+    process.env.USERNAME_MODERATION_ENABLED = 'false';
+
+    expect(await sanitizeUsernameForPublic('fuck')).toBe('fuck');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Clean names — must pass through unchanged
 // ---------------------------------------------------------------------------

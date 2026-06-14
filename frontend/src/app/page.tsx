@@ -14,6 +14,7 @@ import {
 import { cn } from '@/lib/cn';
 import { saveLobbySession } from '@/lib/sessionPersistence';
 import { Button, Brand, Input, Chip } from '@/components/ui';
+import RaceAlertOptIn from '@/components/RaceAlertOptIn';
 
 async function wakeBackend(): Promise<void> {
   try {
@@ -93,8 +94,10 @@ export default function Home() {
         setIsWarmingUp(false);
         clearTimeout(warmUpTimer);
       }),
-      socket.on('disconnected', () => {
-        setIsReconnecting(true);
+      socket.on('disconnected', ({ hidden }: { reason?: string; hidden?: boolean }) => {
+        if (!hidden && document.visibilityState === 'visible') {
+          setIsReconnecting(true);
+        }
       }),
       socket.on('connection_error', ({ message }: { message: string }) => {
         setIsReconnecting(true);
@@ -259,6 +262,9 @@ export default function Home() {
             Live Formula 1 prediction game. Join a lobby, call live race moments in 45 seconds,
             and climb the leaderboard as the laps tick down.
           </p>
+          <div className="mt-5 max-w-md">
+            <RaceAlertOptIn />
+          </div>
           <button
             type="button"
             onClick={() => setShowHow((v) => !v)}

@@ -11,6 +11,12 @@ import { generateResolutionExplanation } from '../ai/explanationGenerator';
 import { enqueueScoringJob } from '../runtime/workQueue';
 import { FF_BATCH_SCORING } from '../runtime/featureFlags';
 import { trackDbQuery, trackDbWrite } from '../observability/dbMetrics';
+import {
+  ANSWER_WINDOW_MS,
+  TRIGGER_TO_LIVE_MS,
+  computeLiveAnswerDeadlineFromTrigger,
+  resolveLiveAnswerDeadline,
+} from './answerWindow';
 
 /**
  * Lifecycle Manager - Question FSM and state transitions
@@ -29,10 +35,8 @@ import { trackDbQuery, trackDbWrite } from '../observability/dbMetrics';
  * - CANCELLED: Question cancelled (SC/VSC before lock, driver retired, red flag)
  */
 
-// Timers
-const ANSWER_WINDOW_MS = 45000; // 45 seconds to answer
+// Timers — re-exported via answerWindow.ts for tests and reconnect fallbacks
 const EXPLANATION_DURATION_MS = 10000; // 10 seconds to show explanation
-const TRIGGER_TO_LIVE_MS = 1000; // 1 second between trigger and live
 
 // Active timers tracking
 const questionTimers: Map<string, NodeJS.Timeout> = new Map();
@@ -139,6 +143,9 @@ export async function updateQuestionState(
 
   trackDbWrite('question_instances.update');
   await supabase
+    .from('question_instances')
+    .update(updateData)
+    .eq('id', instanceId);
 }
 
 /**
@@ -599,7 +606,7 @@ export async function submitAnswer(
   // Check if deadline passed
   const inMemoryDeadline = answerDeadlines.get(instanceId);
   const fallbackDeadline = fallbackTriggeredAt
-    ? new Date(fallbackTriggeredAt.getTime() + TRIGGER_TO_LIVE_MS + ANSWER_WINDOW_MS)
+    ? computeLiveAnswerDeadlineFromTrigger(fallbackTriggeredAt)
     : null;
   const effectiveDeadline = inMemoryDeadline ?? fallbackDeadline;
   if (effectiveDeadline && new Date() > effectiveDeadline) {
@@ -712,6 +719,9 @@ export async function getQuestionStateForReconnect(
     explanation: data.explanation ?? undefined,
     cancelledReason: data.cancelled_reason ?? undefined,
     cancelledAt: data.cancelled_at ? new Date(data.cancelled_at) : undefined,
+    answerDeadline: data.state === 'LIVE'
+      ? resolveLiveAnswerDeadline(new Date(data.triggered_at), getAnswerDeadline(data.id))
+      : undefined,
   };
 }
 

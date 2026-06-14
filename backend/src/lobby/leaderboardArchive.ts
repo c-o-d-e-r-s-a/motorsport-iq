@@ -113,13 +113,11 @@ export async function restoreOrBootstrapLeaderboard(
         throw new Error(`Failed to restore archived leaderboard: ${restoreError.message}`);
       }
 
-      if (archive.joined_at_lap != null) {
-        trackDbWrite('users.restore_joined_at_lap');
-        await supabase
-          .from('users')
-          .update({ joined_at_lap: archive.joined_at_lap })
-          .eq('id', userId);
-      }
+      trackDbWrite('users.restore_joined_at_lap');
+      await supabase
+        .from('users')
+        .update({ joined_at_lap: archive.joined_at_lap ?? null })
+        .eq('id', userId);
 
       trackDbWrite('leaderboard_archives.delete');
       await supabase
