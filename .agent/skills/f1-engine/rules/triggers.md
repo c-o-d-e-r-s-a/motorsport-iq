@@ -19,13 +19,15 @@ Anything outside these four categories is out of MVP scope.
 
 ## Global Guardrails
 - Maximum 1 active question per lobby.
-- Minimum 8, maximum 15 questions per race (same for Sprint and GP).
+- GP pacing targets a minimum of 8 and maximum of 15 questions.
+- Sprint-length races use a lower adaptive pacing floor because the race is shorter.
 - No questions on laps `1-3`.
 - No questions while `SC`, `VSC`, or `RED` is active.
 - Enforce a 1-lap cooldown after restart.
 - Do not trigger the same category twice in a row.
 - Enforce a 2-lap cooldown after resolution.
 - Only use 2-lap or 3-lap prediction windows.
+- `FINISH_POSITION` / Final Stretch prompts must stay in the final ~15% of race distance.
 
 ## Trigger Priority
 1. `OVERTAKE`

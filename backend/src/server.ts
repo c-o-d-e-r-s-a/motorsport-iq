@@ -1001,12 +1001,12 @@ function handleStateChange(lobbyId: string, instance: QuestionInstanceState): vo
     answerDeadline,
   });
 
-  // Pause fast-forward replays during the answer window; 1× stays in sync with F1 TV.
+  // Pause fast-forward replays while players need to act/read; 1× stays in sync with F1 TV.
   const runtime = runtimeManager.getRuntimeForLobby(lobbyId);
   if (runtime?.mode === 'replay' && runtime.replaySpeed !== 1) {
-    if (instance.state === 'LIVE') {
+    if (['LIVE', 'RESOLVED', 'EXPLAINED'].includes(instance.state)) {
       runtime.pause?.();
-    } else if (instance.state === 'LOCKED') {
+    } else if (['LOCKED', 'CLOSED', 'CANCELLED'].includes(instance.state)) {
       runtime.resume?.();
     }
   }
@@ -1018,11 +1018,6 @@ function handleStateChange(lobbyId: string, instance: QuestionInstanceState): vo
   }
 
   if (instance.state === 'CANCELLED') {
-    // Resume fast-forward replay if question is cancelled
-    const runtime = runtimeManager.getRuntimeForLobby(lobbyId);
-    if (runtime?.mode === 'replay' && runtime.replaySpeed !== 1) {
-      runtime.resume?.();
-    }
     io.to(lobbyId).emit('question_cancelled', {
       instanceId: instance.id,
       reason: instance.cancelledReason,

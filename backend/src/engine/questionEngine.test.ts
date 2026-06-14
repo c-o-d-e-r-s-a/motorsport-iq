@@ -1,7 +1,10 @@
 import type { DriverState, RaceSnapshot, QuestionInstanceState } from '../types';
 import {
   clearCooldowns,
+  getPacingMinimumQuestionCount,
+  getPacingTargetQuestionCount,
   getPacingState,
+  getTiersToTry,
   isPlausibleCandidate,
   MAX_QUESTIONS_PER_RACE,
   recordResolution,
@@ -328,6 +331,7 @@ describe('question pacing', () => {
     const pacing = getPacingState(snapshot, 4, lobbyId);
     expect(pacing.urgency).toBe(true);
     expect(pacing.postResolutionCooldown).toBe(1);
+    expect(getTiersToTry(snapshot, 4)).toContain('urgency');
 
     recordResolution(lobbyId, 'GAP_CLOSING', 38);
 
@@ -336,10 +340,105 @@ describe('question pacing', () => {
     expect(result).not.toBeNull();
   });
 
+  it('aims normal races above the bare minimum engagement floor', () => {
+    const snapshot = createSnapshot({ lapNumber: 25, totalLaps: 57 });
+    const pacing = getPacingState(snapshot, 1, lobbyId);
+
+    expect(getPacingMinimumQuestionCount(snapshot)).toBe(8);
+    expect(getPacingTargetQuestionCount(snapshot)).toBe(10);
+    expect(pacing.expectedQuestionCount).toBe(4);
+    expect(pacing.behindTarget).toBe(true);
+  });
+
+  it('uses a lower pacing floor for short sprint-length races', () => {
+    const snapshot = createSnapshot({ lapNumber: 12, totalLaps: 23 });
+    const pacing = getPacingState(snapshot, 4, lobbyId);
+
+    expect(getPacingMinimumQuestionCount(snapshot)).toBe(6);
+    expect(getPacingTargetQuestionCount(snapshot)).toBe(6);
+    expect(pacing.questionsRemaining).toBe(2);
+  });
+
+  it('selects a quiet-race fallback when a normal replay is behind pace', () => {
+    const previous = createSnapshot({
+      lapNumber: 24,
+      totalLaps: 57,
+      drivers: [
+        createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: 8 }),
+        createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: 2.2, interval: 2.2, tyreAge: 8 }),
+        createDriver({ driverNumber: 16, name: 'Midfield', position: 3, gap: 5.8, interval: 3.6, tyreAge: 8 }),
+      ],
+    });
+    const snapshot = createSnapshot({
+      lapNumber: 25,
+      totalLaps: 57,
+      drivers: [
+        createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: 9 }),
+        createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: 2.2, interval: 2.2, tyreAge: 9 }),
+        createDriver({ driverNumber: 16, name: 'Midfield', position: 3, gap: 5.8, interval: 3.6, tyreAge: 9 }),
+      ],
+    });
+
+    const result = selectQuestionWithMeta(snapshot, previous, lobbyId, null, 1);
+    expect(result.instance).not.toBeNull();
+    expect(result.tier).toBe('tier1');
+  });
+
+  it('does not force quiet-race fallback when the lobby is on pace', () => {
+    const previous = createSnapshot({
+      lapNumber: 24,
+      totalLaps: 57,
+      drivers: [
+        createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: 8 }),
+        createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: 2.2, interval: 2.2, tyreAge: 8 }),
+        createDriver({ driverNumber: 16, name: 'Midfield', position: 3, gap: 5.8, interval: 3.6, tyreAge: 8 }),
+      ],
+    });
+    const snapshot = createSnapshot({
+      lapNumber: 25,
+      totalLaps: 57,
+      drivers: [
+        createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: 9 }),
+        createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: 2.2, interval: 2.2, tyreAge: 9 }),
+        createDriver({ driverNumber: 16, name: 'Midfield', position: 3, gap: 5.8, interval: 3.6, tyreAge: 9 }),
+      ],
+    });
+
+    const result = selectQuestionWithMeta(snapshot, previous, lobbyId, null, 4);
+    expect(result.instance).toBeNull();
+    expect(result.tier).toBeNull();
+  });
+
   it('uses zero-lap cooldown on short races still below the minimum', () => {
     const snapshot = createSnapshot({ lapNumber: 12, totalLaps: 23 });
     const pacing = getPacingState(snapshot, 4, lobbyId);
     expect(pacing.postResolutionCooldown).toBe(0);
+  });
+
+  it('does not surface Final Stretch prompts before the final race phase', () => {
+    const drivers = [
+      createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: 4, pitCount: 3 }),
+      createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: 9, interval: 9, tyreAge: 4, pitCount: 3 }),
+      createDriver({ driverNumber: 16, name: 'Midfield', position: 9, gap: 24, interval: 15, tyreAge: 4, pitCount: 3 }),
+    ];
+    const previous = createSnapshot({ lapNumber: 31, totalLaps: 57, drivers });
+    const snapshot = createSnapshot({ lapNumber: 32, totalLaps: 57, drivers });
+
+    const result = selectQuestionWithMeta(snapshot, previous, lobbyId, null, 1);
+    expect(result.instance).toBeNull();
+  });
+
+  it('allows Final Stretch prompts in the last 15 percent of the race', () => {
+    const drivers = [
+      createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: 4, pitCount: 3 }),
+      createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: 9, interval: 9, tyreAge: 4, pitCount: 3 }),
+      createDriver({ driverNumber: 16, name: 'Midfield', position: 9, gap: 24, interval: 15, tyreAge: 4, pitCount: 3 }),
+    ];
+    const previous = createSnapshot({ lapNumber: 49, totalLaps: 57, drivers });
+    const snapshot = createSnapshot({ lapNumber: 50, totalLaps: 57, drivers });
+
+    const result = selectQuestionWithMeta(snapshot, previous, lobbyId, null, 7);
+    expect(result.instance?.questionId.startsWith('FIN_')).toBe(true);
   });
 
   it('prefers strict tier when strict candidates exist below minimum count', () => {
@@ -351,7 +450,7 @@ describe('question pacing', () => {
     expect(result.tier).toBe('strict');
   });
 
-  it('can reach 8 questions across a short sprint simulation', () => {
+  it('can reach the pacing target across a short sprint simulation', () => {
     const totalLaps = 23;
     let questionCount = 0;
     let activeQuestion: QuestionInstanceState | null = null;
@@ -403,6 +502,45 @@ describe('question pacing', () => {
         return driver;
       });
 
+      const snapshot = createSnapshot({ lapNumber: lap, totalLaps, drivers: currentDrivers });
+      const previous = lap > 1
+        ? createSnapshot({ lapNumber: lap - 1, totalLaps, drivers: previousDrivers })
+        : null;
+
+      if (activeQuestion && lap >= activeQuestion.targetLap) {
+        const question = getQuestionById(activeQuestion.questionId);
+        if (question) {
+          recordResolution(lobbyId, question.category, lap);
+        }
+        activeQuestion = null;
+      }
+
+      const selected = selectQuestion(snapshot, previous, lobbyId, activeQuestion, questionCount);
+      if (selected) {
+        activeQuestion = selected;
+        questionCount += 1;
+      }
+    }
+
+    const raceEnd = createSnapshot({ lapNumber: totalLaps, totalLaps });
+    expect(questionCount).toBeGreaterThanOrEqual(getPacingTargetQuestionCount(raceEnd));
+    expect(questionCount).toBeLessThanOrEqual(MAX_QUESTIONS_PER_RACE);
+  });
+
+  it('can reach 8 questions across a quiet normal-race simulation', () => {
+    const totalLaps = 57;
+    let questionCount = 0;
+    let activeQuestion: QuestionInstanceState | null = null;
+
+    for (let lap = 1; lap <= totalLaps; lap++) {
+      const tyreAge = Math.max(1, lap - 1);
+      const currentDrivers = [
+        createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: Math.max(1, tyreAge - 3) }),
+        createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: 2.2, interval: 2.2, tyreAge }),
+        createDriver({ driverNumber: 16, name: 'Midfield', position: 3, gap: 5.8, interval: 3.6, tyreAge: tyreAge + 1 }),
+        createDriver({ driverNumber: 55, name: 'Points Runner', position: 9, gap: 22.0, interval: 2.4, tyreAge }),
+      ];
+      const previousDrivers = currentDrivers.map((driver) => ({ ...driver }));
       const snapshot = createSnapshot({ lapNumber: lap, totalLaps, drivers: currentDrivers });
       const previous = lap > 1
         ? createSnapshot({ lapNumber: lap - 1, totalLaps, drivers: previousDrivers })
