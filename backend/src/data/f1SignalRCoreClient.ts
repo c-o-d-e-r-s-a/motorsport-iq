@@ -33,14 +33,21 @@ function parseFeedPayload(raw: unknown): unknown {
 function processInitialSnapshot(
   processor: F1SignalRClient,
   snapshot: unknown
-): void {
+): number {
   if (!snapshot || typeof snapshot !== 'object') {
-    return;
+    return 0;
   }
 
+  let processedTopics = 0;
   for (const [topic, payload] of Object.entries(snapshot)) {
+    if (payload === undefined || payload === null || payload === '') {
+      continue;
+    }
+    processedTopics += 1;
     processor.processFeedMessage(topic, parseFeedPayload(payload));
   }
+
+  return processedTopics;
 }
 
 export class F1SignalRCoreClient {
@@ -109,7 +116,10 @@ export class F1SignalRCoreClient {
             'Subscribe',
             F1_LIVE_TIMING_TOPICS
           );
-          processInitialSnapshot(this.processor, snapshot);
+          const processedTopics = processInitialSnapshot(this.processor, snapshot);
+          if (processedTopics === 0) {
+            console.warn('[SignalR Core] Re-subscribe returned no timing topics.');
+          }
         } catch (error) {
           console.error('[SignalR Core] Re-subscribe failed after reconnect:', error);
         }
@@ -133,7 +143,10 @@ export class F1SignalRCoreClient {
         'Subscribe',
         F1_LIVE_TIMING_TOPICS
       );
-      processInitialSnapshot(this.processor, initialSnapshot);
+      const processedTopics = processInitialSnapshot(this.processor, initialSnapshot);
+      if (processedTopics === 0) {
+        throw new Error('SignalR Core subscribe returned no timing topics');
+      }
       this.options.onConnectionRestored?.();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -180,5 +193,6 @@ export class F1SignalRCoreClient {
         void this.connect();
       }
     }, delay);
+    this.reconnectTimer.unref?.();
   }
 }

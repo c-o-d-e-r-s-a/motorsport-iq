@@ -247,7 +247,12 @@ export default function Home() {
       <div className="speed-lines pointer-events-none absolute inset-x-0 top-0 z-0 h-56 opacity-60" />
 
       <header className="relative z-10 flex items-center justify-between py-5">
-        <Brand />
+        <div className="flex items-center gap-2">
+          <Brand />
+          <Chip tone="warn" className="px-2 py-0.5 text-[0.65rem]">
+            Beta
+          </Chip>
+        </div>
       </header>
 
       <div className="relative z-10 mx-auto flex w-full max-w-md flex-1 flex-col justify-center gap-6 lg:max-w-5xl lg:flex-row lg:items-center lg:gap-12">

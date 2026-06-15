@@ -2,6 +2,7 @@ import type {
   OpenF1Driver,
   OpenF1Interval,
   OpenF1Lap,
+  OpenF1Pit,
   OpenF1Position,
   OpenF1RaceControl,
   OpenF1Stint,
@@ -96,6 +97,19 @@ function createStint(overrides: Partial<OpenF1Stint> = {}): OpenF1Stint {
     lap_end: null,
     compound: 'SOFT',
     tyre_age_at_start: 0,
+    ...overrides,
+  };
+}
+
+function createPit(overrides: Partial<OpenF1Pit> = {}): OpenF1Pit {
+  return {
+    date: '2025-09-01T13:30:00Z',
+    session_key: 1001,
+    meeting_key: 2001,
+    driver_number: 1,
+    pit_duration: 2.5,
+    lap_number: 26,
+    number: 1,
     ...overrides,
   };
 }
@@ -389,6 +403,43 @@ describe('SnapshotStore race control updates', () => {
     store.processLapCompletion(createLap({ lap_number: 10 }));
 
     expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('SOFT');
+  });
+
+  it('keeps live tyre age reset after a pit when a stale stint update carries old age', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'live' });
+
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+    store.processIntervalUpdate([createInterval()]);
+    store.processStintUpdate([
+      createStint({ stint_number: 1, lap_start: 1, lap_end: null, compound: 'SOFT', tyre_age_at_start: 0 }),
+    ]);
+    store.processLapCompletion(createLap({ lap_number: 25 }));
+
+    store.processPitUpdate([createPit({ lap_number: 26, number: 1 })]);
+    store.processStintUpdate([
+      createStint({
+        date: '2025-09-01T13:31:00Z',
+        session_key: 0,
+        meeting_key: 0,
+        stint_number: 2,
+        lap_start: 26,
+        lap_end: null,
+        compound: 'MEDIUM',
+        tyre_age_at_start: 26,
+      }),
+    ]);
+    store.processLapCompletion(createLap({ lap_number: 26, date_start: '2025-09-01T13:32:00Z' }));
+
+    const leader = store.getCurrentSnapshot()?.drivers[0];
+    expect(leader?.stintNumber).toBe(2);
+    expect(leader?.tyreCompound).toBe('MEDIUM');
+    expect(leader?.tyreAge).toBe(1);
   });
 
   it('falls back to the previous stint compound after a pit stop with missing compound', async () => {

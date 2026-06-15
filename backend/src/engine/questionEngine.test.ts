@@ -326,6 +326,18 @@ describe('question pacing', () => {
     expect(isPlausibleCandidate(candidate, 'tier3')).toBe(false);
   });
 
+  it('rejects pit-window questions for drivers on very fresh tyres', () => {
+    const question = getQuestionById('PIT_STOP_NEXT_3')!;
+    const candidate = {
+      question,
+      driver1: createDriver({ tyreAge: 4, pitCount: 1 }),
+      driver2: createDriver({ driverNumber: 44, position: 1, interval: null }),
+      score: 50,
+    };
+
+    expect(isPlausibleCandidate(candidate, 'urgency')).toBe(false);
+  });
+
   it('allows questions one lap after resolution when urgency is active', () => {
     const snapshot = createSnapshot({ lapNumber: 40, totalLaps: 50 });
     const pacing = getPacingState(snapshot, 4, lobbyId);

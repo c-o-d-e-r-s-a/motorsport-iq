@@ -34,6 +34,7 @@ interface DriverData {
 const DEBUG_DRIVER_PROVENANCE = process.env.DEBUG_DRIVER_PROVENANCE === 'true';
 const DEBUG_MISSING_COMPOUND = process.env.DEBUG_MISSING_COMPOUND === 'true';
 const HUD_SNAPSHOT_THROTTLE_MS = 1_000;
+const MAX_REASONABLE_USED_TYRE_START_AGE_AFTER_LIVE_PIT = 8;
 
 function toTimestamp(value: string | null | undefined): number {
   if (!value) return 0;
@@ -377,6 +378,7 @@ export class SnapshotStore {
       const existingPit = driverData.pits.find((record) => record.number === pit.number);
       if (!existingPit) {
         driverData.pits.push(pit);
+        this.applyPitStopToStints(driverData, pit);
       }
     }
     this.scheduleHudSnapshotUpdate();
@@ -388,30 +390,31 @@ export class SnapshotStore {
     for (const stint of stints) {
       const driverData = this.ensureDriverEntry(stint.driver_number, stint.session_key, stint.meeting_key);
       touchedDrivers.add(stint.driver_number);
+      const normalizedStint = this.normalizeStintAfterLivePit(driverData, stint);
 
-      const existingIndex = driverData.stints.findIndex((entry) => entry.stint_number === stint.stint_number);
+      const existingIndex = driverData.stints.findIndex((entry) => entry.stint_number === normalizedStint.stint_number);
       if (existingIndex === -1) {
-        driverData.stints.push(stint);
+        driverData.stints.push(normalizedStint);
       } else {
         const existing = driverData.stints[existingIndex];
-        const hasIncomingTimestamp = Boolean(stint.date);
+        const hasIncomingTimestamp = Boolean(normalizedStint.date);
         const hasExistingTimestamp = Boolean(existing.date);
         const shouldReplace = (
           hasIncomingTimestamp
           && hasExistingTimestamp
-          && hasNewerTimestamp(stint.date, existing.date)
+          && hasNewerTimestamp(normalizedStint.date, existing.date)
         )
         || (
           hasIncomingTimestamp
           && !hasExistingTimestamp
         )
         || (
-          stint.stint_number === existing.stint_number
-          && (stint.lap_start ?? -1) >= (existing.lap_start ?? -1)
+          normalizedStint.stint_number === existing.stint_number
+          && (normalizedStint.lap_start ?? -1) >= (existing.lap_start ?? -1)
         );
 
         if (shouldReplace) {
-          driverData.stints[existingIndex] = mergeStintRecords(existing, stint);
+          driverData.stints[existingIndex] = mergeStintRecords(existing, normalizedStint);
         }
       }
     }
@@ -439,9 +442,16 @@ export class SnapshotStore {
       }
     }
 
-    const nextTrackStatus = this.client.parseTrackStatus(messages);
+    const statusParser = (
+      this.client as OpenF1Client & {
+        parseRaceControlStatus?: (messages: OpenF1RaceControl[]) => TrackStatus | null;
+      }
+    ).parseRaceControlStatus;
+    const nextTrackStatus = statusParser
+      ? statusParser.call(this.client, messages)
+      : this.client.parseTrackStatus(messages);
 
-    if (nextTrackStatus === this.trackStatus) {
+    if (!nextTrackStatus || nextTrackStatus === this.trackStatus) {
       return;
     }
 
@@ -655,6 +665,77 @@ export class SnapshotStore {
     }
 
     return Math.max(tyreAgeAtStart, tyreAgeAtStart + Math.max(0, this.lapNumber - lapStart));
+  }
+
+  private applyPitStopToStints(data: DriverData, pit: OpenF1Pit): void {
+    const nextStintNumber = pit.number + 1;
+    const nextLapStart = Math.max(1, pit.lap_number);
+
+    for (const stint of data.stints) {
+      if (stint.stint_number >= nextStintNumber) {
+        continue;
+      }
+
+      if (stint.lap_end === null || stint.lap_end >= nextLapStart) {
+        stint.lap_end = Math.max(stint.lap_start ?? 1, nextLapStart - 1);
+      }
+    }
+
+    const existing = data.stints.find((stint) => stint.stint_number === nextStintNumber);
+    if (existing) {
+      if (existing.lap_start === null || existing.lap_start > nextLapStart || existing.lap_start <= pit.lap_number - 1) {
+        existing.lap_start = nextLapStart;
+      }
+      existing.lap_end = null;
+      if (
+        this.sessionMode === 'live'
+        && (
+          existing.tyre_age_at_start === null
+          || existing.tyre_age_at_start > MAX_REASONABLE_USED_TYRE_START_AGE_AFTER_LIVE_PIT
+        )
+      ) {
+        existing.tyre_age_at_start = 0;
+      }
+      return;
+    }
+
+    data.stints.push({
+      date: pit.date,
+      session_key: pit.session_key,
+      meeting_key: pit.meeting_key,
+      driver_number: pit.driver_number,
+      stint_number: nextStintNumber,
+      lap_start: nextLapStart,
+      lap_end: null,
+      compound: data.latestCompound,
+      tyre_age_at_start: 0,
+    });
+  }
+
+  private normalizeStintAfterLivePit(data: DriverData, stint: OpenF1Stint): OpenF1Stint {
+    if (this.sessionMode !== 'live') {
+      return stint;
+    }
+
+    const precedingPit = data.pits.find((pit) => pit.number + 1 === stint.stint_number);
+    if (!precedingPit) {
+      return stint;
+    }
+
+    const normalized = { ...stint };
+    const expectedLapStart = Math.max(1, precedingPit.lap_number);
+    if (normalized.lap_start === null || normalized.lap_start <= precedingPit.lap_number - 1) {
+      normalized.lap_start = expectedLapStart;
+    }
+
+    if (
+      normalized.tyre_age_at_start !== null
+      && normalized.tyre_age_at_start > MAX_REASONABLE_USED_TYRE_START_AGE_AFTER_LIVE_PIT
+    ) {
+      normalized.tyre_age_at_start = 0;
+    }
+
+    return normalized;
   }
 
   private getDriverTelemetryTimestamp(data: DriverData): string | null {

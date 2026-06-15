@@ -865,6 +865,9 @@ export default function GamePage() {
           <div className="flex items-center justify-between gap-3 py-2.5">
             <div className="flex items-center gap-2">
               <Brand variant="mark" className="h-8 w-8" />
+              <Chip tone="warn" className="px-2 py-0.5 text-[0.65rem]">
+                Beta
+              </Chip>
               {lobbyState.isSimulation && <Chip tone="info">Sim</Chip>}
               <button
                 type="button"

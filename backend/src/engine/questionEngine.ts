@@ -15,6 +15,7 @@ const TIER1_PROGRESS_THRESHOLD = 0.25;
 const TIER2_PROGRESS_THRESHOLD = 0.4;
 const TIER3_PROGRESS_THRESHOLD = 0.55;
 const FINAL_STRETCH_PROGRESS_THRESHOLD = 0.85;
+const RECENT_PIT_QUESTION_MIN_TYRE_AGE = 8;
 
 export type RelaxationTier = 'strict' | 'tier1' | 'tier2' | 'tier3' | 'urgency';
 
@@ -446,6 +447,10 @@ export function isPlausibleCandidate(candidate: QuestionCandidate, tier: Relaxat
   }
 
   if (question.category === 'GAP_CLOSING' && (driver1.interval ?? Infinity) > 6.0) {
+    return false;
+  }
+
+  if (question.category === 'PIT_WINDOW' && driver1.tyreAge < RECENT_PIT_QUESTION_MIN_TYRE_AGE) {
     return false;
   }
 

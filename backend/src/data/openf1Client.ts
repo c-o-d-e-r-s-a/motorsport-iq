@@ -10,6 +10,7 @@ import type {
   OpenF1RaceControl,
   TrackStatus,
 } from '../types';
+import { parseLatestRaceControlStatus } from './raceStatus';
 
 const OPENF1_BASE_URL = process.env.OPENF1_BASE_URL || 'https://api.openf1.org/v1';
 const OPENF1_API_KEY = process.env.OPENF1_API_KEY || ''; // Required for live-session telemetry when F1 SignalR auth is unavailable
@@ -58,6 +59,7 @@ export class OpenF1Client {
   private lastLapNumbers: Map<number, number> = new Map();
   private options: OpenF1ClientOptions;
   private fetchImpl: FetchType;
+  private bypassLiveLock = false;
   // Sticky flag — once OpenF1 returns 401 "Live F1 session in progress" we
   // stop banging on data endpoints for the rest of this client's lifetime.
   // SignalR is the source of truth for the live window.
@@ -81,6 +83,10 @@ export class OpenF1Client {
     this.lastLapNumbers.clear();
     this.lastDataTime = null;
     this.feedStalled = false;
+  }
+
+  setBypassLiveLock(value: boolean): void {
+    this.bypassLiveLock = value;
   }
 
   startPolling(): void {
@@ -169,7 +175,8 @@ export class OpenF1Client {
   private async fetchWithCache<T>(
     endpoint: string,
     params: Record<string, string | number>,
-    maxAge = 5000
+    maxAge = 5000,
+    options?: { bypassLiveLock?: boolean }
   ): Promise<T | null> {
     const cacheKey = `${endpoint}?${new URLSearchParams(
       Object.entries(params).map(([key, value]) => [key, String(value)])
@@ -183,7 +190,12 @@ export class OpenF1Client {
     // `/sessions` metadata endpoint stays reliably accessible. Skip every
     // data endpoint immediately and return cached value (or null) so we
     // don't spam 401s. SignalR delivers the real-time data instead.
-    if (OpenF1Client.liveLocked && !endpoint.startsWith('/sessions')) {
+    if (
+      OpenF1Client.liveLocked
+      && !this.bypassLiveLock
+      && !options?.bypassLiveLock
+      && !endpoint.startsWith('/sessions')
+    ) {
       return cached ? cached.data : null;
     }
 
@@ -277,7 +289,8 @@ export class OpenF1Client {
     const laps = await this.fetchWithCache<OpenF1Lap[]>(
       '/laps',
       { session_key: sessionKey },
-      60_000
+      60_000,
+      { bypassLiveLock: true }
     );
     const hasTelemetry = Array.isArray(laps) && laps.length > 0;
     if (!hasTelemetry) {
@@ -331,64 +344,25 @@ export class OpenF1Client {
   }
 
   parseTrackStatus(messages: OpenF1RaceControl[]): TrackStatus {
-    const sorted = messages
-      .filter(
-        (message) =>
-          Boolean(message.flag) ||
-          message.category === 'SafetyCar' ||
-          message.category === 'Flag'
-      )
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-    if (sorted.length === 0) return 'GREEN';
-
-    const latest = sorted[0];
-    const normalizedFlag = latest.flag?.trim().toLowerCase() ?? '';
-    const normalizedMessage = latest.message?.trim().toLowerCase() ?? '';
-
-    let nextStatus: TrackStatus = 'GREEN';
-
-    if (normalizedFlag === 'chequered' || normalizedMessage.includes('chequered')) {
-      nextStatus = 'CHEQUERED';
-    } else if (normalizedFlag === 'red' || normalizedMessage.includes('red flag')) {
-      nextStatus = 'RED';
-    } else if (
-      latest.category === 'SafetyCar' ||
-      normalizedFlag === 'sc' ||
-      normalizedMessage.includes('safety car')
-    ) {
-      if (
-        normalizedMessage.includes('virtual') ||
-        normalizedFlag === 'vsc'
-      ) {
-        nextStatus = 'VSC';
-      } else {
-        nextStatus = 'SC';
-      }
-    } else if (
-      normalizedFlag === 'yellow' ||
-      normalizedFlag === 'double yellow' ||
-      normalizedMessage.includes('yellow')
-    ) {
-      nextStatus = 'YELLOW';
-    } else if (
-      normalizedFlag === 'green' ||
-      normalizedMessage.includes('green flag') ||
-      normalizedMessage.includes('track clear')
-    ) {
-      nextStatus = 'GREEN';
-    }
+    const nextStatus = parseLatestRaceControlStatus(messages) ?? 'GREEN';
 
     if (DEBUG_RACE_CONTROL) {
+      const latest = messages
+        .slice()
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
       console.debug('[race-control]', {
-        category: latest.category,
-        flag: latest.flag,
-        message: latest.message,
+        category: latest?.category,
+        flag: latest?.flag,
+        message: latest?.message,
         nextStatus,
       });
     }
 
     return nextStatus;
+  }
+
+  parseRaceControlStatus(messages: OpenF1RaceControl[]): TrackStatus | null {
+    return parseLatestRaceControlStatus(messages);
   }
 
   isFeedStalled(): boolean {

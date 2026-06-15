@@ -577,7 +577,12 @@ export async function removePlayer(
     ? remainingPlayers[0]?.id ?? null
     : lobbyState.hostId;
 
-  if ((options?.reason === 'inactive' || options?.reason === 'left') && removedPlayer?.username) {
+  if (
+    (options?.reason === 'inactive'
+      || options?.reason === 'disconnected_timeout'
+      || options?.reason === 'left')
+    && removedPlayer?.username
+  ) {
     await archiveLeaderboardForInactivePlayer({
       lobbyId,
       userId,

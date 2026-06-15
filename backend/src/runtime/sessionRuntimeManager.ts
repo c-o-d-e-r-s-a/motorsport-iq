@@ -219,6 +219,7 @@ class ReplaySessionRuntime extends BaseRuntime {
     this.isPaused = false;
     this.pausedAtMs = null;
     this.client.setSession(this.session.session_key);
+    this.client.setBypassLiveLock(true);
     await this.snapshotStore.initialize(this.session.session_key, {
       sessionMode: 'replay',
       replaySpeed: this.playbackSpeed,

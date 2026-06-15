@@ -17,6 +17,10 @@ import {
   mapTimingAppDataToStints,
   normalizeCompound,
 } from './f1SignalRPitStintMapper';
+import {
+  parseLatestRaceControlStatus,
+  parseTrackStatusPayload,
+} from './raceStatus';
 
 export interface F1SignalRClientOptions {
   onPositionUpdate?: (positions: OpenF1Position[]) => void;
@@ -60,18 +64,6 @@ const NEGOTIATE_URL =
   'https://livetiming.formula1.com/signalr/negotiate?clientProtocol=1.5&connectionData=%5B%7B%22name%22%3A%22Streaming%22%7D%5D';
 const SOCKET_BASE = 'wss://livetiming.formula1.com/signalr/connect';
 const CONNECTION_DATA = encodeURIComponent(JSON.stringify([{ name: 'Streaming' }]));
-
-// F1 TrackStatus.Status numeric codes from livetiming feed.
-// Code 2 is often a local/sector yellow. We keep local yellow incidents out of
-// global track status so a sector caution cannot suppress questions indefinitely.
-// TrackStatus is trusted for GREEN, SC, VSC, RED, and CHEQUERED transitions.
-const TRACK_STATUS_MAP: Record<string, TrackStatus> = {
-  '1': 'GREEN',
-  '4': 'SC',
-  '5': 'RED',
-  '7': 'VSC',
-  '21': 'CHEQUERED',
-};
 
 function parseTimingValue(raw: unknown): number | null {
   if (raw === null || raw === undefined) return null;
@@ -255,6 +247,7 @@ export class F1SignalRClient {
             this.ws?.terminate();
           }
         }, 5000);
+        this.keepAliveTimer.unref?.();
       });
 
       this.ws.on('message', (raw) => {
@@ -352,6 +345,7 @@ export class F1SignalRClient {
       this.reconnectTimer = null;
       if (!this.intentionallyClosed) void this.connect();
     }, delay);
+    this.reconnectTimer.unref?.();
   }
 
   private handleMessage(msg: any): void {
@@ -639,20 +633,10 @@ export class F1SignalRClient {
 
   private handleTrackStatus(data: any): void {
     const statusCode = String(data?.Status ?? '');
-    const message = String(data?.Message ?? '').toLowerCase();
-    let status = TRACK_STATUS_MAP[statusCode] ?? null;
-
-    if (message.includes('virtual safety car')) {
-      status = 'VSC';
-    } else if (message.includes('safety car')) {
-      status = 'SC';
-    } else if (message.includes('red flag')) {
-      status = 'RED';
-    } else if (message.includes('chequered')) {
-      status = 'CHEQUERED';
-    } else if (message.includes('track clear') || message.includes('all clear')) {
-      status = 'GREEN';
-    }
+    const status = parseTrackStatusPayload({
+      statusCode,
+      message: data?.Message,
+    });
 
     if (!status) {
       return;
@@ -702,29 +686,18 @@ export class F1SignalRClient {
     const messages = data?.Messages;
     if (!messages || typeof messages !== 'object') return;
 
-    const entries = Object.values(messages) as Array<{ Utc?: string; Message?: string; Category?: string }>;
+    const entries = Object.values(messages) as Array<{
+      Utc?: string;
+      Message?: string;
+      Category?: string;
+      Flag?: string;
+      Scope?: string;
+      Sector?: number | string;
+      RacingNumber?: number | string;
+    }>;
     if (entries.length === 0) return;
 
-    const latest = entries.sort((a, b) => {
-      const aTime = a.Utc ? new Date(a.Utc).getTime() : 0;
-      const bTime = b.Utc ? new Date(b.Utc).getTime() : 0;
-      return bTime - aTime;
-    })[0];
-
-    const message = String(latest.Message ?? '').toLowerCase();
-    let status: TrackStatus | null = null;
-
-    if (message.includes('virtual safety car')) {
-      status = 'VSC';
-    } else if (message.includes('safety car')) {
-      status = 'SC';
-    } else if (message.includes('red flag')) {
-      status = 'RED';
-    } else if (message.includes('chequered')) {
-      status = 'CHEQUERED';
-    } else if (message.includes('track clear') || message.includes('green flag') || message.includes('track is clear')) {
-      status = 'GREEN';
-    }
+    const status = parseLatestRaceControlStatus(entries);
 
     if (status && status !== this.lastTrackStatus) {
       this.lastTrackStatus = status;
