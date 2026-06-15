@@ -23,7 +23,11 @@ function sortEntries(entries: LeaderboardEntry[]): LeaderboardEntry[] {
   });
 }
 
-const PODIUM_HEIGHTS = ['h-20', 'h-28', 'h-16'];
+const PODIUM_HEIGHTS: Record<1 | 2 | 3, string> = {
+  1: 'h-28',
+  2: 'h-20',
+  3: 'h-16',
+};
 const MEDALS = ['🥇', '🥈', '🥉'];
 
 export default function WinnerScreen({ entries, onBackToLobby, currentUserId }: WinnerScreenProps) {
@@ -113,7 +117,7 @@ export default function WinnerScreen({ entries, onBackToLobby, currentUserId }: 
               <div
                 className={cn(
                   'mt-2 w-full rounded-t-[var(--radius-sm)] border-t-2',
-                  PODIUM_HEIGHTS[place - 1],
+                  PODIUM_HEIGHTS[place],
                   isWinner
                     ? 'border-[var(--color-accent)] bg-[linear-gradient(180deg,var(--color-accent-soft),transparent)]'
                     : 'border-[var(--color-border-strong)] bg-[var(--color-muted)]'

@@ -143,6 +143,12 @@ export class PresenceManager {
         continue;
       }
 
+      if (!entry.connected && entry.disconnectDeadline !== null && now >= entry.disconnectDeadline) {
+        entry.expiring = true;
+        await this.onExpire({ ...entry }, 'disconnected_timeout');
+        continue;
+      }
+
       if (now - entry.lastSeenAt >= this.inactivityTimeoutMs) {
         const threshold = this.resolveInactivityTimeoutMs
           ? await this.resolveInactivityTimeoutMs(entry)
@@ -154,12 +160,6 @@ export class PresenceManager {
 
         entry.expiring = true;
         await this.onExpire({ ...entry }, 'inactive');
-        continue;
-      }
-
-      if (!entry.connected && entry.disconnectDeadline !== null && now >= entry.disconnectDeadline) {
-        // Grace elapsed without reconnect — retain entry until inactivity timeout.
-        entry.disconnectDeadline = null;
         continue;
       }
     }

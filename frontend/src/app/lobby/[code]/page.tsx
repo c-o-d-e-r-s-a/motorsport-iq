@@ -449,7 +449,12 @@ export default function LobbyPage() {
     <main className="app-bg pad-safe-top relative min-h-dvh">
       <div className="mx-auto w-full max-w-3xl px-5 pb-40">
         <header className="flex items-center justify-between py-4">
-          <Brand variant="mark" />
+          <div className="flex items-center gap-2">
+            <Brand variant="mark" />
+            <Chip tone="warn" className="px-2 py-0.5 text-[0.65rem]">
+              Beta
+            </Chip>
+          </div>
           <Button variant="ghost" size="sm" onClick={handleLeaveLobby}>
             Leave
           </Button>
