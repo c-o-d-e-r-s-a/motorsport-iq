@@ -22,6 +22,8 @@ import { useAnswerOutcomeSounds } from '@/hooks/useAnswerOutcomeSounds';
 import { useGameNotifications } from '@/hooks/useGameNotifications';
 import { useMemeQueue } from '@/hooks/useMemeQueue';
 import NotificationPopUpHint from '@/components/NotificationPopUpHint';
+import EmojiReactions from '@/components/EmojiReactions';
+import { PitWallArcade } from '@/components/minigames';
 import {
   SERVER_EVENTS,
   type CreateProblemReportInput,
@@ -105,6 +107,11 @@ export default function GamePage() {
 
   const [activeMeme, setActiveMeme] = useState<{ file: string; folder: string } | null>(null);
   const memeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // After a resolution lands, the result + explanation + meme stay up. Once the user has
+  // had time to take it in, surface the arcade below it so the wait for the next call isn't idle.
+  const [showPostResolutionArcade, setShowPostResolutionArcade] = useState(false);
+  const postResolutionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Receives the actual userId and sanitized username from the server after joining.
   // Needed because join_lobby/join_solo may sanitize profane names without telling the client.
@@ -834,6 +841,20 @@ export default function GamePage() {
     };
   }, [resolution, getNextMeme]);
 
+  // Reveal the arcade ~30s after a resolution so users can read the result and watch the meme
+  // first, then have something to do until the next question fires.
+  useEffect(() => {
+    if (postResolutionTimerRef.current) clearTimeout(postResolutionTimerRef.current);
+    setShowPostResolutionArcade(false);
+    if (!resolution) return undefined;
+    postResolutionTimerRef.current = setTimeout(() => {
+      setShowPostResolutionArcade(true);
+    }, 30_000);
+    return () => {
+      if (postResolutionTimerRef.current) clearTimeout(postResolutionTimerRef.current);
+    };
+  }, [resolution]);
+
   if (showJoinForm) {
     return (
       <main className="app-bg pad-safe-top pad-safe-bottom flex min-h-dvh items-center justify-center p-5">
@@ -993,8 +1014,8 @@ export default function GamePage() {
             // 2. Resolution
             if (resolution) {
               return (
+                <div key={`resolution-${resolution.instanceId}`} className="flex flex-col gap-5">
                 <Card
-                  key={`resolution-${resolution.instanceId}`}
                   tone="elevated"
                   className="animate-pop-in"
                 >
@@ -1106,6 +1127,11 @@ export default function GamePage() {
                     )}
                   </div>
                 </Card>
+
+                {showPostResolutionArcade && !raceHasEnded && (
+                  <PitWallArcade contextLabel="Result's in. Have a go while we wait for the next call — we'll alert you the instant one drops." />
+                )}
+                </div>
               );
             }
 
@@ -1174,45 +1200,68 @@ export default function GamePage() {
 
             // 4. Question waiting (TRIGGERED, LOCKED, ACTIVE)
             if (showQuestionWaitingState && currentQuestion) {
+              // TRIGGERED is a 1s lead-in to a LIVE question — keep the user focused, no games.
+              if (questionState === 'TRIGGERED') {
+                return (
+                  <Card key={`question-waiting-${currentQuestion.instanceId}`} tone="elevated" className="text-center">
+                    <Chip tone="accent" className="mx-auto animate-flash">
+                      Question incoming
+                    </Chip>
+                    <p className="mt-5 font-display text-2xl font-semibold leading-tight md:text-3xl">
+                      {currentQuestion.questionText}
+                    </p>
+                    <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
+                      Get ready — answers open in a moment.
+                    </p>
+                  </Card>
+                );
+              }
+
+              // LOCKED / ACTIVE — answer is in, race is settling it. Surface the arcade so the
+              // wait stays fun, with the pending question pinned compactly above it.
               return (
-                <Card key={`question-waiting-${currentQuestion.instanceId}`} tone="elevated" className="text-center">
-                  <Chip tone="accent" className="mx-auto animate-flash">
-                    {questionState === 'TRIGGERED'
-                      ? 'Question incoming'
-                      : questionState === 'ACTIVE'
-                        ? 'In play'
-                        : 'Answers locked'}
-                  </Chip>
-                  <p className="mt-5 font-display text-2xl font-semibold leading-tight md:text-3xl">
-                    {currentQuestion.questionText}
-                  </p>
-                  <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
-                    {questionState === 'TRIGGERED'
-                      ? 'Get ready — answers open in a moment.'
-                      : questionState === 'ACTIVE'
+                <div key={`question-waiting-${currentQuestion.instanceId}`} className="flex flex-col gap-5">
+                  <Card tone="elevated" className="text-center">
+                    <Chip tone="accent" className="mx-auto animate-flash">
+                      {questionState === 'ACTIVE' ? 'In play' : 'Answers locked'}
+                    </Chip>
+                    <p className="mt-4 font-display text-xl font-semibold leading-tight md:text-2xl">
+                      {currentQuestion.questionText}
+                    </p>
+                    <p className="mt-2 text-sm text-[var(--color-muted-fg)]">
+                      {questionState === 'ACTIVE'
                         ? 'Watching the race to settle this one.'
                         : 'Waiting for the lap to resolve.'}
+                    </p>
+                  </Card>
+                  <PitWallArcade contextLabel="Your answer is in — we'll reveal the result the moment the lap settles." />
+                </div>
+              );
+            }
+
+            // 5. Idle waiting — replay finished keeps the simple recap; otherwise play between calls.
+            if (lobbyState.isReplayComplete) {
+              return (
+                <Card key="waiting-for-question" tone="elevated" className="py-14 text-center md:py-20">
+                  <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
+                    <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+                  </span>
+                  <p className="font-display text-3xl font-bold uppercase md:text-4xl">Waiting for the next call</p>
+                  <p className="mx-auto mt-3 max-w-sm text-sm text-[var(--color-muted-fg)]">
+                    Replay finished — final standings are locked in.
+                  </p>
+                  <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
+                    Questions asked: {lobbyState.questionCount}
                   </p>
                 </Card>
               );
             }
 
-            // 5. Idle waiting
             return (
-              <Card key="waiting-for-question" tone="elevated" className="py-14 text-center md:py-20">
-                <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
-                  <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
-                </span>
-                <p className="font-display text-3xl font-bold uppercase md:text-4xl">Waiting for the next call</p>
-                <p className="mx-auto mt-3 max-w-sm text-sm text-[var(--color-muted-fg)]">
-                  {lobbyState.isReplayComplete
-                    ? 'Replay finished — final standings are locked in.'
-                    : 'Questions appear as the race throws up the right moments. Stay sharp.'}
-                </p>
-                <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
-                  Questions asked: {lobbyState.questionCount}
-                </p>
-              </Card>
+              <PitWallArcade
+                key="waiting-for-question"
+                contextLabel={`No question right now · ${lobbyState.questionCount} asked so far — we'll alert you the instant one drops.`}
+              />
             );
           })()}
 
@@ -1251,6 +1300,8 @@ export default function GamePage() {
           </p>
         </div>
       )}
+
+      <EmojiReactions />
     </main>
   );
 }

@@ -17,6 +17,7 @@ import {
   isPreRacePlayableWindow,
 } from '@/lib/sessionDisplay';
 import { Button, Brand, Card, Chip, Dialog, Input } from '@/components/ui';
+import EmojiReactions from '@/components/EmojiReactions';
 import { cn } from '@/lib/cn';
 import {
   clearInactiveKickRestore,
@@ -724,6 +725,8 @@ export default function LobbyPage() {
           </>
         )}
       </Dialog>
+
+      <EmojiReactions bottomOffset={isHost && !lobbyState.isPublic ? 88 : 20} />
     </main>
   );
 }

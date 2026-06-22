@@ -332,6 +332,11 @@ const distributedLocks = createDistributedLockManager(redisRuntime?.pub);
 
 const PORT = process.env.PORT || 4000;
 
+// Allowlist must mirror REACTION_EMOJIS on the frontend. Anything else is dropped.
+const ALLOWED_REACTIONS = new Set(['🔥', '❤️', '😂', '😮', '👏', '🏎️', '🏁', '😭']);
+const REACTION_RATE_WINDOW_MS = 3000;
+const REACTION_RATE_MAX = 8;
+
 function emitSocketError(
   socket: { emit: (event: string, payload: ServerErrorEvent) => void },
   message: string,
@@ -1367,6 +1372,7 @@ io.on('connection', (socket) => {
 
   let currentUserId: string | null = null;
   let currentLobbyId: string | null = null;
+  const reactionTimestamps: number[] = [];
 
   /**
    * Create a new lobby
@@ -1940,6 +1946,34 @@ io.on('connection', (socket) => {
     }
 
     await markUserActive(currentUserId);
+  });
+
+  /**
+   * Broadcast a lightweight emoji reaction to everyone else in the lobby.
+   * Validated against an allowlist and rate-limited per socket to prevent spam.
+   * The sender renders their own reaction optimistically, so we only fan out to others.
+   */
+  socket.on('emoji_reaction', (data: { emoji?: unknown }) => {
+    if (!currentLobbyId || !currentUserId) {
+      return;
+    }
+
+    const emoji = typeof data?.emoji === 'string' ? data.emoji : '';
+    if (!ALLOWED_REACTIONS.has(emoji)) {
+      return;
+    }
+
+    const now = Date.now();
+    while (reactionTimestamps.length > 0 && now - reactionTimestamps[0] > REACTION_RATE_WINDOW_MS) {
+      reactionTimestamps.shift();
+    }
+    if (reactionTimestamps.length >= REACTION_RATE_MAX) {
+      return;
+    }
+    reactionTimestamps.push(now);
+
+    socket.to(currentLobbyId).emit('emoji_reaction', { emoji, userId: currentUserId });
+    metrics.incrementCounter('socket.emoji_reaction_total');
   });
 
   socket.on('register_push_subscription', (data: { subscription?: PushSubscriptionRecord }) => {
