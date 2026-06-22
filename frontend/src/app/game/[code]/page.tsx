@@ -20,6 +20,7 @@ import { apiFetch } from '@/lib/api';
 import { useQuestionSound } from '@/hooks/useQuestionSound';
 import { useAnswerOutcomeSounds } from '@/hooks/useAnswerOutcomeSounds';
 import { useGameNotifications } from '@/hooks/useGameNotifications';
+import { useMemeQueue } from '@/hooks/useMemeQueue';
 import NotificationPopUpHint from '@/components/NotificationPopUpHint';
 import {
   SERVER_EVENTS,
@@ -100,6 +101,10 @@ export default function GamePage() {
 
   const { playSound } = useQuestionSound('/sounds/question-alert.mp3');
   const { playCorrectSound, playWrongSound } = useAnswerOutcomeSounds();
+  const { getNextMeme } = useMemeQueue();
+
+  const [activeMeme, setActiveMeme] = useState<{ file: string; folder: string } | null>(null);
+  const memeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Receives the actual userId and sanitized username from the server after joining.
   // Needed because join_lobby/join_solo may sanitize profane names without telling the client.
@@ -808,6 +813,27 @@ export default function GamePage() {
     });
   }, [joinUsername, lobbyCode]);
 
+  // Delayed meme: show 3s after resolution so users can read the answer first
+  useEffect(() => {
+    if (memeTimerRef.current) clearTimeout(memeTimerRef.current);
+    if (!resolution) {
+      setActiveMeme(null);
+      return;
+    }
+    const userAnswer = submittedAnswersRef.current[resolution.instanceId] ?? null;
+    const isCorrect = userAnswer !== null && userAnswer === resolution.correctAnswer;
+    memeTimerRef.current = setTimeout(() => {
+      const file = getNextMeme(isCorrect);
+      if (file) {
+        const folder = isCorrect ? 'CorrectAnswerMemes' : 'WrongAnswerMemes';
+        setActiveMeme({ file, folder });
+      }
+    }, 3000);
+    return () => {
+      if (memeTimerRef.current) clearTimeout(memeTimerRef.current);
+    };
+  }, [resolution, getNextMeme]);
+
   if (showJoinForm) {
     return (
       <main className="app-bg pad-safe-top pad-safe-bottom flex min-h-dvh items-center justify-center p-5">
@@ -848,6 +874,7 @@ export default function GamePage() {
   }
 
   const myScore = resolution?.scores?.find((score) => score.userId === currentUserId) ?? null;
+
   const leaderboardForDisplay = currentUserId
     ? leaderboard.map((entry) =>
         entry.userId === currentUserId ? { ...entry, correctAnswers: localCorrectAnswers } : entry
@@ -1010,6 +1037,27 @@ export default function GamePage() {
                       {resolution.explanation}
                     </p>
                   </div>
+
+                  {activeMeme && (
+                    <div className="mt-5 animate-fade-in overflow-hidden rounded-[var(--radius-sm)]">
+                      {/\.(mp4|webm|mov)$/i.test(activeMeme.file) ? (
+                        <video
+                          key={activeMeme.file}
+                          src={`/${activeMeme.folder}/${encodeURIComponent(activeMeme.file)}`}
+                          autoPlay
+                          playsInline
+                          className="w-full rounded-[var(--radius-sm)]"
+                        />
+                      ) : (
+                        <img
+                          key={activeMeme.file}
+                          src={`/${activeMeme.folder}/${encodeURIComponent(activeMeme.file)}`}
+                          alt=""
+                          className="w-full rounded-[var(--radius-sm)]"
+                        />
+                      )}
+                    </div>
+                  )}
 
                   {/* Report — tucked away */}
                   <div className="mt-4">
