@@ -7,6 +7,7 @@ import ReactionLights from './ReactionLights';
 import PitStop from './PitStop';
 import GridDash from './GridDash';
 import TyreMemory from './TyreMemory';
+import { ARCADE_ROOT_ATTR } from './keys';
 
 type Metric = 'ms' | 's' | 'count';
 
@@ -86,7 +87,7 @@ export default function PitWallArcade({ contextLabel, className }: PitWallArcade
   const active = GAMES.find((g) => g.id === activeId) ?? null;
 
   return (
-    <Card tone="elevated" className={cn('animate-fade-up', className)}>
+    <Card tone="elevated" className={cn('animate-fade-up', className)} {...{ [ARCADE_ROOT_ATTR]: '' }}>
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">

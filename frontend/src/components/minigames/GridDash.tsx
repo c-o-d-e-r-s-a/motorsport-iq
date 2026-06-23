@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/cn';
 import { useHighScore } from './useHighScore';
+import { isExternalControlFocused } from './keys';
 
 type Phase = 'idle' | 'running' | 'over';
 
@@ -133,6 +134,7 @@ export default function GridDash() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (isExternalControlFocused()) return;
       if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
         e.preventDefault();
         move(-1);

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { SERVER_EVENTS, type LobbyState, type SessionInfo } from '@/lib/types';
 import { getApiUrl } from '@/lib/api';
@@ -24,12 +25,6 @@ async function wakeBackend(): Promise<void> {
   }
 }
 
-const STEPS = [
-  ['Play solo', 'Jump into a shared lobby with other racers instantly.'],
-  ['Play with friends', 'Create a private lobby and share the code.'],
-  ['Answer on the clock', 'Live prompts pop up during the race. You get 45 seconds.'],
-];
-
 type HomeMode = 'select' | 'solo' | 'friends';
 
 export default function Home() {
@@ -45,7 +40,6 @@ export default function Home() {
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [isWarmingUp, setIsWarmingUp] = useState(false);
-  const [showHow, setShowHow] = useState(false);
   const [mode, setMode] = useState<HomeMode>('select');
 
   // Sessions for solo mode
@@ -270,28 +264,22 @@ export default function Home() {
           <div className="mt-5 max-w-md">
             <RaceAlertOptIn />
           </div>
-          <button
-            type="button"
-            onClick={() => setShowHow((v) => !v)}
-            className="mt-5 inline-flex items-center gap-1.5 text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
-          >
-            How it works
-            <span className={`transition-transform ${showHow ? 'rotate-90' : ''}`}>›</span>
-          </button>
-          {showHow && (
-            <ol className="mt-3 animate-fade-up space-y-2">
-              {STEPS.map(([title, copy], i) => (
-                <li key={title} className="flex gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent-soft)] font-display text-sm font-bold text-[var(--color-accent)]">
-                    {i + 1}
-                  </span>
-                  <p className="text-sm text-[var(--color-muted-fg)]">
-                    <span className="font-semibold text-[var(--color-fg)]">{title}.</span> {copy}
-                  </p>
-                </li>
-              ))}
-            </ol>
-          )}
+          <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2">
+            <Link
+              href="/guide"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
+            >
+              New here? Read the guide
+              <span className="transition-transform">›</span>
+            </Link>
+            <Link
+              href="/arcade"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
+            >
+              Play the arcade
+              <span className="transition-transform">›</span>
+            </Link>
+          </div>
         </section>
 
         {/* Access card */}

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/cn';
 import { useHighScore } from './useHighScore';
+import { isExternalControlFocused } from './keys';
 
 type Phase = 'idle' | 'running' | 'done';
 
@@ -117,6 +118,7 @@ export default function PitStop() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (isExternalControlFocused()) return;
       if (e.code === 'Space' || e.code === 'Enter') {
         e.preventDefault();
         handlePress();

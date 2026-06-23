@@ -107,11 +107,10 @@ export default function GamePage() {
 
   const [activeMeme, setActiveMeme] = useState<{ file: string; folder: string } | null>(null);
   const memeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // After a resolution lands, the result + explanation + meme stay up. Once the user has
-  // had time to take it in, surface the arcade below it so the wait for the next call isn't idle.
-  const [showPostResolutionArcade, setShowPostResolutionArcade] = useState(false);
-  const postResolutionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isMemesMuted, setIsMemesMuted] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('msp_memes_muted') === 'true';
+  });
 
   // Receives the actual userId and sanitized username from the server after joining.
   // Needed because join_lobby/join_solo may sanitize profane names without telling the client.
@@ -841,20 +840,6 @@ export default function GamePage() {
     };
   }, [resolution, getNextMeme]);
 
-  // Reveal the arcade ~30s after a resolution so users can read the result and watch the meme
-  // first, then have something to do until the next question fires.
-  useEffect(() => {
-    if (postResolutionTimerRef.current) clearTimeout(postResolutionTimerRef.current);
-    setShowPostResolutionArcade(false);
-    if (!resolution) return undefined;
-    postResolutionTimerRef.current = setTimeout(() => {
-      setShowPostResolutionArcade(true);
-    }, 30_000);
-    return () => {
-      if (postResolutionTimerRef.current) clearTimeout(postResolutionTimerRef.current);
-    };
-  }, [resolution]);
-
   if (showJoinForm) {
     return (
       <main className="app-bg pad-safe-top pad-safe-bottom flex min-h-dvh items-center justify-center p-5">
@@ -901,6 +886,19 @@ export default function GamePage() {
         entry.userId === currentUserId ? { ...entry, correctAnswers: localCorrectAnswers } : entry
       )
     : leaderboard;
+
+  // Reassurance line shown inside the always-on arcade — adapts to what's happening above it.
+  const arcadeContextLabel = resolution
+    ? "Result's in above — the next question will alert you the instant it drops."
+    : currentQuestion && questionState === 'LIVE'
+      ? currentSubmittedAnswer
+        ? 'Answer locked in — play on while the race settles it.'
+        : "There's a live question above — lock in your answer, then keep playing."
+      : currentQuestion && (questionState === 'ACTIVE' || questionState === 'LOCKED')
+        ? "Your answer is in — we'll reveal the result the moment the lap settles."
+        : currentQuestion && questionState === 'TRIGGERED'
+          ? 'Question incoming above — get ready, then jump back in.'
+          : `No question right now · ${lobbyState.questionCount} asked so far — we'll alert you the instant one drops.`;
 
   return (
     <main className="app-bg relative min-h-dvh">
@@ -1006,7 +1004,8 @@ export default function GamePage() {
                   key="winner-screen"
                   entries={leaderboard}
                   currentUserId={currentUserId ?? undefined}
-                  onBackToLobby={() => router.push(`/lobby/${lobbyCode}`)}
+                  onLeaveLobby={handleLeaveSession}
+                  isLeaving={isLeaving}
                 />
               );
             }
@@ -1014,8 +1013,8 @@ export default function GamePage() {
             // 2. Resolution
             if (resolution) {
               return (
-                <div key={`resolution-${resolution.instanceId}`} className="flex flex-col gap-5">
                 <Card
+                  key={`resolution-${resolution.instanceId}`}
                   tone="elevated"
                   className="animate-pop-in"
                 >
@@ -1062,13 +1061,36 @@ export default function GamePage() {
                   {activeMeme && (
                     <div className="mt-5 animate-fade-in overflow-hidden rounded-[var(--radius-sm)]">
                       {/\.(mp4|webm|mov)$/i.test(activeMeme.file) ? (
-                        <video
-                          key={activeMeme.file}
-                          src={`/${activeMeme.folder}/${encodeURIComponent(activeMeme.file)}`}
-                          autoPlay
-                          playsInline
-                          className="w-full rounded-[var(--radius-sm)]"
-                        />
+                        <div className="relative">
+                          <video
+                            key={activeMeme.file}
+                            ref={(el) => { if (el) el.muted = isMemesMuted; }}
+                            src={`/${activeMeme.folder}/${encodeURIComponent(activeMeme.file)}`}
+                            autoPlay
+                            playsInline
+                            className="w-full rounded-[var(--radius-sm)]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = !isMemesMuted;
+                              setIsMemesMuted(next);
+                              localStorage.setItem('msp_memes_muted', String(next));
+                            }}
+                            className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm transition-opacity hover:bg-black/70"
+                            aria-label={isMemesMuted ? 'Unmute' : 'Mute'}
+                          >
+                            {isMemesMuted ? (
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                                <path d="M9.547 3.062A.75.75 0 0 1 10 3.75v12.5a.75.75 0 0 1-1.264.546L4.703 13H3.167a.75.75 0 0 1-.7-.48A6.985 6.985 0 0 1 2 10c0-.887.165-1.737.468-2.52a.75.75 0 0 1 .699-.48h1.535l4.033-3.296a.75.75 0 0 1 .812-.142ZM13.78 7.22a.75.75 0 1 0-1.06 1.06L14.44 10l-1.72 1.72a.75.75 0 0 0 1.06 1.06L15.5 11.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L16.56 10l1.72-1.72a.75.75 0 0 0-1.06-1.06L15.5 8.94l-1.72-1.72Z" />
+                              </svg>
+                            ) : (
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                                <path d="M9.547 3.062A.75.75 0 0 1 10 3.75v12.5a.75.75 0 0 1-1.264.546L4.703 13H3.167a.75.75 0 0 1-.7-.48A6.985 6.985 0 0 1 2 10c0-.887.165-1.737.468-2.52a.75.75 0 0 1 .699-.48h1.535l4.033-3.296a.75.75 0 0 1 .812-.142ZM12.97 7.22a.75.75 0 0 1 1.06 0 5.5 5.5 0 0 1 0 5.56.75.75 0 0 1-1.06-1.06 4 4 0 0 0 0-3.44.75.75 0 0 1 0-1.06Z" />
+                              </svg>
+                            )}
+                          </button>
+                        </div>
                       ) : (
                         <img
                           key={activeMeme.file}
@@ -1127,11 +1149,6 @@ export default function GamePage() {
                     )}
                   </div>
                 </Card>
-
-                {showPostResolutionArcade && !raceHasEnded && (
-                  <PitWallArcade contextLabel="Result's in. Have a go while we wait for the next call — we'll alert you the instant one drops." />
-                )}
-                </div>
               );
             }
 
@@ -1200,70 +1217,56 @@ export default function GamePage() {
 
             // 4. Question waiting (TRIGGERED, LOCKED, ACTIVE)
             if (showQuestionWaitingState && currentQuestion) {
-              // TRIGGERED is a 1s lead-in to a LIVE question — keep the user focused, no games.
-              if (questionState === 'TRIGGERED') {
-                return (
-                  <Card key={`question-waiting-${currentQuestion.instanceId}`} tone="elevated" className="text-center">
-                    <Chip tone="accent" className="mx-auto animate-flash">
-                      Question incoming
-                    </Chip>
-                    <p className="mt-5 font-display text-2xl font-semibold leading-tight md:text-3xl">
-                      {currentQuestion.questionText}
-                    </p>
-                    <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
-                      Get ready — answers open in a moment.
-                    </p>
-                  </Card>
-                );
-              }
-
-              // LOCKED / ACTIVE — answer is in, race is settling it. Surface the arcade so the
-              // wait stays fun, with the pending question pinned compactly above it.
               return (
-                <div key={`question-waiting-${currentQuestion.instanceId}`} className="flex flex-col gap-5">
-                  <Card tone="elevated" className="text-center">
-                    <Chip tone="accent" className="mx-auto animate-flash">
-                      {questionState === 'ACTIVE' ? 'In play' : 'Answers locked'}
-                    </Chip>
-                    <p className="mt-4 font-display text-xl font-semibold leading-tight md:text-2xl">
-                      {currentQuestion.questionText}
-                    </p>
-                    <p className="mt-2 text-sm text-[var(--color-muted-fg)]">
-                      {questionState === 'ACTIVE'
+                <Card key={`question-waiting-${currentQuestion.instanceId}`} tone="elevated" className="text-center">
+                  <Chip tone="accent" className="mx-auto animate-flash">
+                    {questionState === 'TRIGGERED'
+                      ? 'Question incoming'
+                      : questionState === 'ACTIVE'
+                        ? 'In play'
+                        : 'Answers locked'}
+                  </Chip>
+                  <p className="mt-5 font-display text-2xl font-semibold leading-tight md:text-3xl">
+                    {currentQuestion.questionText}
+                  </p>
+                  <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
+                    {questionState === 'TRIGGERED'
+                      ? 'Get ready — answers open in a moment.'
+                      : questionState === 'ACTIVE'
                         ? 'Watching the race to settle this one.'
                         : 'Waiting for the lap to resolve.'}
-                    </p>
-                  </Card>
-                  <PitWallArcade contextLabel="Your answer is in — we'll reveal the result the moment the lap settles." />
-                </div>
-              );
-            }
-
-            // 5. Idle waiting — replay finished keeps the simple recap; otherwise play between calls.
-            if (lobbyState.isReplayComplete) {
-              return (
-                <Card key="waiting-for-question" tone="elevated" className="py-14 text-center md:py-20">
-                  <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
-                    <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
-                  </span>
-                  <p className="font-display text-3xl font-bold uppercase md:text-4xl">Waiting for the next call</p>
-                  <p className="mx-auto mt-3 max-w-sm text-sm text-[var(--color-muted-fg)]">
-                    Replay finished — final standings are locked in.
-                  </p>
-                  <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
-                    Questions asked: {lobbyState.questionCount}
                   </p>
                 </Card>
               );
             }
 
+            // 5. Idle waiting
             return (
-              <PitWallArcade
-                key="waiting-for-question"
-                contextLabel={`No question right now · ${lobbyState.questionCount} asked so far — we'll alert you the instant one drops.`}
-              />
+              <Card key="waiting-for-question" tone="elevated" className="py-14 text-center md:py-20">
+                <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
+                  <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+                </span>
+                <p className="font-display text-3xl font-bold uppercase md:text-4xl">Waiting for the next call</p>
+                <p className="mx-auto mt-3 max-w-sm text-sm text-[var(--color-muted-fg)]">
+                  {lobbyState.isReplayComplete
+                    ? 'Replay finished — final standings are locked in.'
+                    : 'Questions appear as the race throws up the right moments. Stay sharp.'}
+                </p>
+                <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
+                  Questions asked: {lobbyState.questionCount}
+                </p>
+              </Card>
             );
           })()}
+
+          {/* Persistent Pit Wall Arcade — always mounted so an in-progress game (and any
+              high-score run) is never interrupted when a question or result appears above it.
+              Hidden only once the race is over and the winner screen takes over. */}
+          {!showWinnerScreen && !lobbyState.isReplayComplete && (
+            <div className="mt-5">
+              <PitWallArcade contextLabel={arcadeContextLabel} />
+            </div>
+          )}
 
           {/* Race leader / tyre stats below the stage */}
           <div className="mt-5 lg:hidden">

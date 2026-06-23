@@ -7,7 +7,8 @@ import { cn } from '@/lib/cn';
 
 interface WinnerScreenProps {
   entries: LeaderboardEntry[];
-  onBackToLobby: () => void;
+  onLeaveLobby: () => void;
+  isLeaving?: boolean;
   currentUserId?: string;
 }
 
@@ -30,7 +31,7 @@ const PODIUM_HEIGHTS: Record<1 | 2 | 3, string> = {
 };
 const MEDALS = ['🥇', '🥈', '🥉'];
 
-export default function WinnerScreen({ entries, onBackToLobby, currentUserId }: WinnerScreenProps) {
+export default function WinnerScreen({ entries, onLeaveLobby, isLeaving, currentUserId }: WinnerScreenProps) {
   const ranked = sortEntries(entries);
   const winner = ranked[0];
   // Visual podium order: 2nd, 1st, 3rd
@@ -151,8 +152,8 @@ export default function WinnerScreen({ entries, onBackToLobby, currentUserId }: 
         <Button size="lg" variant="secondary" onClick={handleShare} className="sm:px-8">
           {shared ? 'Copied!' : 'Share result'}
         </Button>
-        <Button size="lg" onClick={onBackToLobby} className="sm:px-8">
-          Back to lobby
+        <Button size="lg" onClick={onLeaveLobby} disabled={isLeaving} className="sm:px-8">
+          {isLeaving ? 'Leaving…' : 'Leave lobby'}
         </Button>
       </div>
     </Card>
