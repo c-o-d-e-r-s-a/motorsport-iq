@@ -265,6 +265,7 @@ export const SERVER_EVENTS = {
   FEED_STATUS: 'feed_status',
   PRESENCE_EXPIRED: 'presence_expired',
   LOBBY_LOOKUP: 'lobby_lookup',
+  EMOJI_REACTION: 'emoji_reaction',
   ERROR: 'error',
 } as const;
 
@@ -282,7 +283,16 @@ export const CLIENT_EVENTS = {
   PRESENCE_PING: 'presence_ping',
   REGISTER_PUSH_SUBSCRIPTION: 'register_push_subscription',
   UNREGISTER_PUSH_SUBSCRIPTION: 'unregister_push_subscription',
+  EMOJI_REACTION: 'emoji_reaction',
 } as const;
+
+export const REACTION_EMOJIS = ['🔥', '❤️', '😂', '😮', '👏', '🏎️', '🏁', '😭'] as const;
+export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
+
+export interface EmojiReactionEvent {
+  emoji: string;
+  userId: string;
+}
 
 export interface PushSubscriptionPayload {
   endpoint: string;

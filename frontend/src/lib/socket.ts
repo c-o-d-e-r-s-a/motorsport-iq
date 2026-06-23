@@ -193,6 +193,10 @@ class SocketClient {
       this.emit(SERVER_EVENTS.PRESENCE_EXPIRED, data);
     });
 
+    this.socket.on(SERVER_EVENTS.EMOJI_REACTION, (data: { emoji: string; userId: string }) => {
+      this.emit(SERVER_EVENTS.EMOJI_REACTION, data);
+    });
+
     this.socket.on(SERVER_EVENTS.ERROR, (error: ServerErrorEvent) => {
       this.lastError = error;
       this.emit(SERVER_EVENTS.ERROR, error);
@@ -305,6 +309,10 @@ class SocketClient {
 
   sendPresencePing(): void {
     this.socket?.emit(CLIENT_EVENTS.PRESENCE_PING);
+  }
+
+  sendReaction(emoji: string): void {
+    this.socket?.emit(CLIENT_EVENTS.EMOJI_REACTION, { emoji });
   }
 
   registerPushSubscription(subscription: {

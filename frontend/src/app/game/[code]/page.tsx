@@ -20,7 +20,10 @@ import { apiFetch } from '@/lib/api';
 import { useQuestionSound } from '@/hooks/useQuestionSound';
 import { useAnswerOutcomeSounds } from '@/hooks/useAnswerOutcomeSounds';
 import { useGameNotifications } from '@/hooks/useGameNotifications';
+import { useMemeQueue } from '@/hooks/useMemeQueue';
 import NotificationPopUpHint from '@/components/NotificationPopUpHint';
+import EmojiReactions from '@/components/EmojiReactions';
+import { PitWallArcade } from '@/components/minigames';
 import {
   SERVER_EVENTS,
   type CreateProblemReportInput,
@@ -100,6 +103,14 @@ export default function GamePage() {
 
   const { playSound } = useQuestionSound('/sounds/question-alert.mp3');
   const { playCorrectSound, playWrongSound } = useAnswerOutcomeSounds();
+  const { getNextMeme } = useMemeQueue();
+
+  const [activeMeme, setActiveMeme] = useState<{ file: string; folder: string } | null>(null);
+  const memeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isMemesMuted, setIsMemesMuted] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('msp_memes_muted') === 'true';
+  });
 
   // Receives the actual userId and sanitized username from the server after joining.
   // Needed because join_lobby/join_solo may sanitize profane names without telling the client.
@@ -808,6 +819,27 @@ export default function GamePage() {
     });
   }, [joinUsername, lobbyCode]);
 
+  // Delayed meme: show 3s after resolution so users can read the answer first
+  useEffect(() => {
+    if (memeTimerRef.current) clearTimeout(memeTimerRef.current);
+    if (!resolution) {
+      setActiveMeme(null);
+      return;
+    }
+    const userAnswer = submittedAnswersRef.current[resolution.instanceId] ?? null;
+    const isCorrect = userAnswer !== null && userAnswer === resolution.correctAnswer;
+    memeTimerRef.current = setTimeout(() => {
+      const file = getNextMeme(isCorrect);
+      if (file) {
+        const folder = isCorrect ? 'CorrectAnswerMemes' : 'WrongAnswerMemes';
+        setActiveMeme({ file, folder });
+      }
+    }, 3000);
+    return () => {
+      if (memeTimerRef.current) clearTimeout(memeTimerRef.current);
+    };
+  }, [resolution, getNextMeme]);
+
   if (showJoinForm) {
     return (
       <main className="app-bg pad-safe-top pad-safe-bottom flex min-h-dvh items-center justify-center p-5">
@@ -848,11 +880,25 @@ export default function GamePage() {
   }
 
   const myScore = resolution?.scores?.find((score) => score.userId === currentUserId) ?? null;
+
   const leaderboardForDisplay = currentUserId
     ? leaderboard.map((entry) =>
         entry.userId === currentUserId ? { ...entry, correctAnswers: localCorrectAnswers } : entry
       )
     : leaderboard;
+
+  // Reassurance line shown inside the always-on arcade — adapts to what's happening above it.
+  const arcadeContextLabel = resolution
+    ? "Result's in above — the next question will alert you the instant it drops."
+    : currentQuestion && questionState === 'LIVE'
+      ? currentSubmittedAnswer
+        ? 'Answer locked in — play on while the race settles it.'
+        : "There's a live question above — lock in your answer, then keep playing."
+      : currentQuestion && (questionState === 'ACTIVE' || questionState === 'LOCKED')
+        ? "Your answer is in — we'll reveal the result the moment the lap settles."
+        : currentQuestion && questionState === 'TRIGGERED'
+          ? 'Question incoming above — get ready, then jump back in.'
+          : `No question right now · ${lobbyState.questionCount} asked so far — we'll alert you the instant one drops.`;
 
   return (
     <main className="app-bg relative min-h-dvh">
@@ -958,7 +1004,8 @@ export default function GamePage() {
                   key="winner-screen"
                   entries={leaderboard}
                   currentUserId={currentUserId ?? undefined}
-                  onBackToLobby={() => router.push(`/lobby/${lobbyCode}`)}
+                  onLeaveLobby={handleLeaveSession}
+                  isLeaving={isLeaving}
                 />
               );
             }
@@ -1010,6 +1057,50 @@ export default function GamePage() {
                       {resolution.explanation}
                     </p>
                   </div>
+
+                  {activeMeme && (
+                    <div className="mt-5 animate-fade-in overflow-hidden rounded-[var(--radius-sm)]">
+                      {/\.(mp4|webm|mov)$/i.test(activeMeme.file) ? (
+                        <div className="relative">
+                          <video
+                            key={activeMeme.file}
+                            ref={(el) => { if (el) el.muted = isMemesMuted; }}
+                            src={`/${activeMeme.folder}/${encodeURIComponent(activeMeme.file)}`}
+                            autoPlay
+                            playsInline
+                            className="w-full rounded-[var(--radius-sm)]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = !isMemesMuted;
+                              setIsMemesMuted(next);
+                              localStorage.setItem('msp_memes_muted', String(next));
+                            }}
+                            className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm transition-opacity hover:bg-black/70"
+                            aria-label={isMemesMuted ? 'Unmute' : 'Mute'}
+                          >
+                            {isMemesMuted ? (
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                                <path d="M9.547 3.062A.75.75 0 0 1 10 3.75v12.5a.75.75 0 0 1-1.264.546L4.703 13H3.167a.75.75 0 0 1-.7-.48A6.985 6.985 0 0 1 2 10c0-.887.165-1.737.468-2.52a.75.75 0 0 1 .699-.48h1.535l4.033-3.296a.75.75 0 0 1 .812-.142ZM13.78 7.22a.75.75 0 1 0-1.06 1.06L14.44 10l-1.72 1.72a.75.75 0 0 0 1.06 1.06L15.5 11.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L16.56 10l1.72-1.72a.75.75 0 0 0-1.06-1.06L15.5 8.94l-1.72-1.72Z" />
+                              </svg>
+                            ) : (
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                                <path d="M9.547 3.062A.75.75 0 0 1 10 3.75v12.5a.75.75 0 0 1-1.264.546L4.703 13H3.167a.75.75 0 0 1-.7-.48A6.985 6.985 0 0 1 2 10c0-.887.165-1.737.468-2.52a.75.75 0 0 1 .699-.48h1.535l4.033-3.296a.75.75 0 0 1 .812-.142ZM12.97 7.22a.75.75 0 0 1 1.06 0 5.5 5.5 0 0 1 0 5.56.75.75 0 0 1-1.06-1.06 4 4 0 0 0 0-3.44.75.75 0 0 1 0-1.06Z" />
+                              </svg>
+                            )}
+                          </button>
+                        </div>
+                      ) : (
+                        <img
+                          key={activeMeme.file}
+                          src={`/${activeMeme.folder}/${encodeURIComponent(activeMeme.file)}`}
+                          alt=""
+                          className="w-full rounded-[var(--radius-sm)]"
+                        />
+                      )}
+                    </div>
+                  )}
 
                   {/* Report — tucked away */}
                   <div className="mt-4">
@@ -1168,6 +1259,15 @@ export default function GamePage() {
             );
           })()}
 
+          {/* Persistent Pit Wall Arcade — always mounted so an in-progress game (and any
+              high-score run) is never interrupted when a question or result appears above it.
+              Hidden only once the race is over and the winner screen takes over. */}
+          {!showWinnerScreen && !lobbyState.isReplayComplete && (
+            <div className="mt-5">
+              <PitWallArcade contextLabel={arcadeContextLabel} />
+            </div>
+          )}
+
           {/* Race leader / tyre stats below the stage */}
           <div className="mt-5 lg:hidden">
             <TireStats
@@ -1203,6 +1303,8 @@ export default function GamePage() {
           </p>
         </div>
       )}
+
+      <EmojiReactions />
     </main>
   );
 }
