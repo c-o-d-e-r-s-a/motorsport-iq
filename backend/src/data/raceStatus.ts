@@ -175,13 +175,77 @@ export function parseRaceControlMessageStatus(message: RaceControlLike): TrackSt
   return null;
 }
 
+export type SectorFlagAction =
+  | { kind: 'set'; sector: number }
+  | { kind: 'clear'; sector: number }
+  | { kind: 'clearAll' }
+  | { kind: 'none' };
+
+/**
+ * Classify a single race-control message for the purpose of tracking localized
+ * (sector) yellow flags. This is display-only and entirely independent of the
+ * global {@link TrackStatus} parsing.
+ *
+ * - A sector-scoped YELLOW / DOUBLE YELLOW sets that sector yellow.
+ * - A sector-scoped CLEAR / GREEN clears that sector.
+ * - A global clear/green (track clear, all clear, green flag) clears every
+ *   sector. Any global neutralization (SC/VSC/RED) or the chequered flag also
+ *   clears every sector, since the global status then drives the display.
+ */
+export function classifySectorFlag(message: RaceControlLike): SectorFlagAction {
+  const flag = normalize(message.flag ?? message.Flag);
+  const text = normalize(message.message ?? message.Message);
+  const sector = parsePositiveNumber(message.sector ?? message.Sector);
+  const isGlobal = isGlobalRaceControlMessage(message);
+
+  // Global states that supersede localized sector cautions on the display.
+  const globalStatus = parseRaceControlMessageStatus(message);
+  if (
+    isGlobal
+    && globalStatus
+    && globalStatus !== 'YELLOW'
+  ) {
+    return { kind: 'clearAll' };
+  }
+
+  if (sector === null) {
+    return { kind: 'none' };
+  }
+
+  const isYellow = flag === 'yellow' || flag === 'double yellow'
+    || text.includes('yellow');
+  if (isYellow) {
+    return { kind: 'set', sector };
+  }
+
+  const isClear = flag === 'clear' || flag === 'green'
+    || text.includes('clear') || text.includes('green');
+  if (isClear) {
+    return { kind: 'clear', sector };
+  }
+
+  return { kind: 'none' };
+}
+
 export function parseLatestRaceControlStatus(messages: RaceControlLike[]): TrackStatus | null {
+  return parseLatestRaceControlStatusWithTime(messages)?.status ?? null;
+}
+
+/**
+ * Like {@link parseLatestRaceControlStatus} but also returns the timestamp of
+ * the message that produced the status. Callers use the time to reject
+ * stale/out-of-order race-control deltas that would otherwise regress the
+ * track status (e.g. a previously-seen yellow re-delivered after a green).
+ */
+export function parseLatestRaceControlStatusWithTime(
+  messages: RaceControlLike[]
+): { status: TrackStatus; time: number } | null {
   const sorted = [...messages].sort((a, b) => messageTime(b) - messageTime(a));
 
   for (const message of sorted) {
     const status = parseRaceControlMessageStatus(message);
     if (status) {
-      return status;
+      return { status, time: messageTime(message) };
     }
   }
 

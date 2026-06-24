@@ -64,6 +64,7 @@ class LiveSessionRuntime extends BaseRuntime {
           );
         }
       },
+      onRaceControlMessages: (messages) => this.snapshotStore.processSectorFlagMessages(messages),
       onTotalLaps: (totalLaps) => this.snapshotStore.setTotalLaps(totalLaps),
       onDriverList: (drivers) => this.snapshotStore.processDriverListUpdate(drivers),
       onStintUpdate: (stints) => this.snapshotStore.processStintUpdate(stints),

@@ -442,6 +442,35 @@ describe('SnapshotStore race control updates', () => {
     expect(leader?.tyreAge).toBe(1);
   });
 
+  it('resets tyre age to 0 on the pit lap (age 17 → 0 when a fresh stint starts)', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processStintUpdate([
+      createStint({ stint_number: 1, lap_start: 1, lap_end: null, compound: 'MEDIUM', tyre_age_at_start: 0 }),
+    ]);
+    // Running lap 18 on the opening stint → 17 laps of wear.
+    store.processLapCompletion(createLap({ lap_number: 17 }));
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(18);
+    expect(store.getCurrentSnapshot()?.drivers[0]?.tyreAge).toBe(17);
+
+    // Pit on lap 18 and bolt on a fresh set.
+    store.processPitUpdate([createPit({ lap_number: 18, number: 1 })]);
+    store.processStintUpdate([
+      createStint({ stint_number: 2, lap_start: 18, lap_end: null, compound: 'HARD', tyre_age_at_start: 0 }),
+    ]);
+
+    const leader = store.getCurrentSnapshot()?.drivers[0];
+    expect(leader?.stintNumber).toBe(2);
+    expect(leader?.tyreCompound).toBe('HARD');
+    expect(leader?.tyreAge).toBe(0);
+  });
+
   it('falls back to the previous stint compound after a pit stop with missing compound', async () => {
     const client = {
       getDrivers: jest.fn(async () => [createDriver()]),
@@ -491,6 +520,66 @@ describe('SnapshotStore race control updates', () => {
     jest.runOnlyPendingTimers();
 
     expect(store.getCurrentSnapshot()?.lapNumber).toBe(1);
+  });
+
+  it('tracks localized sector yellows for display without changing track status', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+    store.processLapCompletion(createLap({ lap_number: 9 }));
+
+    store.processRaceControlUpdate([
+      createRaceControl({ flag: 'DOUBLE YELLOW', scope: 'Sector', sector: 6, message: 'DOUBLE YELLOW IN TRACK SECTOR 6' }),
+    ]);
+    expect(store.getCurrentSnapshot()?.trackStatus).toBe('GREEN');
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([6]);
+
+    store.processRaceControlUpdate([
+      createRaceControl({ flag: 'YELLOW', scope: 'Sector', sector: 7, message: 'YELLOW IN TRACK SECTOR 7' }),
+    ]);
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([6, 7]);
+
+    store.processRaceControlUpdate([
+      createRaceControl({ flag: 'CLEAR', scope: 'Sector', sector: 6, message: 'CLEAR IN TRACK SECTOR 6' }),
+    ]);
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([7]);
+
+    // A global green/track-clear wipes every localized sector yellow.
+    store.processRaceControlUpdate([
+      createRaceControl({ flag: 'GREEN', scope: 'Track', sector: 0, message: 'TRACK CLEAR' }),
+    ]);
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([]);
+    expect(store.getCurrentSnapshot()?.trackStatus).toBe('GREEN');
+  });
+
+  it('clears localized sector yellows when a global neutralization (SC) is shown', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn((messages: any[]) =>
+        messages.some((m) => String(m.message).includes('SAFETY CAR')) ? ('SC' as const) : ('GREEN' as const)
+      ),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+    store.processLapCompletion(createLap({ lap_number: 9 }));
+
+    store.processRaceControlUpdate([
+      createRaceControl({ flag: 'YELLOW', scope: 'Sector', sector: 4, message: 'YELLOW IN TRACK SECTOR 4' }),
+    ]);
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([4]);
+
+    store.processRaceControlUpdate([
+      createRaceControl({ category: 'SafetyCar', flag: null as never, scope: 'Track', sector: 0, message: 'SAFETY CAR DEPLOYED' }),
+    ]);
+    expect(store.getCurrentSnapshot()?.trackStatus).toBe('SC');
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([]);
   });
 
   it('starts at lap 1 when SESSION STARTED race control is received', async () => {

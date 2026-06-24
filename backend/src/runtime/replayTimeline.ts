@@ -50,6 +50,82 @@ function getLapCompletionTimestamp(lap: OpenF1Lap): number {
   return startMs;
 }
 
+/**
+ * Compute the true completion timestamp for every lap row.
+ *
+ * A lap completes the instant the NEXT lap for the same driver starts
+ * (`date_start`). This is far more robust than `date_start + lap_duration`:
+ *   - Lap 1 has no `lap_duration` in OpenF1 (standing start) and its
+ *     `date_start` equals the race-start instant. Using the fallback collapsed
+ *     lap 1's "completion" to t=0, which advanced the displayed lap to 2 before
+ *     the race had visibly begun (the "starts at lap 2" bug).
+ *   - In/out laps and any row with a missing duration are handled correctly.
+ * The final lap (no successor) falls back to `date_start + lap_duration`.
+ */
+function buildLapCompletionTimestamps(laps: OpenF1Lap[]): Map<OpenF1Lap, number> {
+  const lapsByDriver = new Map<number, OpenF1Lap[]>();
+  for (const lap of laps) {
+    const list = lapsByDriver.get(lap.driver_number);
+    if (list) {
+      list.push(lap);
+    } else {
+      lapsByDriver.set(lap.driver_number, [lap]);
+    }
+  }
+
+  const completionByLap = new Map<OpenF1Lap, number>();
+  for (const driverLaps of lapsByDriver.values()) {
+    driverLaps.sort((a, b) => a.lap_number - b.lap_number);
+    for (let i = 0; i < driverLaps.length; i += 1) {
+      const lap = driverLaps[i];
+      const nextLap = driverLaps[i + 1];
+      const nextStartMs = nextLap?.date_start ? new Date(nextLap.date_start).getTime() : Number.NaN;
+      const completion = Number.isFinite(nextStartMs)
+        ? nextStartMs
+        : getLapCompletionTimestamp(lap);
+      completionByLap.set(lap, completion);
+    }
+  }
+
+  return completionByLap;
+}
+
+/**
+ * Collapse the starting grid into seed position events stamped at the race
+ * start.
+ *
+ * OpenF1's `/position` endpoint only emits a record when a driver's position
+ * CHANGES. The starting grid is therefore stamped well before lights-out (e.g.
+ * during the formation lap) and gets discarded by the `>= startTime` filter. A
+ * driver who runs wire-to-wire (or simply holds station early) then has no
+ * position record at all, so the snapshot store cannot identify the leader and
+ * defaults to an arbitrary driver. Re-stamping each driver's latest pre-start
+ * position to the race-start instant seeds the correct grid order; genuine
+ * post-start changes override it as they arrive.
+ */
+function buildGridSeedPositions(positions: OpenF1Position[], startTime: number): OpenF1Position[] {
+  if (!Number.isFinite(startTime) || startTime <= 0) {
+    return [];
+  }
+
+  const latestByDriver = new Map<number, OpenF1Position>();
+  for (const pos of positions) {
+    const ts = new Date(pos.date).getTime();
+    if (!Number.isFinite(ts) || ts > startTime) {
+      continue;
+    }
+    const existing = latestByDriver.get(pos.driver_number);
+    if (!existing || ts >= new Date(existing.date).getTime()) {
+      latestByDriver.set(pos.driver_number, pos);
+    }
+  }
+
+  const startIso = new Date(startTime).toISOString();
+  return [...latestByDriver.values()]
+    .filter((pos) => pos.position > 0)
+    .map((pos) => ({ ...pos, date: startIso }));
+}
+
 export function determineReplayStartTime(raceControl: OpenF1RaceControl[]): number {
   const sessionStarted = raceControl.find(
     (message) => message.category === 'SessionStatus' && message.message?.toUpperCase() === 'SESSION STARTED'
@@ -73,12 +149,22 @@ export function determineReplayStartTime(raceControl: OpenF1RaceControl[]): numb
 
 export function buildReplayTimeline(input: ReplayTimelineInput): ReplayEvent[] {
   const startTime = determineReplayStartTime(input.raceControl);
+  const lapCompletionTimestamps = buildLapCompletionTimestamps(input.laps);
+  const gridSeedPositions = buildGridSeedPositions(input.positions, startTime);
   let sequence = 0;
 
   const events: ReplayEvent[] = [
     ...input.raceControl.map((event) => ({
       type: 'race_control' as const,
       timestamp: new Date(event.date).getTime(),
+      sequence: sequence++,
+      data: event,
+    })),
+    // Grid seed first so the correct leader is established at the race start,
+    // before any post-start position changes (which override it) arrive.
+    ...gridSeedPositions.map((event) => ({
+      type: 'position' as const,
+      timestamp: startTime,
       sequence: sequence++,
       data: event,
     })),
@@ -102,7 +188,7 @@ export function buildReplayTimeline(input: ReplayTimelineInput): ReplayEvent[] {
     })),
     ...input.laps.map((event) => ({
       type: 'lap' as const,
-      timestamp: getLapCompletionTimestamp(event),
+      timestamp: lapCompletionTimestamps.get(event) ?? getLapCompletionTimestamp(event),
       sequence: sequence++,
       data: event,
     })),

@@ -27,8 +27,13 @@ describeOpenF1Integration('historical replay question selection', () => {
     // in progress. This integration test depends on the real API, so when
     // that lock kicks in we skip the assertion rather than fail spuriously —
     // SignalR (covered by separate tests) is the live-window data source.
-    if (OpenF1Client.isLiveLocked() || (laps ?? []).length === 0) {
-      console.warn('[integration] OpenF1 historical endpoints unavailable (live session lock). Skipping assertion.');
+    if (
+      OpenF1Client.isLiveLocked()
+      || (laps ?? []).length === 0
+      || (positions ?? []).length === 0
+      || (intervals ?? []).length === 0
+    ) {
+      console.warn('[integration] OpenF1 historical endpoints unavailable/partial (live lock or rate limit). Skipping assertion.');
       return;
     }
 
