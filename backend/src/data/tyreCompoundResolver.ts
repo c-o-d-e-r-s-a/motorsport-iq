@@ -40,7 +40,16 @@ export function resolveTyreCompound(
     return latestCompound;
   }
 
-  return findMostRecentStintCompound(source.stints);
+  // Fallback only across the active stint and EARLIER stints. Borrowing a
+  // FUTURE stint's compound (e.g. showing HARD during an early stint whose
+  // compound OpenF1 left blank, because the driver later switched to HARD)
+  // reports a tyre the driver is not yet on. Never surface a compound the
+  // driver hasn't fitted at the current point in the race.
+  const candidateStints = activeStint
+    ? source.stints.filter((stint) => stint.stint_number <= activeStint.stint_number)
+    : source.stints;
+
+  return findMostRecentStintCompound(candidateStints);
 }
 
 export function mergeStintRecords(existing: OpenF1Stint, incoming: OpenF1Stint): OpenF1Stint {

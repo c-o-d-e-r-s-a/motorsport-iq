@@ -223,6 +223,8 @@ export interface RaceSnapshotEvent {
   leaderStats: LeaderStats | null;
   topThree: string[];
   dataFeedStalled: boolean;
+  /** Display-only localized sector yellows (does not affect gameplay). */
+  localYellowSectors?: number[];
 }
 
 export interface SessionInfo {

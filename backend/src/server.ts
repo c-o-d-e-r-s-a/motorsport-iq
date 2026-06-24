@@ -373,6 +373,7 @@ function toRaceSnapshotEvent(snapshot: RaceSnapshot): RaceSnapshotEvent {
       : null,
     topThree: snapshot.drivers.slice(0, 3).map((driver) => driver.name),
     dataFeedStalled: snapshot.dataFeedStalled,
+    localYellowSectors: snapshot.localYellowSectors ?? [],
   };
 }
 

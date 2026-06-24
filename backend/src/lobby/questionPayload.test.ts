@@ -15,6 +15,7 @@ function createSnapshot(): RaceSnapshot {
     dataFeedStalled: false,
     leaderLapTime: 89.2,
     leaderLapStartTime: '2024-12-31T23:58:31.000Z',
+    localYellowSectors: [],
   };
 }
 

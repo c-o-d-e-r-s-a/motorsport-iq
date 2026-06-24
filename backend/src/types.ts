@@ -59,6 +59,13 @@ export interface RaceSnapshot {
   dataFeedStalled: boolean;
   leaderLapTime: number | null;
   leaderLapStartTime: string | null;
+  /**
+   * Sector numbers currently under a localized (non-global) yellow flag.
+   * Display-only: this NEVER affects `trackStatus`, question triggering, or
+   * resolution. It exists so the HUD can reflect on-track sector cautions that
+   * do not neutralize the race (which would otherwise show as plain green).
+   */
+  localYellowSectors: number[];
 }
 
 // OpenF1 API response types
@@ -409,4 +416,6 @@ export interface RaceSnapshotEvent {
   leaderStats: LeaderStats | null;
   topThree: string[];
   dataFeedStalled: boolean;
+  /** Display-only localized sector yellows (does not affect gameplay). */
+  localYellowSectors: number[];
 }

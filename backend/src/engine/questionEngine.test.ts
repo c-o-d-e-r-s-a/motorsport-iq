@@ -73,6 +73,7 @@ function createSnapshot(overrides: Partial<RaceSnapshot> = {}): RaceSnapshot {
     dataFeedStalled: false,
     leaderLapTime: 90.5,
     leaderLapStartTime: '2026-03-13T11:58:30Z',
+    localYellowSectors: [],
     ...overrides,
   };
 }

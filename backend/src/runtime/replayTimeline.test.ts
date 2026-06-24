@@ -120,6 +120,116 @@ describe('replayTimeline', () => {
     ]);
   });
 
+  it('seeds the starting grid so a wire-to-wire leader is present from the start', () => {
+    const sessionStart = '2026-06-14T13:03:27+00:00';
+    const startMs = new Date(sessionStart).getTime();
+    const timeline = buildReplayTimeline({
+      raceControl: [
+        {
+          date: sessionStart,
+          session_key: 1,
+          meeting_key: 1,
+          category: 'SessionStatus',
+          flag: null as never,
+          scope: null as never,
+          sector: 0 as never,
+          driver_number: 0 as never,
+          message: 'SESSION STARTED',
+          lap_number: 1,
+        },
+      ],
+      positions: [
+        // Pole sitter — only ever recorded on the grid (well before start).
+        { date: '2026-06-14T12:09:53+00:00', session_key: 1, meeting_key: 1, driver_number: 63, position: 1 },
+        { date: '2026-06-14T12:09:53+00:00', session_key: 1, meeting_key: 1, driver_number: 3, position: 5 },
+        // Driver 3 changes position after the start; driver 63 never does.
+        { date: '2026-06-14T13:05:00+00:00', session_key: 1, meeting_key: 1, driver_number: 3, position: 4 },
+      ],
+      intervals: [],
+      pits: [],
+      laps: [],
+    });
+
+    const positionEvents = timeline.filter((event) => event.type === 'position');
+    const leaderSeed = positionEvents.find(
+      (event) => (event.data as { driver_number: number }).driver_number === 63
+    );
+
+    expect(leaderSeed).toBeDefined();
+    expect((leaderSeed!.data as { position: number }).position).toBe(1);
+    expect(leaderSeed!.timestamp).toBe(startMs);
+    // No pre-start (grid) event should leak through with its original timestamp.
+    expect(positionEvents.every((event) => event.timestamp >= startMs)).toBe(true);
+  });
+
+  it('completes the standing-start lap 1 at lap 2 start, not the race-start instant', () => {
+    const sessionStart = '2026-03-08T04:03:26+00:00';
+    const lap2Start = '2026-03-08T04:05:00+00:00';
+    const timeline = buildReplayTimeline({
+      raceControl: [
+        {
+          date: sessionStart,
+          session_key: 1,
+          meeting_key: 1,
+          category: 'SessionStatus',
+          flag: null as never,
+          scope: null as never,
+          sector: 0 as never,
+          driver_number: 0 as never,
+          message: 'SESSION STARTED',
+          lap_number: 1,
+        },
+      ],
+      positions: [],
+      intervals: [],
+      pits: [],
+      laps: [
+        {
+          session_key: 1,
+          meeting_key: 1,
+          driver_number: 63,
+          lap_number: 1,
+          // OpenF1 leaves lap 1 duration null for standing starts.
+          lap_duration: null as never,
+          lap_time: null,
+          is_pit_out_lap: true,
+          date_start: sessionStart,
+          duration_sector_1: null,
+          duration_sector_2: null,
+          duration_sector_3: null,
+          segments_sector_1: [],
+          segments_sector_2: [],
+          segments_sector_3: [],
+        },
+        {
+          session_key: 1,
+          meeting_key: 1,
+          driver_number: 63,
+          lap_number: 2,
+          lap_duration: 84,
+          lap_time: null,
+          is_pit_out_lap: false,
+          date_start: lap2Start,
+          duration_sector_1: null,
+          duration_sector_2: null,
+          duration_sector_3: null,
+          segments_sector_1: [],
+          segments_sector_2: [],
+          segments_sector_3: [],
+        },
+      ],
+    });
+
+    const lapOne = timeline.find(
+      (event) => event.type === 'lap' && (event.data as { lap_number: number }).lap_number === 1
+    );
+
+    expect(lapOne).toBeDefined();
+    // The fix: lap 1 completes when lap 2 starts, never at the race-start instant.
+    expect(lapOne!.timestamp).toBe(new Date(lap2Start).getTime());
+    expect(lapOne!.timestamp).not.toBe(new Date(sessionStart).getTime());
+  });
+
   it('keeps lap events when lap_duration is zero (uses completion timestamp)', () => {
     const sessionStart = '2024-11-03T15:50:00+00:00';
     const timeline = buildReplayTimeline({

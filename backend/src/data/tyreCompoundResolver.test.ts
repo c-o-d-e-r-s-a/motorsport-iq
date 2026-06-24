@@ -60,6 +60,24 @@ describe('tyreCompoundResolver', () => {
     )).toBe('SOFT');
   });
 
+  it('never borrows a future stint compound when the active (earlier) stint is blank', () => {
+    // Mirrors OpenF1 leaving an early stint's compound blank (e.g. Russell,
+    // Australian GP 2026) while a later stint is HARD. The early stint must not
+    // display HARD — a tyre the driver has not fitted yet.
+    const activeStint = createStint({ stint_number: 1, lap_start: 1, lap_end: 11, compound: null });
+
+    expect(resolveTyreCompound(
+      {
+        latestCompound: null,
+        stints: [
+          activeStint,
+          createStint({ stint_number: 2, lap_start: 12, lap_end: 58, compound: 'HARD' }),
+        ],
+      },
+      activeStint
+    )).toBeNull();
+  });
+
   it('finds the latest stint by lap_start when resolving historical compounds', () => {
     expect(findMostRecentStintCompound([
       createStint({ stint_number: 1, lap_start: 1, compound: 'SOFT' }),

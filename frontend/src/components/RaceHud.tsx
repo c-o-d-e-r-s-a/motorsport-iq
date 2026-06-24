@@ -21,6 +21,12 @@ export default function RaceHud({
 }: RaceHudProps) {
   const hasCompleted = raceCompletedLap !== null;
   const lapToShow = snapshot?.lapNumber ?? null;
+  const yellowSectors = snapshot?.localYellowSectors ?? [];
+  // Localized sector yellows are informational only — show them alongside a
+  // green track, never on top of a global neutralization (SC/VSC/RED) which the
+  // main badge already conveys (and during which the backend clears them).
+  const showSectorYellow =
+    !hasCompleted && snapshot?.trackStatus === 'GREEN' && yellowSectors.length > 0;
 
   return (
     <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -41,6 +47,15 @@ export default function RaceHud({
             <Chip tone="accent">🏁 Finished</Chip>
           ) : (
             <RaceConditionBadge status={snapshot.trackStatus} highlighted={highlightTrackStatus} />
+          )}
+
+          {showSectorYellow && (
+            <Chip tone="warn" title={`Localized yellow flag in sector ${yellowSectors.join(', ')}`}>
+              <span className="animate-flash">🟡</span>
+              <span className="font-semibold">
+                Sector {yellowSectors.length > 1 ? 'Yellows' : 'Yellow'} {yellowSectors.join(', ')}
+              </span>
+            </Chip>
           )}
 
           <Chip tone="neutral">

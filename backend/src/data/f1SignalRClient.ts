@@ -7,6 +7,7 @@ import type {
   OpenF1Lap,
   OpenF1Pit,
   OpenF1Position,
+  OpenF1RaceControl,
   OpenF1Stint,
   TrackStatus,
 } from '../types';
@@ -18,7 +19,7 @@ import {
   normalizeCompound,
 } from './f1SignalRPitStintMapper';
 import {
-  parseLatestRaceControlStatus,
+  parseLatestRaceControlStatusWithTime,
   parseTrackStatusPayload,
 } from './raceStatus';
 
@@ -28,6 +29,8 @@ export interface F1SignalRClientOptions {
   onLapCompletion?: (lap: OpenF1Lap) => void;
   onTimingProgress?: (maxLap: number) => void;
   onTrackStatusChange?: (status: TrackStatus) => void;
+  /** Raw race-control messages, used to track display-only localized sector yellows. */
+  onRaceControlMessages?: (messages: OpenF1RaceControl[]) => void;
   onTotalLaps?: (totalLaps: number) => void;
   onDriverList?: (drivers: OpenF1Driver[]) => void;
   onStintUpdate?: (stints: OpenF1Stint[]) => void;
@@ -160,6 +163,8 @@ export class F1SignalRClient {
   private cookies: string = '';
   private lastCompletedLapByDriver = new Map<number, number>();
   private lastTrackStatus: TrackStatus | null = null;
+  /** Utc (ms) of the most recent race-control message that drove a status change. */
+  private lastRaceControlStatusTime = 0;
   private lastPitStopCountByDriver = new Map<number, number>();
   private lastEmittedPitNumberByDriver = new Map<number, number>();
   private inPitByDriver = new Map<number, boolean>();
@@ -697,12 +702,41 @@ export class F1SignalRClient {
     }>;
     if (entries.length === 0) return;
 
-    const status = parseLatestRaceControlStatus(entries);
+    // Forward raw messages so the snapshot store can track display-only
+    // localized sector yellows. Done before the global-status early-return
+    // below because a sector-only batch yields no global status change.
+    if (this.options.onRaceControlMessages) {
+      const mapped: OpenF1RaceControl[] = entries.map((entry) => ({
+        date: entry.Utc ?? new Date().toISOString(),
+        session_key: 0,
+        meeting_key: 0,
+        category: String(entry.Category ?? ''),
+        flag: String(entry.Flag ?? ''),
+        scope: String(entry.Scope ?? ''),
+        sector: Number.parseInt(String(entry.Sector ?? ''), 10) || 0,
+        driver_number: Number.parseInt(String(entry.RacingNumber ?? ''), 10) || 0,
+        message: String(entry.Message ?? ''),
+        lap_number: 0,
+      }));
+      this.options.onRaceControlMessages(mapped);
+    }
 
-    if (status && status !== this.lastTrackStatus) {
-      this.lastTrackStatus = status;
-      console.log(`[SignalR] Race control track status: ${status}`);
-      this.options.onTrackStatusChange?.(status);
+    const latest = parseLatestRaceControlStatusWithTime(entries);
+    if (!latest) return;
+
+    // Reject stale / out-of-order race-control deltas. The live feed can
+    // re-deliver an earlier message (e.g. on reconnect or a buffered packet);
+    // without this guard a previously-seen yellow could arrive after a green
+    // and wrongly flip the track back to yellow.
+    if (latest.time > 0 && latest.time < this.lastRaceControlStatusTime) {
+      return;
+    }
+    this.lastRaceControlStatusTime = Math.max(this.lastRaceControlStatusTime, latest.time);
+
+    if (latest.status !== this.lastTrackStatus) {
+      this.lastTrackStatus = latest.status;
+      console.log(`[SignalR] Race control track status: ${latest.status}`);
+      this.options.onTrackStatusChange?.(latest.status);
     }
   }
 }

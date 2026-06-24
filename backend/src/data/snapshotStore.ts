@@ -14,6 +14,7 @@ import type {
 } from '../types';
 import { isOvertakeModeArmed } from '../engine/derivedSignals';
 import type { OpenF1Client } from './openf1Client';
+import { classifySectorFlag } from './raceStatus';
 import { mergeStintRecords, resolveTyreCompound } from './tyreCompoundResolver';
 
 interface SnapshotStoreOptions {
@@ -81,6 +82,8 @@ export class SnapshotStore {
   private retiredDrivers = new Set<number>();
   /** Drivers that have had at least one valid position (> 0) reported during this session. */
   private driverHadValidPosition = new Set<number>();
+  /** Sectors currently under a localized yellow — display-only, never gates gameplay. */
+  private activeYellowSectors = new Set<number>();
 
   constructor(client: OpenF1Client, options: SnapshotStoreOptions = {}) {
     this.client = client;
@@ -107,6 +110,7 @@ export class SnapshotStore {
     this.isReplayComplete = false;
     this.retiredDrivers.clear();
     this.driverHadValidPosition.clear();
+    this.activeYellowSectors.clear();
     this.sessionMode = config?.sessionMode ?? 'live';
     this.openF1LapNumbering = config?.openF1LapNumbering ?? false;
     this.replaySpeed = config?.replaySpeed ?? null;
@@ -442,6 +446,10 @@ export class SnapshotStore {
       }
     }
 
+    // Track localized sector yellows for display. This is intentionally
+    // independent of global track status and never changes `this.trackStatus`.
+    const sectorFlagsChanged = this.applySectorFlagMessages(messages);
+
     const statusParser = (
       this.client as OpenF1Client & {
         parseRaceControlStatus?: (messages: OpenF1RaceControl[]) => TrackStatus | null;
@@ -451,15 +459,64 @@ export class SnapshotStore {
       ? statusParser.call(this.client, messages)
       : this.client.parseTrackStatus(messages);
 
-    if (!nextTrackStatus || nextTrackStatus === this.trackStatus) {
-      return;
+    const trackStatusChanged = Boolean(nextTrackStatus) && nextTrackStatus !== this.trackStatus;
+    if (trackStatusChanged) {
+      this.trackStatus = nextTrackStatus as TrackStatus;
     }
 
-    this.trackStatus = nextTrackStatus;
-
-    if (this.currentSnapshot) {
+    if ((trackStatusChanged || sectorFlagsChanged) && this.currentSnapshot) {
       this.buildSnapshot();
     }
+  }
+
+  /**
+   * Update the displayed localized-yellow sectors from race-control messages.
+   * Used by both replay (raw OpenF1 messages) and live (SignalR-shaped
+   * messages forwarded by the live timing client). Returns whether the set of
+   * active sectors changed. Never affects gameplay-gating track status.
+   */
+  processSectorFlagMessages(messages: OpenF1RaceControl[]): void {
+    if (this.applySectorFlagMessages(messages) && this.currentSnapshot) {
+      this.buildSnapshot();
+    }
+  }
+
+  private applySectorFlagMessages(messages: OpenF1RaceControl[]): boolean {
+    if (messages.length === 0) {
+      return false;
+    }
+
+    const ordered = [...messages].sort(
+      (a, b) => toTimestamp(a.date) - toTimestamp(b.date)
+    );
+
+    let changed = false;
+    for (const message of ordered) {
+      const action = classifySectorFlag(message);
+      switch (action.kind) {
+        case 'set':
+          if (!this.activeYellowSectors.has(action.sector)) {
+            this.activeYellowSectors.add(action.sector);
+            changed = true;
+          }
+          break;
+        case 'clear':
+          if (this.activeYellowSectors.delete(action.sector)) {
+            changed = true;
+          }
+          break;
+        case 'clearAll':
+          if (this.activeYellowSectors.size > 0) {
+            this.activeYellowSectors.clear();
+            changed = true;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+
+    return changed;
   }
 
   handleFeedStall(stalled: boolean): void {
@@ -558,6 +615,7 @@ export class SnapshotStore {
       dataFeedStalled: false,
       leaderLapTime: leader?.lastLapTime ?? null,
       leaderLapStartTime,
+      localYellowSectors: [...this.activeYellowSectors].sort((a, b) => a - b),
     };
 
     if (this.previousSnapshot) {
