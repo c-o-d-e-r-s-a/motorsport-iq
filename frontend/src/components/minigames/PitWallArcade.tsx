@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { cn } from '@/lib/cn';
 import { Card } from '@/components/ui';
+import { ArcadePauseProvider, useArcadePause } from './ArcadePauseContext';
 import ReactionLights from './ReactionLights';
 import PitStop from './PitStop';
 import GridDash from './GridDash';
@@ -79,15 +80,47 @@ function readBest(storageKey: string, metric: Metric): string | null {
 interface PitWallArcadeProps {
   /** Slim reassurance line shown above the arcade (e.g. waiting status). */
   contextLabel?: string;
+  /** Pause active games while the user should answer a live question. */
+  questionSuspended?: boolean;
+  questionSuspendMessage?: string | null;
   className?: string;
 }
 
-export default function PitWallArcade({ contextLabel, className }: PitWallArcadeProps) {
+export default function PitWallArcade({
+  contextLabel,
+  questionSuspended = false,
+  questionSuspendMessage = null,
+  className,
+}: PitWallArcadeProps) {
+  return (
+    <ArcadePauseProvider
+      questionSuspended={questionSuspended}
+      questionSuspendMessage={questionSuspendMessage}
+    >
+      <PitWallArcadeBody contextLabel={contextLabel} className={className} />
+    </ArcadePauseProvider>
+  );
+}
+
+function PitWallArcadeBody({ contextLabel, className }: Pick<PitWallArcadeProps, 'contextLabel' | 'className'>) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const active = GAMES.find((g) => g.id === activeId) ?? null;
+  const { questionEffective, questionSuspendMessage, dismissQuestionSuspend, setUserPaused } = useArcadePause();
+
+  useEffect(() => {
+    setUserPaused(false);
+  }, [activeId, setUserPaused]);
 
   return (
-    <Card tone="elevated" className={cn('animate-fade-up', className)} {...{ [ARCADE_ROOT_ATTR]: '' }}>
+    <Card
+      tone="elevated"
+      className={cn(
+        'animate-fade-up relative',
+        questionEffective && active && 'ring-2 ring-[var(--color-accent)]/70 ring-offset-2 ring-offset-[var(--color-bg)]',
+        className
+      )}
+      {...{ [ARCADE_ROOT_ATTR]: '' }}
+    >
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
@@ -128,9 +161,41 @@ export default function PitWallArcade({ contextLabel, className }: PitWallArcade
       )}
 
       {/* Body */}
-      <div className="mt-4">
+      <div className="relative mt-4">
         {active ? (
-          active.render()
+          <>
+            <div className={cn(questionEffective && 'pointer-events-none opacity-40')}>
+              {active.render()}
+            </div>
+            {questionEffective && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center p-4">
+                <div className="w-full max-w-sm rounded-[var(--radius)] border border-[var(--color-accent)]/40 bg-[var(--color-bg)]/95 p-5 text-center shadow-[var(--shadow-lg)] backdrop-blur-sm animate-fade-in">
+                  <p className="font-display text-lg font-bold uppercase tracking-wide text-[var(--color-accent)]">
+                    Question live
+                  </p>
+                  <p className="mt-2 text-sm leading-relaxed text-[var(--color-muted-fg)]">
+                    {questionSuspendMessage ?? 'A question needs your answer above.'}
+                  </p>
+                  <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-center">
+                    <button
+                      type="button"
+                      onClick={dismissQuestionSuspend}
+                      className="h-11 rounded-[var(--radius-pill)] border border-[var(--color-border-strong)] bg-[var(--color-elevated)] px-5 font-display text-sm font-bold uppercase tracking-wide transition-colors hover:border-[var(--color-fg)] active:translate-y-px"
+                    >
+                      Keep playing
+                    </button>
+                    <a
+                      href="#game-question-stage"
+                      onClick={dismissQuestionSuspend}
+                      className="inline-flex h-11 items-center justify-center rounded-[var(--radius-pill)] bg-[var(--color-accent)] px-5 font-display text-sm font-bold uppercase tracking-wide text-white shadow-[var(--shadow-accent)] transition-[filter] hover:bg-[var(--color-accent-hot)] active:translate-y-px"
+                    >
+                      Answer above
+                    </a>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
         ) : (
           <div className="grid grid-cols-2 gap-3">
             {GAMES.map((game) => {

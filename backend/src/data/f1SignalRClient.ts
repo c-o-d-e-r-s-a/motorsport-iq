@@ -647,6 +647,13 @@ export class F1SignalRClient {
       return;
     }
 
+    // Status code 2 (yellow) is noisy on the live feed and often flickers without
+    // a real track-wide neutralization. Global yellow display comes from the
+    // RaceControlMessages topic, which carries explicit scope/text.
+    if (status === 'YELLOW') {
+      return;
+    }
+
     if (status === this.lastTrackStatus) return;
     this.lastTrackStatus = status;
     console.log(`[SignalR] Track status: ${status} (code=${statusCode})`);

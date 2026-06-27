@@ -74,6 +74,7 @@ function createSnapshot(overrides: Partial<RaceSnapshot> = {}): RaceSnapshot {
     leaderLapTime: 90.5,
     leaderLapStartTime: '2026-03-13T11:58:30Z',
     localYellowSectors: [],
+    globalYellowActive: false,
     ...overrides,
   };
 }
@@ -101,6 +102,20 @@ describe('questionEngine MVP guardrails', () => {
     const previous = createSnapshot({ lapNumber: 9 });
 
     expect(selectQuestion(snapshot, previous, lobbyId, null, 0)).toBeNull();
+  });
+
+  it('still triggers during display-only global yellow', () => {
+    const snapshot = createSnapshot({ globalYellowActive: true });
+    const previous = createSnapshot({ lapNumber: 9 });
+
+    expect(selectQuestion(snapshot, previous, lobbyId, null, 0)).not.toBeNull();
+  });
+
+  it('does not apply restart cooldown after display-only yellow clears', () => {
+    const afterYellow = createSnapshot({ lapNumber: 12, trackStatus: 'GREEN', globalYellowActive: false });
+    const duringYellow = createSnapshot({ lapNumber: 11, trackStatus: 'GREEN', globalYellowActive: true });
+
+    expect(selectQuestion(afterYellow, duringYellow, lobbyId, null, 0)).not.toBeNull();
   });
 
   it('enforces one-lap restart cooldown after non-green running', () => {
@@ -339,14 +354,15 @@ describe('question pacing', () => {
     expect(isPlausibleCandidate(candidate, 'urgency')).toBe(false);
   });
 
-  it('allows questions one lap after resolution when urgency is active', () => {
+  it('allows questions immediately after resolution when urgency is behind the minimum', () => {
     const snapshot = createSnapshot({ lapNumber: 40, totalLaps: 50 });
     const pacing = getPacingState(snapshot, 4, lobbyId);
     expect(pacing.urgency).toBe(true);
-    expect(pacing.postResolutionCooldown).toBe(1);
+    expect(pacing.behindMin).toBe(true);
+    expect(pacing.postResolutionCooldown).toBe(0);
     expect(getTiersToTry(snapshot, 4)).toContain('urgency');
 
-    recordResolution(lobbyId, 'GAP_CLOSING', 38);
+    recordResolution(lobbyId, 'GAP_CLOSING', 40);
 
     const previous = createSnapshot({ lapNumber: 39, totalLaps: 50 });
     const result = selectQuestion(snapshot, previous, lobbyId, null, 4);
@@ -576,5 +592,95 @@ describe('question pacing', () => {
 
     expect(questionCount).toBeGreaterThanOrEqual(8);
     expect(questionCount).toBeLessThanOrEqual(MAX_QUESTIONS_PER_RACE);
+  });
+});
+
+describe('questionEngine — repetition, final stretch, and closing-lap rules', () => {
+  const lobbyId = 'lobby-rules';
+
+  beforeEach(() => clearCooldowns(lobbyId));
+  afterEach(() => clearCooldowns(lobbyId));
+
+  function closingFieldSnapshot(lapNumber: number, totalLaps: number): RaceSnapshot {
+    return createSnapshot({
+      lapNumber,
+      totalLaps,
+      drivers: [
+        createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: 18 }),
+        createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: 1.4, interval: 1.4, tyreAge: 20 }),
+        createDriver({ driverNumber: 16, name: 'Third', position: 3, gap: 4.2, interval: 2.8, tyreAge: 19 }),
+      ],
+    });
+  }
+
+  it('forces a single Final Stretch question in the last laps and blocks anything after', () => {
+    const totalLaps = 30;
+    const snapshot = closingFieldSnapshot(28, totalLaps); // 2 laps remaining
+    const previous = closingFieldSnapshot(27, totalLaps);
+
+    const result = selectQuestionWithMeta(snapshot, previous, lobbyId, null, 6);
+    expect(result.instance).not.toBeNull();
+    expect(getQuestionById(result.instance!.questionId)?.category).toBe('FINISH_POSITION');
+    // Window is sized so it resolves exactly on the final lap, before the winner screen.
+    expect(result.instance!.targetLap).toBe(totalLaps);
+
+    // Once the final-stretch question is asked, no further question may appear.
+    const after = selectQuestion(closingFieldSnapshot(29, totalLaps), snapshot, lobbyId, null, 7);
+    expect(after).toBeNull();
+  });
+
+  it('does not trigger a normal question in the last 3 laps before the final stretch', () => {
+    const totalLaps = 40;
+    // 3 laps remaining → only the final-stretch question may appear, never a
+    // normal OVERTAKE/PIT/GAP question.
+    const snapshot = closingFieldSnapshot(37, totalLaps);
+    const previous = closingFieldSnapshot(36, totalLaps);
+
+    const result = selectQuestionWithMeta(snapshot, previous, lobbyId, null, 5);
+    if (result.instance) {
+      expect(getQuestionById(result.instance.questionId)?.category).toBe('FINISH_POSITION');
+    }
+  });
+
+  it('never repeats the same question for the same driver across a race', () => {
+    const totalLaps = 44;
+    let questionCount = 0;
+    let activeQuestion: QuestionInstanceState | null = null;
+    const askedKeys: string[] = [];
+
+    for (let lap = 1; lap <= totalLaps; lap++) {
+      const phase = lap % 4;
+      const chaserInterval = phase === 0 ? 1.1 : phase === 1 ? 1.7 : phase === 2 ? 2.1 : 2.6;
+      const drivers = [
+        createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null, tyreAge: Math.max(1, lap - 4) }),
+        createDriver({ driverNumber: 81, name: 'Chaser', position: 2, gap: chaserInterval + 1, interval: chaserInterval, tyreAge: 14 + (lap % 4) }),
+        createDriver({ driverNumber: 16, name: 'Third', position: 3, gap: 6.0, interval: 1.3, tyreAge: 16 + (lap % 3) }),
+        createDriver({ driverNumber: 55, name: 'Midfield', position: 9, gap: 24.0, interval: 2.2, tyreAge: 12 + (lap % 5) }),
+      ];
+      const prevDrivers = drivers.map((d) => (
+        d.driverNumber === 81 ? { ...d, interval: (d.interval ?? 0) + 0.2 } : { ...d }
+      ));
+      const snapshot = createSnapshot({ lapNumber: lap, totalLaps, drivers });
+      const previous = lap > 1 ? createSnapshot({ lapNumber: lap - 1, totalLaps, drivers: prevDrivers }) : null;
+
+      if (activeQuestion && lap >= activeQuestion.targetLap) {
+        const question = getQuestionById(activeQuestion.questionId);
+        if (question) {
+          recordResolution(lobbyId, question.category, lap);
+        }
+        activeQuestion = null;
+      }
+
+      const selected = selectQuestion(snapshot, previous, lobbyId, activeQuestion, questionCount);
+      if (selected && selected.driver1) {
+        askedKeys.push(`${selected.questionId}:${selected.driver1.driverNumber}`);
+        activeQuestion = selected;
+        questionCount += 1;
+      }
+    }
+
+    // Every asked question is a unique (question, driver) combination — no repeats.
+    expect(new Set(askedKeys).size).toBe(askedKeys.length);
+    expect(askedKeys.length).toBeGreaterThan(0);
   });
 });

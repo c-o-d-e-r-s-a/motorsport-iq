@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/cn';
+import { useArcadePause } from './ArcadePauseContext';
+import ArcadePauseButton from './ArcadePauseButton';
 import { useHighScore } from './useHighScore';
 import { isExternalControlFocused } from './keys';
 
@@ -10,7 +12,7 @@ type Phase = 'idle' | 'running' | 'over';
 interface Rival {
   id: number;
   lane: number;
-  y: number; // 0 (top) .. 1 (bottom), fraction of play height
+  y: number;
   hue: number;
   scored: boolean;
 }
@@ -18,9 +20,9 @@ interface Rival {
 const LANES = 3;
 const PLAYER_Y = 0.86;
 const HIT_BAND = 0.07;
-const BASE_SPEED = 0.42; // fraction of height per second
-const SPEED_RAMP = 0.018; // added per point
-const BASE_SPAWN = 1.05; // seconds between rivals
+const BASE_SPEED = 0.42;
+const SPEED_RAMP = 0.018;
+const BASE_SPAWN = 1.05;
 const MIN_SPAWN = 0.45;
 
 const RIVAL_HUES = [210, 280, 48, 150, 0];
@@ -32,6 +34,7 @@ export default function GridDash() {
   const [rivals, setRivals] = useState<Rival[]>([]);
   const [isRecord, setIsRecord] = useState(false);
   const { best, submit } = useHighScore('griddash', { lowerIsBetter: false });
+  const { isPaused, userPaused } = useArcadePause();
 
   const rafRef = useRef<number | null>(null);
   const laneRef = useRef(1);
@@ -41,6 +44,7 @@ export default function GridDash() {
   const lastRef = useRef(0);
   const idRef = useRef(0);
   const phaseRef = useRef<Phase>('idle');
+  const pausedRef = useRef(false);
 
   const stopLoop = useCallback(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
@@ -48,6 +52,10 @@ export default function GridDash() {
   }, []);
 
   useEffect(() => stopLoop, [stopLoop]);
+
+  useEffect(() => {
+    pausedRef.current = isPaused;
+  }, [isPaused]);
 
   const endGame = useCallback(() => {
     stopLoop();
@@ -70,6 +78,11 @@ export default function GridDash() {
 
   const loop = useCallback(
     (now: number) => {
+      if (pausedRef.current) {
+        rafRef.current = null;
+        return;
+      }
+
       const dt = lastRef.current ? Math.min((now - lastRef.current) / 1000, 0.05) : 0;
       lastRef.current = now;
 
@@ -85,7 +98,6 @@ export default function GridDash() {
       const next: Rival[] = [];
       for (const r of rivalsRef.current) {
         const y = r.y + speed * dt;
-        // Collision with player
         if (r.lane === laneRef.current && Math.abs(y - PLAYER_Y) < HIT_BAND) {
           rivalsRef.current = next.concat({ ...r, y });
           setRivals([...rivalsRef.current]);
@@ -108,6 +120,22 @@ export default function GridDash() {
     [spawn, endGame]
   );
 
+  const resumeLoop = useCallback(() => {
+    if (phaseRef.current !== 'running' || rafRef.current !== null || pausedRef.current) {
+      return;
+    }
+    lastRef.current = 0;
+    rafRef.current = requestAnimationFrame(loop);
+  }, [loop]);
+
+  useEffect(() => {
+    if (isPaused) {
+      stopLoop();
+      return;
+    }
+    resumeLoop();
+  }, [isPaused, stopLoop, resumeLoop]);
+
   const start = useCallback(() => {
     stopLoop();
     rivalsRef.current = [];
@@ -122,11 +150,13 @@ export default function GridDash() {
     setPlayerLane(1);
     setIsRecord(false);
     setPhase('running');
-    rafRef.current = requestAnimationFrame(loop);
+    if (!pausedRef.current) {
+      rafRef.current = requestAnimationFrame(loop);
+    }
   }, [stopLoop, loop]);
 
   const move = useCallback((dir: -1 | 1) => {
-    if (phaseRef.current !== 'running') return;
+    if (phaseRef.current !== 'running' || pausedRef.current) return;
     const next = Math.max(0, Math.min(LANES - 1, laneRef.current + dir));
     laneRef.current = next;
     setPlayerLane(next);
@@ -152,7 +182,7 @@ export default function GridDash() {
 
   const handleAreaPointer = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (phaseRef.current !== 'running') return;
+      if (phaseRef.current !== 'running' || pausedRef.current) return;
       const rect = e.currentTarget.getBoundingClientRect();
       const x = e.clientX - rect.left;
       move(x < rect.width / 2 ? -1 : 1);
@@ -168,7 +198,6 @@ export default function GridDash() {
         onPointerDown={handleAreaPointer}
         className="relative h-[290px] w-full select-none overflow-hidden rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-bg)] sm:h-[330px]"
       >
-        {/* Lane dividers + moving road lines */}
         <div className="pointer-events-none absolute inset-0 speed-lines opacity-40" />
         {Array.from({ length: LANES - 1 }).map((_, i) => (
           <div
@@ -178,7 +207,6 @@ export default function GridDash() {
           />
         ))}
 
-        {/* Rivals */}
         {rivals.map((r) => (
           <Car
             key={r.id}
@@ -188,7 +216,6 @@ export default function GridDash() {
           />
         ))}
 
-        {/* Player */}
         {phase !== 'idle' && (
           <Car
             left={laneCenter(playerLane)}
@@ -198,14 +225,12 @@ export default function GridDash() {
           />
         )}
 
-        {/* Live score */}
         {phase === 'running' && (
           <div className="pointer-events-none absolute right-3 top-2.5 font-display text-2xl font-black tabular-nums">
             {score}
           </div>
         )}
 
-        {/* Idle overlay */}
         {phase === 'idle' && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
             <p className="font-display text-2xl font-bold uppercase tracking-wide">Grid dash</p>
@@ -215,7 +240,14 @@ export default function GridDash() {
           </div>
         )}
 
-        {/* Game over overlay */}
+        {phase === 'running' && isPaused && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-bg)]/55 backdrop-blur-[1px]">
+            <p className="font-display text-xl font-bold uppercase tracking-[0.18em] text-[var(--color-muted-fg)]">
+              {userPaused ? 'Paused' : 'On hold'}
+            </p>
+          </div>
+        )}
+
         {phase === 'over' && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-[var(--color-bg)]/85 text-center backdrop-blur-sm animate-fade-in">
             <p className="font-display text-sm font-bold uppercase tracking-[0.2em] text-[var(--color-danger)]">
@@ -231,29 +263,34 @@ export default function GridDash() {
       </div>
 
       {phase === 'running' ? (
-        <div className="grid grid-cols-2 gap-3">
-          <button
-            type="button"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              move(-1);
-            }}
-            className="h-12 rounded-[var(--radius-pill)] border border-[var(--color-border-strong)] bg-[var(--color-elevated)] font-display text-xl font-bold active:translate-y-px"
-            aria-label="Move left"
-          >
-            ◀
-          </button>
-          <button
-            type="button"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              move(1);
-            }}
-            className="h-12 rounded-[var(--radius-pill)] border border-[var(--color-border-strong)] bg-[var(--color-elevated)] font-display text-xl font-bold active:translate-y-px"
-            aria-label="Move right"
-          >
-            ▶
-          </button>
+        <div className="flex flex-col gap-3">
+          <ArcadePauseButton className="w-full" />
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                move(-1);
+              }}
+              disabled={isPaused}
+              className="h-12 rounded-[var(--radius-pill)] border border-[var(--color-border-strong)] bg-[var(--color-elevated)] font-display text-xl font-bold active:translate-y-px disabled:opacity-45"
+              aria-label="Move left"
+            >
+              ◀
+            </button>
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                move(1);
+              }}
+              disabled={isPaused}
+              className="h-12 rounded-[var(--radius-pill)] border border-[var(--color-border-strong)] bg-[var(--color-elevated)] font-display text-xl font-bold active:translate-y-px disabled:opacity-45"
+              aria-label="Move right"
+            >
+              ▶
+            </button>
+          </div>
         </div>
       ) : (
         <div className="flex items-center gap-3">
@@ -298,9 +335,7 @@ function Car({
         )}
         style={{ background: color }}
       >
-        {/* Cockpit */}
         <div className="absolute left-1/2 top-1/2 h-3.5 w-3 -translate-x-1/2 -translate-y-1/2 rounded-[4px] bg-black/35" />
-        {/* Wings */}
         <div className="absolute -left-1 top-1 h-1.5 w-2 rounded-sm" style={{ background: color }} />
         <div className="absolute -right-1 top-1 h-1.5 w-2 rounded-sm" style={{ background: color }} />
         <div className="absolute -left-1 bottom-1 h-1.5 w-2 rounded-sm" style={{ background: color }} />

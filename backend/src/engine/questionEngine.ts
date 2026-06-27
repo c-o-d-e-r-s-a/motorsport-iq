@@ -1,6 +1,8 @@
 import type { RaceSnapshot, DriverState, Question, QuestionInstanceState, DerivedSignals, QuestionCategory } from '../types';
+import { buildQuestionContext } from '../lobby/questionPayload';
 import { QUESTION_BANK } from './questionBank';
 import { calculateDerivedSignals, type SignalOverrides } from './derivedSignals';
+import { isRaceNeutralized } from '../data/raceStatus';
 import { randomUUID } from 'crypto';
 
 export const MIN_QUESTIONS_PER_RACE = 8;
@@ -103,13 +105,26 @@ export interface QuestionSelectionResult {
   tier: RelaxationTier | null;
 }
 
+/** Last laps of the race reserved exclusively for the single Final Stretch question. */
+const FINAL_STRETCH_LAST_LAPS = 3;
+
 type LobbyGuardState = {
   lastCategory: QuestionCategory | null;
   lastResolvedLap: number | null;
   restartCooldownUntilLap: number | null;
+  /** `${questionId}:${driver1Number}` for every question already asked — prevents repeats. */
+  askedDriverQuestionKeys: Set<string>;
+  /** How many questions of each category have been asked, for even spreading. */
+  categoryCounts: Record<QuestionCategory, number>;
+  /** Once the final-stretch (end-of-race) question is asked, no further questions fire. */
+  finalStretchAsked: boolean;
 };
 
 const lobbyGuardStates = new Map<string, LobbyGuardState>();
+
+function createCategoryCounts(): Record<QuestionCategory, number> {
+  return { OVERTAKE: 0, PIT_WINDOW: 0, GAP_CLOSING: 0, FINISH_POSITION: 0 };
+}
 
 function getLobbyGuardState(lobbyId: string): LobbyGuardState {
   const existing = lobbyGuardStates.get(lobbyId);
@@ -121,9 +136,32 @@ function getLobbyGuardState(lobbyId: string): LobbyGuardState {
     lastCategory: null,
     lastResolvedLap: null,
     restartCooldownUntilLap: null,
+    askedDriverQuestionKeys: new Set<string>(),
+    categoryCounts: createCategoryCounts(),
+    finalStretchAsked: false,
   };
   lobbyGuardStates.set(lobbyId, created);
   return created;
+}
+
+function driverQuestionKey(questionId: string, driver1Number: number): string {
+  return `${questionId}:${driver1Number}`;
+}
+
+/** Record a question as asked so it (for this driver) is never repeated, and track category spread. */
+function recordQuestionAsked(
+  lobbyId: string,
+  questionId: string,
+  category: QuestionCategory,
+  driver1Number: number,
+  isFinalStretch: boolean
+): void {
+  const state = getLobbyGuardState(lobbyId);
+  state.askedDriverQuestionKeys.add(driverQuestionKey(questionId, driver1Number));
+  state.categoryCounts[category] = (state.categoryCounts[category] ?? 0) + 1;
+  if (isFinalStretch) {
+    state.finalStretchAsked = true;
+  }
 }
 
 function getDriverAhead(snapshot: RaceSnapshot, driver1: DriverState): DriverState | null {
@@ -239,7 +277,11 @@ export function getPacingState(
     behindMin,
     behindTarget,
     urgency,
-    postResolutionCooldown: needsShortRaceCatchUp ? 0 : urgency ? 1 : 2,
+    postResolutionCooldown: needsShortRaceCatchUp || (urgency && behindMin)
+      ? 0
+      : urgency
+        ? 1
+        : 2,
     questionsRemaining,
     eligibleLapsRemaining,
     minimumQuestions,
@@ -284,7 +326,7 @@ export function updateRestartCooldown(lobbyId: string, snapshot: RaceSnapshot, p
     return;
   }
 
-  if (previousSnapshot.trackStatus !== 'GREEN' && snapshot.trackStatus === 'GREEN') {
+  if (isRaceNeutralized(previousSnapshot.trackStatus) && snapshot.trackStatus === 'GREEN') {
     state.restartCooldownUntilLap = snapshot.lapNumber + 1;
   }
 }
@@ -309,8 +351,12 @@ export function checkGlobalEligibility(
     return { eligible: false, reason: 'Active question already exists' };
   }
 
-  if (snapshot.trackStatus !== 'GREEN') {
+  if (isRaceNeutralized(snapshot.trackStatus)) {
     return { eligible: false, reason: `Track status is ${snapshot.trackStatus}` };
+  }
+
+  if (snapshot.trackStatus === 'CHEQUERED') {
+    return { eligible: false, reason: 'Race complete' };
   }
 
   if (snapshot.dataFeedStalled) {
@@ -544,7 +590,11 @@ export function applyPriorityHierarchy(candidates: QuestionCandidate[]): Questio
   });
 }
 
-function pickQuestionCandidate(candidates: QuestionCandidate[], tier: RelaxationTier): QuestionCandidate {
+function pickQuestionCandidate(
+  candidates: QuestionCandidate[],
+  tier: RelaxationTier,
+  categoryCounts: Record<QuestionCategory, number>
+): QuestionCandidate {
   const useRelaxedPriority = tier === 'tier2' || tier === 'tier3' || tier === 'urgency';
   const sorted = useRelaxedPriority
     ? [...candidates].sort((a, b) => b.score - a.score)
@@ -568,6 +618,18 @@ function pickQuestionCandidate(candidates: QuestionCandidate[], tier: Relaxation
     if (shortWindow.length > 0) {
       contenders = shortWindow;
     }
+  }
+
+  // Spread categories as evenly as possible: among the remaining contenders,
+  // prefer the category that has been used the least so far this race.
+  const minCategoryUse = Math.min(
+    ...contenders.map((candidate) => categoryCounts[candidate.question.category] ?? 0)
+  );
+  const leastUsed = contenders.filter(
+    (candidate) => (categoryCounts[candidate.question.category] ?? 0) === minCategoryUse
+  );
+  if (leastUsed.length > 0) {
+    contenders = leastUsed;
   }
 
   return contenders[Math.floor(Math.random() * contenders.length)];
@@ -821,7 +883,8 @@ function gatherCandidates(
   previousSnapshot: RaceSnapshot | null,
   lastCategory: QuestionCategory | null,
   tier: RelaxationTier,
-  questionCount: number
+  questionCount: number,
+  askedKeys: Set<string>
 ): QuestionCandidate[] {
   const shortRaceCatchup = isShortRace(snapshot)
     && questionCount < getPacingMinimumQuestionCount(snapshot)
@@ -842,7 +905,14 @@ function gatherCandidates(
     allCandidates = allCandidates.concat(evaluateAllTriggers(question, context, tier));
   }
 
-  const plausibleCandidates = allCandidates.filter((candidate) => isPlausibleCandidate(candidate, tier));
+  // Never repeat the exact same question for the same driver (prevents the
+  // "same Stroll question twice" repetition the player reported).
+  const notRepeated = (candidate: QuestionCandidate): boolean =>
+    !askedKeys.has(driverQuestionKey(candidate.question.id, candidate.driver1.driverNumber));
+
+  const plausibleCandidates = allCandidates
+    .filter((candidate) => isPlausibleCandidate(candidate, tier))
+    .filter(notRepeated);
   if (plausibleCandidates.length > 0) {
     return plausibleCandidates;
   }
@@ -851,7 +921,7 @@ function gatherCandidates(
     return plausibleCandidates;
   }
 
-  return buildEngagementFallbackCandidates(context, lastCategory);
+  return buildEngagementFallbackCandidates(context, lastCategory).filter(notRepeated);
 }
 
 function buildQuestionInstance(
@@ -859,7 +929,7 @@ function buildQuestionInstance(
   snapshot: RaceSnapshot,
   lobbyId: string
 ): QuestionInstanceState {
-  return {
+  const instance: QuestionInstanceState = {
     id: randomUUID(),
     lobbyId,
     questionId: selected.question.id,
@@ -874,6 +944,148 @@ function buildQuestionInstance(
     driver1: selected.driver1,
     driver2: selected.driver2 ?? undefined,
   };
+  instance.questionContext = buildQuestionContext(instance);
+  return instance;
+}
+
+function getLapsRemaining(snapshot: RaceSnapshot): number | null {
+  if (!snapshot.totalLaps || snapshot.totalLaps <= 0) {
+    return null;
+  }
+  return snapshot.totalLaps - snapshot.lapNumber;
+}
+
+/**
+ * Build the single, guaranteed end-of-race "Final Stretch" question. Its window
+ * is sized so it resolves exactly on the final lap (before the winner screen),
+ * and it avoids any driver+question combo already used this race.
+ */
+function buildFinalStretchInstance(
+  snapshot: RaceSnapshot,
+  lobbyId: string,
+  lapsRemaining: number
+): QuestionInstanceState | null {
+  const windowSize = Math.max(1, lapsRemaining);
+  const running = snapshot.drivers
+    .filter((driver) => !driver.retired && !driver.inPit && driver.position > 0)
+    .sort((a, b) => a.position - b.position);
+
+  if (running.length === 0) {
+    return null;
+  }
+
+  const state = getLobbyGuardState(lobbyId);
+  const options: Array<{ questionId: string; driver1: DriverState; driver2: DriverState | null }> = [];
+
+  // Prefer a live battle to the flag.
+  for (const driver of running) {
+    if (driver.position <= 1) continue;
+    const ahead = running.find((candidate) => candidate.position === driver.position - 1);
+    if (ahead && driver.interval !== null && driver.interval <= 8) {
+      options.push({ questionId: 'FIN_AHEAD_OF_RIVAL', driver1: driver, driver2: ahead });
+    }
+  }
+  // Top-5 holds (template uses {windowSize}, so the overridden window reads correctly).
+  for (const driver of running) {
+    if (driver.position <= 5) {
+      options.push({ questionId: 'FIN_TOP_5', driver1: driver, driver2: null });
+    }
+  }
+  // Leader holding the lead — always available as a final fallback.
+  options.push({ questionId: 'FIN_LEAD_DEFEND', driver1: running[0], driver2: null });
+
+  const chosen = options.find(
+    (option) => !state.askedDriverQuestionKeys.has(driverQuestionKey(option.questionId, option.driver1.driverNumber))
+  ) ?? options[0];
+
+  const question = findQuestion(chosen.questionId);
+  if (!question) {
+    return null;
+  }
+
+  const sizedQuestion: Question = { ...question, windowSize };
+  const instance: QuestionInstanceState = {
+    id: randomUUID(),
+    lobbyId,
+    questionId: question.id,
+    state: 'TRIGGERED',
+    triggeredAt: new Date(),
+    triggerSnapshot: snapshot,
+    windowSize,
+    targetLap: snapshot.lapNumber + windowSize,
+    answer: null,
+    outcome: null,
+    questionText: formatQuestionText(sizedQuestion, chosen.driver1, chosen.driver2),
+    driver1: chosen.driver1,
+    driver2: chosen.driver2 ?? undefined,
+  };
+  instance.questionContext = buildQuestionContext(instance);
+  return instance;
+}
+
+/**
+ * Guaranteed pacing backstop when signal-based selection finds nothing but the race
+ * is still below the minimum question count (common in quiet replay stretches).
+ */
+function buildMinimumPacingCatchUpInstance(
+  snapshot: RaceSnapshot,
+  previousSnapshot: RaceSnapshot | null,
+  lobbyId: string,
+  questionCount: number,
+  lastCategory: QuestionCategory | null
+): QuestionInstanceState | null {
+  const minimumQuestions = getPacingMinimumQuestionCount(snapshot);
+  if (questionCount >= minimumQuestions) {
+    return null;
+  }
+
+  const pacing = getPacingState(snapshot, questionCount, lobbyId);
+  if (!pacing.urgency && !pacing.behindMin) {
+    return null;
+  }
+
+  const lapsRemaining = getLapsRemaining(snapshot);
+  if (lapsRemaining !== null && lapsRemaining <= FINAL_STRETCH_LAST_LAPS) {
+    return null;
+  }
+
+  const state = getLobbyGuardState(lobbyId);
+  const signals = calculateDerivedSignals(
+    snapshot,
+    previousSnapshot,
+    resolveTierOverrides(snapshot, questionCount, 'urgency')
+  );
+  const context: TriggerContext = {
+    snapshot,
+    previousSnapshot,
+    signals,
+    tier: 'urgency',
+    shortRaceCatchup: isShortRace(snapshot),
+  };
+
+  const fallbackCandidates = buildEngagementFallbackCandidates(context, lastCategory);
+  const freshCandidates = fallbackCandidates.filter(
+    (candidate) => !state.askedDriverQuestionKeys.has(
+      driverQuestionKey(candidate.question.id, candidate.driver1.driverNumber)
+    )
+  );
+  if (freshCandidates.length === 0) {
+    return null;
+  }
+
+  const selected = pickQuestionCandidate(freshCandidates, 'urgency', state.categoryCounts);
+  if (!selected.driver1) {
+    return null;
+  }
+
+  recordQuestionAsked(
+    lobbyId,
+    selected.question.id,
+    selected.question.category,
+    selected.driver1.driverNumber,
+    false
+  );
+  return buildQuestionInstance(selected, snapshot, lobbyId);
 }
 
 export function selectQuestionWithMeta(
@@ -885,37 +1097,106 @@ export function selectQuestionWithMeta(
 ): QuestionSelectionResult {
   updateRestartCooldown(lobbyId, snapshot, previousSnapshot);
 
+  const state = getLobbyGuardState(lobbyId);
+
+  // Once the final-stretch question has been asked, the race is sealed — no
+  // further questions are ever shown.
+  if (state.finalStretchAsked) {
+    return { instance: null, tier: null };
+  }
+
+  const lapsRemaining = getLapsRemaining(snapshot);
+  const inFinalStretchPhase = lapsRemaining !== null
+    && lapsRemaining >= 1
+    && lapsRemaining <= FINAL_STRETCH_LAST_LAPS;
+
   const pacingState = getPacingState(snapshot, questionCount, lobbyId);
+  // The forced final-stretch question ignores the post-resolution cooldown so it
+  // can fire immediately once the prior question clears in the closing laps.
   const eligibility = checkGlobalEligibility(
     snapshot,
     activeQuestion,
     questionCount,
     lobbyId,
     MAX_QUESTIONS_PER_RACE,
-    pacingState.postResolutionCooldown
+    inFinalStretchPhase ? 0 : pacingState.postResolutionCooldown
   );
 
   if (!eligibility.eligible) {
     return { instance: null, tier: null };
   }
 
-  const state = getLobbyGuardState(lobbyId);
+  // Closing laps: only the single Final Stretch question may appear. This both
+  // guarantees an end-of-race question AND enforces "no normal questions in the
+  // last 3 laps".
+  if (inFinalStretchPhase) {
+    const instance = buildFinalStretchInstance(snapshot, lobbyId, lapsRemaining as number);
+    if (instance && instance.driver1) {
+      recordQuestionAsked(
+        lobbyId,
+        instance.questionId,
+        getQuestionCategoryById(instance.questionId),
+        instance.driver1.driverNumber,
+        true
+      );
+      return { instance, tier: 'strict' };
+    }
+    return { instance: null, tier: null };
+  }
+
+  // Before the final stretch, never trigger a normal question inside the last 3
+  // laps (reserved for the final-stretch question only).
+  if (lapsRemaining !== null && lapsRemaining <= FINAL_STRETCH_LAST_LAPS) {
+    return { instance: null, tier: null };
+  }
+
   const tiersToTry = getTiersToTry(snapshot, questionCount);
 
   for (const tier of tiersToTry) {
-    const candidates = gatherCandidates(snapshot, previousSnapshot, state.lastCategory, tier, questionCount);
+    const candidates = gatherCandidates(
+      snapshot,
+      previousSnapshot,
+      state.lastCategory,
+      tier,
+      questionCount,
+      state.askedDriverQuestionKeys
+    );
     if (candidates.length === 0) {
       continue;
     }
 
-    const selected = pickQuestionCandidate(candidates, tier);
+    const selected = pickQuestionCandidate(candidates, tier, state.categoryCounts);
+    if (selected.driver1) {
+      recordQuestionAsked(
+        lobbyId,
+        selected.question.id,
+        selected.question.category,
+        selected.driver1.driverNumber,
+        false
+      );
+    }
     return {
       instance: buildQuestionInstance(selected, snapshot, lobbyId),
       tier,
     };
   }
 
+  const catchUp = buildMinimumPacingCatchUpInstance(
+    snapshot,
+    previousSnapshot,
+    lobbyId,
+    questionCount,
+    state.lastCategory
+  );
+  if (catchUp) {
+    return { instance: catchUp, tier: 'urgency' };
+  }
+
   return { instance: null, tier: null };
+}
+
+function getQuestionCategoryById(questionId: string): QuestionCategory {
+  return findQuestion(questionId)?.category ?? 'FINISH_POSITION';
 }
 
 export function selectQuestion(

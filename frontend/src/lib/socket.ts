@@ -181,6 +181,10 @@ class SocketClient {
       this.emit(SERVER_EVENTS.ANSWER_RECEIVED, data);
     });
 
+    this.socket.on(SERVER_EVENTS.ANSWERS_RESTORED, (data: { answers: Record<string, 'YES' | 'NO'> }) => {
+      this.emit(SERVER_EVENTS.ANSWERS_RESTORED, data);
+    });
+
     this.socket.on(SERVER_EVENTS.SESSIONS_LIST, (sessions: SessionInfo[]) => {
       this.emit(SERVER_EVENTS.SESSIONS_LIST, sessions);
     });

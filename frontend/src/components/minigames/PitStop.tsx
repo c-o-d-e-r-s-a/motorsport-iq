@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/cn';
+import { useArcadePause } from './ArcadePauseContext';
 import { useHighScore } from './useHighScore';
 import { isExternalControlFocused } from './keys';
 
@@ -26,6 +27,7 @@ export default function PitStop() {
   const [total, setTotal] = useState<number | null>(null);
   const [isRecord, setIsRecord] = useState(false);
   const { best, submit } = useHighScore('pitstop', { lowerIsBetter: true });
+  const { questionEffective } = useArcadePause();
 
   const rafRef = useRef<number | null>(null);
   const dirRef = useRef(1);
@@ -33,13 +35,38 @@ export default function PitStop() {
   const lastRef = useRef(0);
   const wheelRef = useRef(0);
   const penaltyRef = useRef(0);
+  const phaseRef = useRef<Phase>('idle');
+
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
 
   const stopLoop = useCallback(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
   }, []);
 
+  const resetToIdle = useCallback(() => {
+    stopLoop();
+    setResults([]);
+    setTotal(null);
+    setWheelIndex(0);
+    wheelRef.current = 0;
+    penaltyRef.current = 0;
+    posRef.current = 0;
+    dirRef.current = 1;
+    setPos(0);
+    setPhase('idle');
+    phaseRef.current = 'idle';
+  }, [stopLoop]);
+
   useEffect(() => stopLoop, [stopLoop]);
+
+  useEffect(() => {
+    if (!questionEffective) return;
+    if (phaseRef.current === 'idle' || phaseRef.current === 'done') return;
+    resetToIdle();
+  }, [questionEffective, resetToIdle]);
 
   const runLoop = useCallback(() => {
     const tick = (now: number) => {

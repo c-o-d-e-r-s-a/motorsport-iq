@@ -1,6 +1,6 @@
 'use client';
 
-import type { RaceSnapshotEvent } from '@/lib/types';
+import type { RaceSnapshotEvent, TrackStatus } from '@/lib/types';
 import { Chip } from '@/components/ui';
 import RaceConditionBadge from '@/components/RaceConditionBadge';
 
@@ -10,6 +10,14 @@ interface RaceHudProps {
   feedStalled: boolean;
   connected: boolean;
   highlightTrackStatus?: boolean;
+}
+
+/** Main badge: global yellow is never shown — only SC/VSC/RED/CHEQUERED replace green. */
+function getBadgeTrackStatus(trackStatus: TrackStatus): TrackStatus {
+  if (trackStatus === 'YELLOW') {
+    return 'GREEN';
+  }
+  return trackStatus;
 }
 
 export default function RaceHud({
@@ -22,11 +30,11 @@ export default function RaceHud({
   const hasCompleted = raceCompletedLap !== null;
   const lapToShow = snapshot?.lapNumber ?? null;
   const yellowSectors = snapshot?.localYellowSectors ?? [];
-  // Localized sector yellows are informational only — show them alongside a
-  // green track, never on top of a global neutralization (SC/VSC/RED) which the
-  // main badge already conveys (and during which the backend clears them).
+  const badgeStatus = snapshot
+    ? getBadgeTrackStatus(snapshot.trackStatus)
+    : 'GREEN';
   const showSectorYellow =
-    !hasCompleted && snapshot?.trackStatus === 'GREEN' && yellowSectors.length > 0;
+    !hasCompleted && badgeStatus === 'GREEN' && yellowSectors.length > 0;
 
   return (
     <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -46,7 +54,7 @@ export default function RaceHud({
           {hasCompleted ? (
             <Chip tone="accent">🏁 Finished</Chip>
           ) : (
-            <RaceConditionBadge status={snapshot.trackStatus} highlighted={highlightTrackStatus} />
+            <RaceConditionBadge status={badgeStatus} highlighted={highlightTrackStatus} />
           )}
 
           {showSectorYellow && (

@@ -5,7 +5,10 @@ export const SESSION_KEYS = {
   lobbyStatus: 'msp_lobby_status',
   restoreUserId: 'msp_restore_user_id',
   restoreLobbyCode: 'msp_restore_lobby_code',
+  submittedAnswers: 'msp_submitted_answers',
 } as const;
+
+export type StoredSubmittedAnswers = Record<string, 'YES' | 'NO'>;
 
 export type LobbySessionStatus = 'waiting' | 'active';
 
@@ -73,6 +76,73 @@ export function clearLobbySession(): void {
   localStorage.removeItem(SESSION_KEYS.userId);
   localStorage.removeItem(SESSION_KEYS.lobbyCode);
   localStorage.removeItem(SESSION_KEYS.lobbyStatus);
+}
+
+export function getSubmittedAnswers(): StoredSubmittedAnswers {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+
+  try {
+    const raw = localStorage.getItem(SESSION_KEYS.submittedAnswers);
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') {
+      return {};
+    }
+
+    const restored: StoredSubmittedAnswers = {};
+    for (const [instanceId, answer] of Object.entries(parsed)) {
+      if (answer === 'YES' || answer === 'NO') {
+        restored[instanceId] = answer;
+      }
+    }
+    return restored;
+  } catch {
+    return {};
+  }
+}
+
+export function mergeSubmittedAnswers(answers: StoredSubmittedAnswers): void {
+  if (typeof window === 'undefined' || Object.keys(answers).length === 0) {
+    return;
+  }
+
+  const current = getSubmittedAnswers();
+  localStorage.setItem(
+    SESSION_KEYS.submittedAnswers,
+    JSON.stringify({ ...current, ...answers })
+  );
+}
+
+export function setSubmittedAnswer(instanceId: string, answer: 'YES' | 'NO'): void {
+  mergeSubmittedAnswers({ [instanceId]: answer });
+}
+
+export function removeSubmittedAnswer(instanceId: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const current = getSubmittedAnswers();
+  if (!(instanceId in current)) {
+    return;
+  }
+
+  const next = { ...current };
+  delete next[instanceId];
+  localStorage.setItem(SESSION_KEYS.submittedAnswers, JSON.stringify(next));
+}
+
+export function clearSubmittedAnswers(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  localStorage.removeItem(SESSION_KEYS.submittedAnswers);
 }
 
 /** Keep a stable player id on this device so score restore cannot collide by display name. */

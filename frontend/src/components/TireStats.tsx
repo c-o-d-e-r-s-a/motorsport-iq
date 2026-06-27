@@ -58,6 +58,14 @@ function getCompoundConfig(
   }
 }
 
+function formatP2Gap(gap: number | null | undefined): string {
+  if (gap === null || gap === undefined || !Number.isFinite(gap)) {
+    return '—';
+  }
+
+  return `+${gap.toFixed(1)}`;
+}
+
 export default function TireStats({ leaderStats, lapNumber = null, highlighted = false }: TireStatsProps) {
   const displayState = getCompoundDisplayState(leaderStats?.tyreCompound, lapNumber);
   const compound = getCompoundConfig(leaderStats?.tyreCompound, displayState);
@@ -66,10 +74,7 @@ export default function TireStats({ leaderStats, lapNumber = null, highlighted =
   const tyreAge = leaderStats?.tyreAge ?? 0;
   const tyresCarriedOver =
     lapNumber !== null && lapNumber > 0 && tyreAge > lapNumber;
-  const stint =
-    leaderStats?.stintNumber !== null && leaderStats?.stintNumber !== undefined
-      ? leaderStats.stintNumber
-      : '–';
+  const p2Gap = formatP2Gap(leaderStats?.p2Gap);
 
   return (
     <Card
@@ -111,8 +116,10 @@ export default function TireStats({ leaderStats, lapNumber = null, highlighted =
           </p>
         </div>
         <div className="rounded-[var(--radius-sm)] bg-[var(--color-muted)] p-3 text-center">
-          <p className="font-display text-3xl font-bold leading-none">{stint}</p>
-          <p className="mt-1 text-[0.65rem] font-medium uppercase tracking-wide text-[var(--color-faint-fg)]">stint</p>
+          <p className="font-display text-3xl font-bold leading-none">{p2Gap}</p>
+          <p className="mt-1 text-[0.65rem] font-medium uppercase tracking-wide text-[var(--color-faint-fg)]">
+            P2 gap
+          </p>
         </div>
       </div>
     </Card>

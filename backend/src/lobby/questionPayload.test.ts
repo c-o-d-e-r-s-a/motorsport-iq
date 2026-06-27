@@ -1,5 +1,25 @@
-import type { QuestionInstanceState, RaceSnapshot } from '../types';
+import type { QuestionInstanceState, RaceSnapshot, DriverState } from '../types';
 import { buildQuestionEventPayload, isUnresolvedQuestionState } from './questionPayload';
+
+function createDriver(overrides: Partial<DriverState> = {}): DriverState {
+  return {
+    driverNumber: 1,
+    name: 'NORRIS',
+    team: 'McLaren',
+    position: 5,
+    gap: 12.4,
+    interval: 1.2,
+    tyreCompound: 'MEDIUM',
+    tyreAge: 19,
+    stintNumber: 2,
+    overtakeModeArmed: true,
+    pitCount: 1,
+    lastLapTime: 89.5,
+    inPit: false,
+    retired: false,
+    ...overrides,
+  };
+}
 
 function createSnapshot(): RaceSnapshot {
   return {
@@ -16,6 +36,7 @@ function createSnapshot(): RaceSnapshot {
     leaderLapTime: 89.2,
     leaderLapStartTime: '2024-12-31T23:58:31.000Z',
     localYellowSectors: [],
+    globalYellowActive: false,
   };
 }
 
@@ -86,5 +107,48 @@ describe('questionPayload', () => {
     const payload = buildQuestionEventPayload(instance, 'GAP_CLOSING', 'MEDIUM');
 
     expect(payload.answerDeadline).toBe('2025-01-01T00:00:46.000Z');
+  });
+
+  it('includes frozen question context from trigger-time driver state', () => {
+    const driver1 = createDriver({ name: 'NORRIS', position: 5, interval: 1.2, tyreAge: 19 });
+    const driver2 = createDriver({
+      driverNumber: 44,
+      name: 'HAMILTON',
+      position: 4,
+      interval: null,
+      tyreAge: 22,
+      overtakeModeArmed: false,
+    });
+    const instance: QuestionInstanceState = {
+      ...createInstance('LIVE'),
+      driver1,
+      driver2,
+    };
+
+    const payload = buildQuestionEventPayload(instance, 'OVERTAKE', 'MEDIUM');
+
+    expect(payload.questionContext).toEqual({
+      triggerLap: 10,
+      driver1: {
+        name: 'NORRIS',
+        team: 'McLaren',
+        position: 5,
+        interval: 1.2,
+        tyreCompound: 'MEDIUM',
+        tyreAge: 19,
+        stintNumber: 2,
+        overtakeModeArmed: true,
+      },
+      driver2: {
+        name: 'HAMILTON',
+        team: 'McLaren',
+        position: 4,
+        interval: null,
+        tyreCompound: 'MEDIUM',
+        tyreAge: 22,
+        stintNumber: 2,
+        overtakeModeArmed: false,
+      },
+    });
   });
 });

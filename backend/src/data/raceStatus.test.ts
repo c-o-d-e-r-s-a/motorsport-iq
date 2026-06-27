@@ -1,5 +1,6 @@
 import type { OpenF1RaceControl } from '../types';
 import {
+  isRaceNeutralized,
   parseLatestRaceControlStatus,
   parseRaceControlMessageStatus,
   parseTrackStatusPayload,
@@ -22,6 +23,15 @@ function raceControl(overrides: Partial<OpenF1RaceControl> = {}): OpenF1RaceCont
 }
 
 describe('raceStatus parsing', () => {
+  it('identifies only SC, VSC, and RED as race-neutralizing statuses', () => {
+    expect(isRaceNeutralized('SC')).toBe(true);
+    expect(isRaceNeutralized('VSC')).toBe(true);
+    expect(isRaceNeutralized('RED')).toBe(true);
+    expect(isRaceNeutralized('YELLOW')).toBe(false);
+    expect(isRaceNeutralized('GREEN')).toBe(false);
+    expect(isRaceNeutralized('CHEQUERED')).toBe(false);
+  });
+
   it('maps live timing TrackStatus codes for every global race state', () => {
     expect(parseTrackStatusPayload({ statusCode: '1' })).toBe('GREEN');
     expect(parseTrackStatusPayload({ statusCode: '2' })).toBe('YELLOW');
@@ -59,6 +69,15 @@ describe('raceStatus parsing', () => {
     ]);
 
     expect(status).toBe('GREEN');
+  });
+
+  it('ignores ambiguous global-yellow rows without explicit track scope or text', () => {
+    expect(parseRaceControlMessageStatus(raceControl({
+      flag: 'YELLOW',
+      scope: '',
+      sector: 0,
+      message: 'YELLOW',
+    }))).toBeNull();
   });
 
   it('still accepts global yellow, red, VSC, SC, and chequered race-control messages', () => {

@@ -59,6 +59,19 @@ export function resolveQuestion(
     throw new Error(`Question not found: ${instance.questionId}`);
   }
 
+  // Hard rule: if a driver the question is about crashes out or retires, the
+  // prediction instantly fails ("No") rather than waiting for the lap window to
+  // elapse or letting frozen telemetry produce a misleading "Yes".
+  const retired = getRetiredQuestionDriver(instance, currentSnapshot);
+  if (retired) {
+    return {
+      instanceId: instance.id,
+      outcome: false,
+      correctAnswer: 'NO',
+      explanation: `No — ${retired} is out of the race, so this prediction can no longer come true.`,
+    };
+  }
+
   const outcome = evaluateSuccessCondition(question.successCondition, instance, currentSnapshot);
   const correctAnswer: 'YES' | 'NO' = outcome ? 'YES' : 'NO';
   const explanation = generateExplanation(instance, currentSnapshot, outcome, question.successCondition.type);
@@ -69,6 +82,31 @@ export function resolveQuestion(
     correctAnswer,
     explanation,
   };
+}
+
+/**
+ * Returns the name of a question's subject driver who has retired/crashed out,
+ * or null if both are still running.
+ */
+function getRetiredQuestionDriver(
+  instance: QuestionInstanceState,
+  currentSnapshot: RaceSnapshot
+): string | null {
+  const driver1 = instance.driver1
+    ? getDriverByNumber(currentSnapshot, instance.driver1.driverNumber)
+    : null;
+  if (driver1?.retired) {
+    return instance.driver1?.name ?? driver1.name;
+  }
+
+  if (instance.driver2) {
+    const driver2 = getDriverByNumber(currentSnapshot, instance.driver2.driverNumber);
+    if (driver2?.retired) {
+      return instance.driver2.name ?? driver2.name;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -261,20 +299,10 @@ export function shouldCancel(
     }
   }
 
-  // Cancel if driver retired
-  const driver1 = instance.driver1
-    ? getDriverByNumber(currentSnapshot, instance.driver1.driverNumber)
-    : null;
-  if (driver1?.retired) {
-    return { cancel: true, reason: `${instance.driver1?.name} retired` };
-  }
-
-  if (instance.driver2) {
-    const driver2 = getDriverByNumber(currentSnapshot, instance.driver2.driverNumber);
-    if (driver2?.retired) {
-      return { cancel: true, reason: `${instance.driver2.name} retired` };
-    }
-  }
+  // NOTE: driver retirement is intentionally NOT a cancellation. Per the game's
+  // hard rules a question about a driver who crashes out or retires must resolve
+  // instantly as "No"/Fail (handled in shouldResolve + resolveQuestion), not be
+  // silently cancelled.
 
   // Cancel if red flag
   if (currentSnapshot.trackStatus === 'RED') {

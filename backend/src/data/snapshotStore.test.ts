@@ -123,12 +123,10 @@ describe('SnapshotStore race control updates', () => {
     jest.useRealTimers();
   });
 
-  it('rebuilds and emits the snapshot immediately when track status changes', async () => {
+  it('rebuilds and emits the snapshot immediately when track-wide yellow is reported', async () => {
     const onSnapshotUpdate = jest.fn();
-    const parseTrackStatus = jest.fn(() => 'YELLOW' as const);
     const client = {
       getDrivers: jest.fn(async () => [createDriver()]),
-      parseTrackStatus,
     } as any;
 
     const store = new SnapshotStore(client, { onSnapshotUpdate });
@@ -138,9 +136,35 @@ describe('SnapshotStore race control updates', () => {
     onSnapshotUpdate.mockClear();
     store.processRaceControlUpdate([createRaceControl()]);
 
-    expect(parseTrackStatus).toHaveBeenCalledWith([createRaceControl()]);
     expect(onSnapshotUpdate).toHaveBeenCalledTimes(1);
-    expect(store.getCurrentSnapshot()?.trackStatus).toBe('YELLOW');
+    expect(store.getCurrentSnapshot()?.trackStatus).toBe('GREEN');
+    expect(store.getCurrentSnapshot()?.globalYellowActive).toBe(true);
+  });
+
+  it('clears display-only global yellow when a later track-clear message arrives', async () => {
+    const onSnapshotUpdate = jest.fn();
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+    } as any;
+
+    const store = new SnapshotStore(client, { onSnapshotUpdate });
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+    store.processLapCompletion(createLap());
+
+    store.processRaceControlUpdate([
+      createRaceControl({ date: '2025-09-01T13:05:00Z' }),
+    ]);
+    expect(store.getCurrentSnapshot()?.globalYellowActive).toBe(true);
+
+    store.processRaceControlUpdate([
+      createRaceControl({
+        date: '2025-09-01T13:06:00Z',
+        flag: 'GREEN',
+        message: 'TRACK CLEAR',
+      }),
+    ]);
+    expect(store.getCurrentSnapshot()?.globalYellowActive).toBe(false);
+    expect(store.getCurrentSnapshot()?.trackStatus).toBe('GREEN');
   });
 
   it('prefers OpenF1 full_name over broadcast_name for displayed identity', async () => {
@@ -212,7 +236,7 @@ describe('SnapshotStore race control updates', () => {
     expect(store.getCurrentSnapshot()?.leaderLapStartTime).toBe('2025-09-01T13:00:00Z');
   });
 
-  it('switches stints only when current lap enters the next stint window', async () => {
+  it('updates tyre compound by lap window while session stint stays 1 until a pit stop', async () => {
     const client = {
       getDrivers: jest.fn(async () => [createDriver()]),
       parseTrackStatus: jest.fn(() => 'GREEN' as const),
@@ -230,7 +254,7 @@ describe('SnapshotStore race control updates', () => {
     expect(store.getCurrentSnapshot()?.drivers[0]?.stintNumber).toBe(1);
 
     store.processLapCompletion(createLap({ lap_number: 19 }));
-    expect(store.getCurrentSnapshot()?.drivers[0]?.stintNumber).toBe(2);
+    expect(store.getCurrentSnapshot()?.drivers[0]?.stintNumber).toBe(1);
     expect(store.getCurrentSnapshot()?.drivers[0]?.tyreCompound).toBe('MEDIUM');
   });
 
@@ -251,6 +275,62 @@ describe('SnapshotStore race control updates', () => {
     const leader = store.getCurrentSnapshot()?.drivers[0];
     expect(leader?.tyreAge).toBe(11);
     expect(leader?.tyreAge).toBeGreaterThan(store.getCurrentSnapshot()?.lapNumber ?? 0);
+  });
+
+  it('marks a stalled car retired (lap-stall) while the leader keeps running', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [
+        createDriver({ driver_number: 1 }),
+        createDriver({ driver_number: 2, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+      ]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processPositionUpdate([
+      createPosition({ driver_number: 1, position: 1 }),
+      createPosition({ driver_number: 2, position: 2 }),
+    ]);
+
+    // Both cars complete laps 1-3.
+    for (let lap = 1; lap <= 3; lap++) {
+      store.processLapCompletion(createLap({ driver_number: 1, lap_number: lap }));
+      store.processLapCompletion(createLap({ driver_number: 2, lap_number: lap }));
+    }
+
+    // Driver 2 crashes out; only the leader keeps completing laps. After the
+    // stale-lap threshold the stalled car is marked retired.
+    for (let lap = 4; lap <= 8; lap++) {
+      store.processLapCompletion(createLap({ driver_number: 1, lap_number: lap }));
+    }
+
+    const snapshot = store.getCurrentSnapshot();
+    const stalled = snapshot?.drivers.find((d) => d.driverNumber === 2);
+    const leader = snapshot?.drivers.find((d) => d.driverNumber === 1);
+    expect(stalled?.retired).toBe(true);
+    expect(leader?.retired).toBe(false);
+  });
+
+  it('does not retire a running car when the displayed lap jumps without lap completions', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver({ driver_number: 1 })]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processPositionUpdate([createPosition({ driver_number: 1, position: 1 })]);
+    store.processLapCompletion(createLap({ driver_number: 1, lap_number: 1 }));
+
+    // Lap counter jumps far ahead (sync / sparse telemetry) with no new lap
+    // completions — the leader is still running and must NOT be marked retired.
+    store.syncLapNumber(20);
+
+    const leader = store.getCurrentSnapshot()?.drivers.find((d) => d.driverNumber === 1);
+    expect(leader?.retired).toBe(false);
   });
 
   it('uses F1 current-lap numbering in replay and live mode', async () => {
@@ -603,5 +683,100 @@ describe('SnapshotStore race control updates', () => {
     ]);
 
     expect(store.getCurrentSnapshot()?.lapNumber).toBe(1);
+  });
+
+  it('opens a full race on the correct opening compound', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver({ driver_number: 63, full_name: 'George RUSSELL' })]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'replay', replaySpeed: 10 });
+
+    store.processStintUpdate([
+      createStint({ driver_number: 63, stint_number: 1, lap_start: 1, lap_end: 10, compound: 'MEDIUM' }),
+      createStint({ driver_number: 63, stint_number: 2, lap_start: 11, lap_end: 56, compound: 'HARD' }),
+    ]);
+    store.processPositionUpdate([createPosition({ driver_number: 63, position: 1 })]);
+    jest.runOnlyPendingTimers();
+
+    const leader = store.getCurrentSnapshot()?.drivers.find((d) => d.driverNumber === 63);
+    expect(leader?.stintNumber).toBe(1);
+    expect(leader?.tyreCompound).toBe('MEDIUM');
+  });
+
+  it('keeps stint and compound locked after a live pit when stale stint data arrives on lap 1', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+    store.processStintUpdate([
+      createStint({ stint_number: 1, lap_start: 1, lap_end: null, compound: 'SOFT', tyre_age_at_start: 0 }),
+    ]);
+    store.processLapCompletion(createLap({ lap_number: 25 }));
+
+    store.processPitUpdate([createPit({ lap_number: 26, number: 1 })]);
+    store.processStintUpdate([
+      createStint({
+        stint_number: 2,
+        lap_start: 26,
+        lap_end: null,
+        compound: 'MEDIUM',
+        tyre_age_at_start: 0,
+      }),
+    ]);
+
+    store.processStintUpdate([
+      createStint({ stint_number: 1, lap_start: 1, lap_end: 25, compound: 'SOFT', tyre_age_at_start: 0 }),
+    ]);
+    store.processLapCompletion(createLap({ lap_number: 26, date_start: '2025-09-01T13:32:00Z' }));
+
+    const leader = store.getCurrentSnapshot()?.drivers[0];
+    expect(leader?.stintNumber).toBe(2);
+    expect(leader?.tyreCompound).toBe('MEDIUM');
+    expect(leader?.tyreAge).toBe(1);
+  });
+
+  it('synthesizes the missing opening MEDIUM stint for China 2026 sprint post-pit-only OpenF1 data', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver({ driver_number: 63, full_name: 'George RUSSELL' })]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(11240, { sessionMode: 'replay', replaySpeed: 10 });
+
+    // OpenF1 only ships Russell's post-SC SOFT stint (lap 14+) for session 11240.
+    store.processStintUpdate([
+      createStint({
+        driver_number: 63,
+        stint_number: 2,
+        lap_start: 14,
+        lap_end: 19,
+        compound: 'SOFT',
+        tyre_age_at_start: 0,
+      }),
+    ]);
+    store.processPositionUpdate([createPosition({ driver_number: 63, position: 1 })]);
+    jest.runOnlyPendingTimers();
+
+    const atLapOne = store.getCurrentSnapshot()?.drivers.find((d) => d.driverNumber === 63);
+    expect(atLapOne?.stintNumber).toBe(1);
+    expect(atLapOne?.tyreCompound).toBe('MEDIUM');
+    expect(atLapOne?.tyreAge).toBe(0);
+
+    store.processPitUpdate([createPit({ driver_number: 63, lap_number: 13, number: 1 })]);
+    store.processLapCompletion(createLap({ driver_number: 63, lap_number: 14 }));
+
+    const afterPit = store.getCurrentSnapshot()?.drivers.find((d) => d.driverNumber === 63);
+    expect(afterPit?.stintNumber).toBe(2);
+    expect(afterPit?.tyreCompound).toBe('SOFT');
+    expect(afterPit?.tyreAge).toBe(1);
   });
 });
