@@ -65,6 +65,7 @@ import {
   resumeQuestion,
   clearAllTimers,
   clearLobbyLifecycle,
+  forceResolveActiveQuestion,
 } from './lobby/lifecycleManager';
 import { resolveLiveAnswerDeadline } from './lobby/answerWindow';
 import { LobbyLifecycleQueue } from './lobby/lifecycleQueue';
@@ -347,6 +348,9 @@ function emitSocketError(
 
 function toRaceSnapshotEvent(snapshot: RaceSnapshot): RaceSnapshotEvent {
   const leader = snapshot.drivers[0] ?? null;
+  const p2 = snapshot.drivers.find(
+    (driver) => driver.position === 2 && !driver.retired
+  ) ?? null;
 
   return {
     sessionId: snapshot.sessionId,
@@ -369,11 +373,13 @@ function toRaceSnapshotEvent(snapshot: RaceSnapshot): RaceSnapshotEvent {
           tyreCompound: leader.tyreCompound,
           tyreAge: leader.tyreAge,
           stintNumber: leader.stintNumber,
+          p2Gap: p2?.gap ?? null,
         }
       : null,
     topThree: snapshot.drivers.slice(0, 3).map((driver) => driver.name),
     dataFeedStalled: snapshot.dataFeedStalled,
     localYellowSectors: snapshot.localYellowSectors ?? [],
+    globalYellowActive: snapshot.globalYellowActive ?? false,
   };
 }
 
@@ -692,6 +698,18 @@ const runtimeManager = new SessionRuntimeManager({
   },
   onReplayComplete: async (snapshot, lobbyIds) => {
     for (const lobbyId of lobbyIds) {
+      // Settle any still-open question against the final snapshot before the
+      // race is marked finished, so the winner screen never stalls behind an
+      // unresolved question (and the Final Stretch question always resolves).
+      if (snapshot) {
+        await forceResolveActiveQuestion(
+          lobbyId,
+          snapshot,
+          (result) => handleResolution(lobbyId, result),
+          (instance) => handleStateChange(lobbyId, instance)
+        );
+      }
+
       await updateLobbyStatus(lobbyId, 'finished');
       setLobbyRuntimeMeta(lobbyId, { isReplayComplete: true });
       clearCooldowns(lobbyId);
@@ -885,7 +903,7 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
     : runtime?.getPreviousLapSnapshot?.() ?? runtime?.getPreviousSnapshot() ?? null;
 
   // ──── AI TRIGGER DETECTION — high-visibility logs for scenario/debug testing ──
-  if (snapshot.trackStatus === 'YELLOW' || snapshot.trackStatus === 'SC' || snapshot.trackStatus === 'VSC') {
+  if (snapshot.trackStatus === 'SC' || snapshot.trackStatus === 'VSC') {
     console.log(`\n⚠️  ============================================`);
     console.log(`⚠️  ${snapshot.trackStatus} FLAG DETECTED (lobby=${lobbyId}, lap=${snapshot.lapNumber})`);
     console.log(`⚠️  AI Question Generator SUPPRESSED — caution period active`);
@@ -1096,6 +1114,43 @@ function getQuestionCategory(questionId: string): QuestionCategory {
 function getQuestionDifficulty(questionId: string): Difficulty {
   const question = getQuestionById(questionId);
   return question?.difficulty ?? 'MEDIUM';
+}
+
+async function fetchUserAnswersForReconnect(
+  userId: string,
+  lobbyState: LobbyState
+): Promise<Record<string, 'YES' | 'NO'>> {
+  const instanceIds: string[] = [];
+
+  if (lobbyState.currentQuestion) {
+    instanceIds.push(lobbyState.currentQuestion.id);
+  }
+  if (lobbyState.latestResolution) {
+    instanceIds.push(lobbyState.latestResolution.instanceId);
+  }
+
+  if (instanceIds.length === 0) {
+    return {};
+  }
+
+  const { data: rows, error } = await supabase
+    .from('answers')
+    .select('instance_id, answer')
+    .eq('user_id', userId)
+    .in('instance_id', instanceIds);
+
+  if (error || !rows) {
+    return {};
+  }
+
+  const restored: Record<string, 'YES' | 'NO'> = {};
+  for (const row of rows) {
+    if (row.answer === 'YES' || row.answer === 'NO') {
+      restored[row.instance_id] = row.answer;
+    }
+  }
+
+  return restored;
 }
 
 function emitSessionCatchUp(
@@ -1927,10 +1982,15 @@ io.on('connection', (socket) => {
 
       // Send current state
       const refreshedLobbyState = await getLobbyState(lobbyId);
-      socket.emit('lobby_state', refreshedLobbyState ?? lobbyState);
+      const lobbyStateForClient = refreshedLobbyState ?? lobbyState;
+      const restoredAnswers = await fetchUserAnswersForReconnect(data.userId, lobbyStateForClient);
+      if (Object.keys(restoredAnswers).length > 0) {
+        socket.emit('answers_restored', { answers: restoredAnswers });
+      }
+      socket.emit('lobby_state', lobbyStateForClient);
 
       if (lobbyState.sessionId) {
-        emitSessionCatchUp(socket, lobbyId, refreshedLobbyState ?? lobbyState);
+        emitSessionCatchUp(socket, lobbyId, lobbyStateForClient);
       }
 
       console.log(`User ${data.userId} reconnected to lobby ${lobbyId}`);

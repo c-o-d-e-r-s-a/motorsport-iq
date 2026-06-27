@@ -14,12 +14,21 @@ import type {
 } from '../types';
 import { isOvertakeModeArmed } from '../engine/derivedSignals';
 import type { OpenF1Client } from './openf1Client';
-import { classifySectorFlag } from './raceStatus';
+import { classifySectorFlag, parseLatestRaceControlStatusWithTime } from './raceStatus';
 import { mergeStintRecords, resolveTyreCompound } from './tyreCompoundResolver';
 
 interface SnapshotStoreOptions {
   onSnapshotUpdate?: (snapshot: RaceSnapshot) => void;
   onLapComplete?: (snapshot: RaceSnapshot) => void;
+}
+
+/** Tyre display locked from pit exit until the next stop — live feed often reverts after lap 0→1. */
+interface ActiveStintLock {
+  /** Session-relative stint (always pits.length + 1 at time of lock). */
+  sessionStintNumber: number;
+  compound: string;
+  tyreAgeAtStart: number;
+  lapStart: number;
 }
 
 interface DriverData {
@@ -30,12 +39,22 @@ interface DriverData {
   pits: OpenF1Pit[];
   stints: OpenF1Stint[];
   latestCompound: string | null;
+  activeStintLock: ActiveStintLock | null;
 }
 
 const DEBUG_DRIVER_PROVENANCE = process.env.DEBUG_DRIVER_PROVENANCE === 'true';
 const DEBUG_MISSING_COMPOUND = process.env.DEBUG_MISSING_COMPOUND === 'true';
 const HUD_SNAPSHOT_THROTTLE_MS = 1_000;
 const MAX_REASONABLE_USED_TYRE_START_AGE_AFTER_LIVE_PIT = 8;
+/**
+ * A car that has stopped completing laps while the race keeps advancing has
+ * retired/crashed. OpenF1 replay never emits a clean "position → 0" retirement
+ * signal, so we detect it from lap-progress staleness: if this many race laps
+ * pass without the driver completing a new lap, treat them as out. A backmarker
+ * being lapped still completes a lap every ~1 race lap, so this threshold never
+ * flags merely-lapped cars; only genuinely stopped cars exceed it.
+ */
+const STALE_RACE_LAPS_FOR_RETIREMENT = 3;
 
 function toTimestamp(value: string | null | undefined): number {
   if (!value) return 0;
@@ -82,8 +101,19 @@ export class SnapshotStore {
   private retiredDrivers = new Set<number>();
   /** Drivers that have had at least one valid position (> 0) reported during this session. */
   private driverHadValidPosition = new Set<number>();
+  /**
+   * Per-driver lap-progress tracking for retirement detection: the highest lap
+   * number each driver has actually completed.
+   */
+  private driverLapProgress = new Map<number, number>();
   /** Sectors currently under a localized yellow — display-only, never gates gameplay. */
   private activeYellowSectors = new Set<number>();
+  /** Track-wide yellow caution — display-only, never gates gameplay. */
+  private globalYellowActive = false;
+  /** Full race-control history for cumulative status parsing in replay. */
+  private raceControlHistory: OpenF1RaceControl[] = [];
+  /** Timestamp of the last applied global race-control status (stale guard). */
+  private lastRaceControlStatusTime = 0;
 
   constructor(client: OpenF1Client, options: SnapshotStoreOptions = {}) {
     this.client = client;
@@ -110,7 +140,11 @@ export class SnapshotStore {
     this.isReplayComplete = false;
     this.retiredDrivers.clear();
     this.driverHadValidPosition.clear();
+    this.driverLapProgress.clear();
     this.activeYellowSectors.clear();
+    this.globalYellowActive = false;
+    this.raceControlHistory = [];
+    this.lastRaceControlStatusTime = 0;
     this.sessionMode = config?.sessionMode ?? 'live';
     this.openF1LapNumbering = config?.openF1LapNumbering ?? false;
     this.replaySpeed = config?.replaySpeed ?? null;
@@ -137,6 +171,7 @@ export class SnapshotStore {
             pits: [],
             stints: [],
             latestCompound: null,
+            activeStintLock: null,
           });
         }
         console.log(`[SnapshotStore] Pre-loaded ${driverData.length} drivers from OpenF1 API`);
@@ -158,13 +193,34 @@ export class SnapshotStore {
   }
 
   setTrackStatus(status: TrackStatus): void {
-    if (status === this.trackStatus) {
-      return;
-    }
-    this.trackStatus = status;
-    if (this.currentSnapshot) {
+    const changed = this.applyParsedTrackStatus(status);
+    if (changed && this.currentSnapshot) {
       this.buildSnapshot();
     }
+  }
+
+  private setGlobalYellowActive(active: boolean): boolean {
+    if (this.globalYellowActive === active) {
+      return false;
+    }
+    this.globalYellowActive = active;
+    return true;
+  }
+
+  /** Apply a parsed race-control status. Yellow is display-only and never stored in trackStatus. */
+  private applyParsedTrackStatus(status: TrackStatus): boolean {
+    if (status === 'YELLOW') {
+      return this.setGlobalYellowActive(true);
+    }
+
+    const hadYellow = this.globalYellowActive;
+    this.globalYellowActive = false;
+
+    if (status === this.trackStatus && !hadYellow) {
+      return false;
+    }
+    this.trackStatus = status;
+    return true;
   }
 
   processDriverListUpdate(drivers: OpenF1Driver[]): void {
@@ -184,6 +240,7 @@ export class SnapshotStore {
           pits: [],
           stints: [],
           latestCompound: null,
+          activeStintLock: null,
         });
       }
     }
@@ -216,12 +273,14 @@ export class SnapshotStore {
       });
     }
 
+    this.refreshActiveStintLock(driverData, normalizedCompound);
     this.scheduleHudSnapshotUpdate();
   }
 
   /** Seed compounds and emit an initial HUD snapshot after replay/sim stint preload. */
   bootstrapAfterStintPreload(): void {
     for (const data of this.drivers.values()) {
+      this.synthesizeMissingOpeningStints(data);
       this.refreshLatestCompound(data);
     }
 
@@ -277,6 +336,7 @@ export class SnapshotStore {
       pits: [],
       stints: [],
       latestCompound: null,
+      activeStintLock: null,
     };
     this.drivers.set(driverNumber, driverData);
     console.log(`[SnapshotStore] Auto-created driver entry for #${driverNumber} from live data`);
@@ -301,6 +361,13 @@ export class SnapshotStore {
     }
 
     this.ensureActiveRaceLapFloor();
+
+    // Track the highest lap each driver has completed, for retirement detection.
+    const lastCompletedLap = this.driverLapProgress.get(lap.driver_number) ?? 0;
+    if (lap.lap_number > lastCompletedLap) {
+      this.driverLapProgress.set(lap.driver_number, lap.lap_number);
+    }
+
     this.buildSnapshot();
 
     const shouldEmitLapComplete = this.sessionMode === 'live'
@@ -383,6 +450,7 @@ export class SnapshotStore {
       if (!existingPit) {
         driverData.pits.push(pit);
         this.applyPitStopToStints(driverData, pit);
+        this.synthesizeMissingOpeningStints(driverData);
       }
     }
     this.scheduleHudSnapshotUpdate();
@@ -426,7 +494,9 @@ export class SnapshotStore {
     for (const driverNumber of touchedDrivers) {
       const driverData = this.drivers.get(driverNumber);
       if (driverData) {
+        this.synthesizeMissingOpeningStints(driverData);
         this.refreshLatestCompound(driverData);
+        this.syncActiveStintLockFromStints(driverData);
       }
     }
 
@@ -450,18 +520,18 @@ export class SnapshotStore {
     // independent of global track status and never changes `this.trackStatus`.
     const sectorFlagsChanged = this.applySectorFlagMessages(messages);
 
-    const statusParser = (
-      this.client as OpenF1Client & {
-        parseRaceControlStatus?: (messages: OpenF1RaceControl[]) => TrackStatus | null;
-      }
-    ).parseRaceControlStatus;
-    const nextTrackStatus = statusParser
-      ? statusParser.call(this.client, messages)
-      : this.client.parseTrackStatus(messages);
+    this.raceControlHistory.push(...messages);
+    const latest = parseLatestRaceControlStatusWithTime(this.raceControlHistory);
 
-    const trackStatusChanged = Boolean(nextTrackStatus) && nextTrackStatus !== this.trackStatus;
-    if (trackStatusChanged) {
-      this.trackStatus = nextTrackStatus as TrackStatus;
+    let trackStatusChanged = false;
+    if (latest) {
+      const isStale = latest.time > 0 && latest.time < this.lastRaceControlStatusTime;
+      if (!isStale) {
+        if (latest.time > 0) {
+          this.lastRaceControlStatusTime = Math.max(this.lastRaceControlStatusTime, latest.time);
+        }
+        trackStatusChanged = this.applyParsedTrackStatus(latest.status);
+      }
     }
 
     if ((trackStatusChanged || sectorFlagsChanged) && this.currentSnapshot) {
@@ -534,9 +604,52 @@ export class SnapshotStore {
     }
   }
 
+  /**
+   * Mark drivers retired when they have stopped completing laps while the rest
+   * of the field keeps lapping. Works for replay (no clean retirement feed) and
+   * live alike. Retirement is sticky — once out, a car stays out for the session.
+   *
+   * Stalls are measured against the furthest lap any car has actually COMPLETED
+   * (the field's max completed lap), never against the displayed race lap. The
+   * displayed lap can jump forward on its own (syncLapNumber, sparse/throttled
+   * telemetry) without any new lap completions; anchoring on real completions
+   * means such jumps can never falsely retire a still-running car (e.g. the
+   * leader), while a car that genuinely stops still falls behind the field.
+   */
+  private updateRetirementStatus(): void {
+    let fieldMaxLap = 0;
+    for (const driverNumber of this.driverHadValidPosition) {
+      const lap = this.driverLapProgress.get(driverNumber) ?? 0;
+      if (lap > fieldMaxLap) {
+        fieldMaxLap = lap;
+      }
+    }
+
+    if (fieldMaxLap < 4) {
+      return;
+    }
+
+    for (const driverNumber of this.driverHadValidPosition) {
+      if (this.retiredDrivers.has(driverNumber)) {
+        continue;
+      }
+
+      const driverLap = this.driverLapProgress.get(driverNumber) ?? 0;
+      const lapsBehindField = fieldMaxLap - driverLap;
+      if (lapsBehindField >= STALE_RACE_LAPS_FOR_RETIREMENT) {
+        console.log(
+          `[SnapshotStore] Driver #${driverNumber} marked as retired ` +
+          `(${lapsBehindField} laps behind the field; last completed lap ${driverLap} vs field lap ${fieldMaxLap})`
+        );
+        this.retiredDrivers.add(driverNumber);
+      }
+    }
+  }
+
   private buildSnapshot(): void {
     if (!this.sessionId) return;
 
+    this.updateRetirementStatus();
     this.previousSnapshot = this.currentSnapshot;
     const driverStates: DriverState[] = [];
 
@@ -545,8 +658,10 @@ export class SnapshotStore {
 
       const tyreAge = this.calculateTyreAge(data);
       const activeStint = this.getActiveStintForCurrentLap(data);
-      const stintNumber = activeStint?.stint_number ?? data.pits.length + 1;
-      const tyreCompound = resolveTyreCompound(data, activeStint);
+      const lockedDisplay = this.resolveLockedTyreDisplay(data, activeStint, tyreAge);
+      const sessionStintNumber = this.getSessionStintNumber(data);
+      const tyreCompound = lockedDisplay.tyreCompound;
+      const displayTyreAge = lockedDisplay.tyreAge;
       const name = data.driver.full_name || data.driver.broadcast_name || `Driver ${driverNumber}`;
       const nameSource = data.driver.full_name
         ? 'full_name'
@@ -564,8 +679,8 @@ export class SnapshotStore {
         gap: data.latestInterval?.gap_to_leader ?? null,
         interval: data.latestInterval?.interval ?? null,
         tyreCompound,
-        tyreAge: this.calculateCurrentTyreAge(activeStint, tyreAge),
-        stintNumber,
+        tyreAge: displayTyreAge,
+        stintNumber: sessionStintNumber,
         overtakeModeArmed: false,
         pitCount: data.pits.length,
         lastLapTime: data.latestLap?.lap_duration ?? null,
@@ -589,11 +704,16 @@ export class SnapshotStore {
     const normalizedPosition = (value: number): number => (value > 0 ? value : Number.MAX_SAFE_INTEGER);
 
     driverStates.sort((a, b) => normalizedPosition(a.position) - normalizedPosition(b.position));
-    const previousLeaderDriverNumber = this.previousSnapshot?.drivers.find((driver) => driver.position > 0)?.driverNumber;
-    const leader = driverStates.find((driver) => driver.position > 0)
+    const previousLeaderDriverNumber = this.previousSnapshot?.drivers.find(
+      (driver) => driver.position > 0 && !driver.retired
+    )?.driverNumber;
+    // A retired car keeps its last (frozen) position, so it must never be picked
+    // as the leader — otherwise a retired race leader would stay on the leader card.
+    const leader = driverStates.find((driver) => driver.position > 0 && !driver.retired)
       ?? (previousLeaderDriverNumber
         ? driverStates.find((driver) => driver.driverNumber === previousLeaderDriverNumber)
         : null)
+      ?? driverStates.find((driver) => driver.position > 0)
       ?? driverStates[0];
     const leaderLapStartTime = leader
       ? this.drivers.get(leader.driverNumber)?.latestLap?.date_start ?? null
@@ -616,6 +736,7 @@ export class SnapshotStore {
       leaderLapTime: leader?.lastLapTime ?? null,
       leaderLapStartTime,
       localYellowSectors: [...this.activeYellowSectors].sort((a, b) => a - b),
+      globalYellowActive: this.globalYellowActive,
     };
 
     if (this.previousSnapshot) {
@@ -741,9 +862,13 @@ export class SnapshotStore {
 
     const existing = data.stints.find((stint) => stint.stint_number === nextStintNumber);
     if (existing) {
-      if (existing.lap_start === null || existing.lap_start > nextLapStart || existing.lap_start <= pit.lap_number - 1) {
+      if (existing.lap_start === null || existing.lap_start < pit.lap_number) {
+        existing.lap_start = Math.max(nextLapStart, pit.lap_number + 1);
+      } else if (existing.lap_start === pit.lap_number) {
         existing.lap_start = nextLapStart;
       }
+      // When OpenF1 already has lap_start > pit lap (out-lap), keep it — do not pull
+      // forward to the pit lap (China 2026 sprint: pit lap 13, stint lap 14).
       existing.lap_end = null;
       if (
         this.sessionMode === 'live'
@@ -754,10 +879,11 @@ export class SnapshotStore {
       ) {
         existing.tyre_age_at_start = 0;
       }
+      this.setActiveStintLock(data, existing, pit);
       return;
     }
 
-    data.stints.push({
+    const newStint: OpenF1Stint = {
       date: pit.date,
       session_key: pit.session_key,
       meeting_key: pit.meeting_key,
@@ -767,7 +893,171 @@ export class SnapshotStore {
       lap_end: null,
       compound: data.latestCompound,
       tyre_age_at_start: 0,
+    };
+    data.stints.push(newStint);
+    this.setActiveStintLock(data, newStint, pit);
+  }
+
+  /**
+   * OpenF1 sprint sessions often omit the pre-pit opening stint and only ship the
+   * post-pit record (e.g. China 2026: Russell has SOFT from lap 14 but started on
+   * MEDIUM laps 1–13). Synthesize the missing opening stint instead of shifting
+   * lap windows, which wrongly treated the post-pit tyre as the race starter.
+   */
+  private synthesizeMissingOpeningStints(data: DriverData): void {
+    if (data.stints.length === 0) {
+      return;
+    }
+
+    const coversLapOne = data.stints.some((stint) => {
+      const lapStart = stint.lap_start ?? Number.MAX_SAFE_INTEGER;
+      const lapEnd = stint.lap_end ?? Number.MAX_SAFE_INTEGER;
+      return lapStart <= 1 && lapEnd >= 1;
     });
+    if (coversLapOne) {
+      return;
+    }
+
+    const sorted = [...data.stints].sort((a, b) => {
+      const aLapStart = a.lap_start ?? Number.MAX_SAFE_INTEGER;
+      const bLapStart = b.lap_start ?? Number.MAX_SAFE_INTEGER;
+      if (aLapStart !== bLapStart) {
+        return aLapStart - bLapStart;
+      }
+      return a.stint_number - b.stint_number;
+    });
+    const earliest = sorted[0];
+    const earliestStart = earliest.lap_start;
+    if (earliestStart === null || earliestStart === undefined || earliestStart <= 1) {
+      return;
+    }
+
+    const pitLaps = data.pits
+      .map((pit) => pit.lap_number)
+      .filter((lap) => Number.isFinite(lap) && lap > 0);
+    const firstPitLap = pitLaps.length > 0 ? Math.min(...pitLaps) : null;
+    const openingEnd = firstPitLap ?? (earliestStart - 1);
+    if (openingEnd < 1) {
+      return;
+    }
+
+    const syntheticStintNumber = Math.max(1, earliest.stint_number - 1);
+    const alreadySynthetic = data.stints.some(
+      (stint) => stint.lap_start === 1
+        && stint.stint_number === syntheticStintNumber
+        && (stint.lap_end ?? openingEnd) >= 1
+    );
+    if (alreadySynthetic) {
+      return;
+    }
+
+    data.stints.push({
+      date: earliest.date ?? null,
+      session_key: earliest.session_key,
+      meeting_key: earliest.meeting_key,
+      driver_number: earliest.driver_number,
+      stint_number: syntheticStintNumber,
+      lap_start: 1,
+      lap_end: openingEnd,
+      compound: this.inferOpeningCompound(earliest.compound),
+      tyre_age_at_start: 0,
+    });
+  }
+
+  /** Infer the compound fitted before a known post-pit stint when OpenF1 omits it. */
+  private inferOpeningCompound(postPitCompound: string | null | undefined): string {
+    switch (postPitCompound?.trim().toUpperCase()) {
+      case 'SOFT':
+        return 'MEDIUM';
+      case 'MEDIUM':
+        return 'SOFT';
+      case 'HARD':
+        return 'MEDIUM';
+      default:
+        return 'MEDIUM';
+    }
+  }
+
+  private getSessionStintNumber(data: DriverData): number {
+    return data.pits.length + 1;
+  }
+
+  private setActiveStintLock(data: DriverData, stint: OpenF1Stint, pit: OpenF1Pit): void {
+    const compound = stint.compound?.trim()
+      || data.latestCompound?.trim()
+      || resolveTyreCompound(data, stint)?.trim()
+      || '';
+    if (!compound) {
+      return;
+    }
+
+    const lapStart = Math.max(1, stint.lap_start ?? pit.lap_number);
+    const tyreAgeAtStart = stint.tyre_age_at_start ?? 0;
+    data.activeStintLock = {
+      sessionStintNumber: this.getSessionStintNumber(data),
+      compound,
+      tyreAgeAtStart,
+      lapStart,
+    };
+  }
+
+  private refreshActiveStintLock(data: DriverData, compound: string): void {
+    const lock = data.activeStintLock;
+    if (!lock) {
+      return;
+    }
+
+    if (lock.sessionStintNumber !== this.getSessionStintNumber(data)) {
+      return;
+    }
+
+    data.activeStintLock = { ...lock, compound };
+  }
+
+  private syncActiveStintLockFromStints(data: DriverData): void {
+    const lock = data.activeStintLock;
+    if (!lock) {
+      return;
+    }
+
+    const activeStint = this.getActiveStintForCurrentLap(data);
+    if (!activeStint) {
+      return;
+    }
+
+    const compound = activeStint.compound?.trim() || lock.compound;
+    const lapStart = activeStint.lap_start ?? lock.lapStart;
+    const tyreAgeAtStart = activeStint.tyre_age_at_start ?? lock.tyreAgeAtStart;
+    data.activeStintLock = {
+      ...lock,
+      compound,
+      lapStart: Math.max(1, lapStart),
+      tyreAgeAtStart,
+    };
+  }
+
+  private resolveLockedTyreDisplay(
+    data: DriverData,
+    activeStint: OpenF1Stint | null,
+    fallbackTyreAge: number
+  ): { tyreCompound: string | null; tyreAge: number } {
+    const sessionStintNumber = this.getSessionStintNumber(data);
+    const lock = data.activeStintLock;
+
+    if (lock && lock.sessionStintNumber === sessionStintNumber && lock.compound) {
+      const effectiveLap = Math.max(this.lapNumber, lock.lapStart);
+      const tyreAge = lock.tyreAgeAtStart + Math.max(0, effectiveLap - lock.lapStart);
+      return {
+        tyreCompound: lock.compound,
+        tyreAge,
+      };
+    }
+
+    const tyreCompound = resolveTyreCompound(data, activeStint);
+    return {
+      tyreCompound,
+      tyreAge: this.calculateCurrentTyreAge(activeStint, fallbackTyreAge),
+    };
   }
 
   private normalizeStintAfterLivePit(data: DriverData, stint: OpenF1Stint): OpenF1Stint {
@@ -820,7 +1110,50 @@ export class SnapshotStore {
     return latestValue;
   }
 
+  /**
+   * Resolve the stint the driver is on at the current lap.
+   *
+   * Prefer the lap window — never jump to a future stint that is preloaded for
+   * later in the race. Fall back to session stint index (pit count + 1 ordered
+   * by lap_start) when windows are blank (common on live feeds).
+   */
   private getActiveStintForCurrentLap(data: DriverData): OpenF1Stint | null {
+    if (data.stints.length === 0) {
+      return null;
+    }
+
+    const byWindow = this.getStintByLapWindow(data);
+    if (byWindow) {
+      return byWindow;
+    }
+
+    return this.getStintBySessionIndex(data);
+  }
+
+  /**
+   * Map session-relative stint (pits completed + 1) to the Nth stint ordered by
+   * lap_start in this session. OpenF1 stint_number can be 2 on a sprint opener
+   * when stint 1 was in qualifying — session stint 1 must still resolve correctly.
+   */
+  private getStintBySessionIndex(data: DriverData): OpenF1Stint | null {
+    if (data.stints.length === 0) {
+      return null;
+    }
+
+    const sessionStintIndex = this.getSessionStintNumber(data);
+    const sorted = [...data.stints].sort((a, b) => {
+      const aLapStart = a.lap_start ?? Number.MAX_SAFE_INTEGER;
+      const bLapStart = b.lap_start ?? Number.MAX_SAFE_INTEGER;
+      if (aLapStart !== bLapStart) {
+        return aLapStart - bLapStart;
+      }
+      return a.stint_number - b.stint_number;
+    });
+
+    return sorted[sessionStintIndex - 1] ?? sorted[0] ?? null;
+  }
+
+  private getStintByLapWindow(data: DriverData): OpenF1Stint | null {
     if (data.stints.length === 0) {
       return null;
     }

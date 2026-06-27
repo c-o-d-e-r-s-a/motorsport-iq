@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/cn';
+import { useArcadePause } from './ArcadePauseContext';
 import { useHighScore } from './useHighScore';
 import { isExternalControlFocused } from './keys';
 
@@ -24,16 +25,38 @@ export default function ReactionLights() {
   const [reaction, setReaction] = useState<number | null>(null);
   const [isRecord, setIsRecord] = useState(false);
   const { best, submit } = useHighScore('reaction', { lowerIsBetter: true });
+  const { questionEffective } = useArcadePause();
 
   const timeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
   const goAtRef = useRef<number>(0);
+  const phaseRef = useRef<Phase>('idle');
+
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
 
   const clearTimers = useCallback(() => {
     timeouts.current.forEach(clearTimeout);
     timeouts.current = [];
   }, []);
 
+  const resetToIdle = useCallback(() => {
+    clearTimers();
+    setReaction(null);
+    setLitCount(0);
+    setPhase('idle');
+    phaseRef.current = 'idle';
+  }, [clearTimers]);
+
   useEffect(() => clearTimers, [clearTimers]);
+
+  useEffect(() => {
+    if (!questionEffective) return;
+    if (phaseRef.current === 'idle' || phaseRef.current === 'result' || phaseRef.current === 'jump') {
+      return;
+    }
+    resetToIdle();
+  }, [questionEffective, resetToIdle]);
 
   const start = useCallback(() => {
     clearTimers();

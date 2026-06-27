@@ -60,10 +60,11 @@ describe('tyreCompoundResolver', () => {
     )).toBe('SOFT');
   });
 
-  it('never borrows a future stint compound when the active (earlier) stint is blank', () => {
-    // Mirrors OpenF1 leaving an early stint's compound blank (e.g. Russell,
-    // Australian GP 2026) while a later stint is HARD. The early stint must not
-    // display HARD — a tyre the driver has not fitted yet.
+  it('surfaces the nearest known compound when the active opening stint is blank', () => {
+    // Mirrors OpenF1 leaving an opening stint's compound blank (e.g. Russell,
+    // Australian GP 2026) while a later stint is HARD. With nothing else known,
+    // showing the nearest real tyre is far better UX for the leader card than a
+    // blank dash, so the resolver falls back to the only known compound.
     const activeStint = createStint({ stint_number: 1, lap_start: 1, lap_end: 11, compound: null });
 
     expect(resolveTyreCompound(
@@ -75,7 +76,7 @@ describe('tyreCompoundResolver', () => {
         ],
       },
       activeStint
-    )).toBeNull();
+    )).toBe('HARD');
   });
 
   it('finds the latest stint by lap_start when resolving historical compounds', () => {

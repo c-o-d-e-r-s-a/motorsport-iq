@@ -51,6 +51,33 @@ function mentionsLocalScope(message: string): boolean {
   );
 }
 
+/** SC/VSC/RED neutralize the race and gate question triggers. Yellow does not. */
+export function isRaceNeutralized(status: TrackStatus): boolean {
+  return status === 'SC' || status === 'VSC' || status === 'RED';
+}
+
+function isExplicitGlobalYellow(message: RaceControlLike): boolean {
+  const scope = normalize(message.scope ?? message.Scope);
+  const text = normalize(message.message ?? message.Message);
+  const flag = normalize(message.flag ?? message.Flag);
+
+  const isYellow = flag === 'yellow'
+    || flag === 'double yellow'
+    || text.includes('yellow flag')
+    || text.includes('double yellow');
+
+  if (!isYellow || !isGlobalRaceControlMessage(message)) {
+    return false;
+  }
+
+  if (scope === 'track' || scope === 'full track') {
+    return true;
+  }
+
+  // Live timing text-only global yellow (scope often omitted).
+  return !scope && text.includes('yellow flag') && !mentionsLocalScope(text);
+}
+
 function isGlobalRaceControlMessage(message: RaceControlLike): boolean {
   const scope = normalize(message.scope ?? message.Scope);
   const sector = parsePositiveNumber(message.sector ?? message.Sector);
@@ -162,13 +189,7 @@ export function parseRaceControlMessageStatus(message: RaceControlLike): TrackSt
     return 'GREEN';
   }
 
-  if (
-    (flag === 'yellow'
-      || flag === 'double yellow'
-      || text.includes('yellow flag')
-      || text.includes('double yellow'))
-    && isGlobal
-  ) {
+  if (isExplicitGlobalYellow(message)) {
     return 'YELLOW';
   }
 

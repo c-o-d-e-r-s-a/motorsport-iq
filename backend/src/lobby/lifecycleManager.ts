@@ -433,6 +433,47 @@ async function resolveQuestionInstance(
 }
 
 /**
+ * Force-resolve (or cancel) any outstanding question when the race ends.
+ *
+ * Without this, a question that triggered too late to reach its target lap (e.g.
+ * a short sprint) stays ACTIVE forever — the client's winner screen waits on
+ * `!hasActiveQuestion`, so the race "never finishes". Called on replay completion
+ * and the live chequered flag so the final standings always appear, and so the
+ * Final Stretch question is always settled before the winner screen.
+ */
+export async function forceResolveActiveQuestion(
+  lobbyId: string,
+  currentSnapshot: RaceSnapshot,
+  onResolution: (result: { instance: QuestionInstanceState; outcome: boolean; correctAnswer: 'YES' | 'NO'; explanation: string }) => void,
+  onStateChange: (instance: QuestionInstanceState) => void
+): Promise<void> {
+  const instance = activeQuestions.get(lobbyId) ?? pausedQuestions.get(lobbyId);
+  if (!instance) {
+    return;
+  }
+
+  // Pre-lock questions cannot be fairly scored once the race is over — cancel them.
+  if (instance.state === 'TRIGGERED' || instance.state === 'LIVE') {
+    await cancelQuestion(instance, 'Race ended', onStateChange);
+    return;
+  }
+
+  if (instance.state === 'LOCKED' || instance.state === 'ACTIVE') {
+    // Ensure any pending live/lock timer is cleared, then resolve against the
+    // final snapshot regardless of whether the target lap was reached.
+    const timer = questionTimers.get(instance.id);
+    if (timer) {
+      clearTrackedTimer(instance.lobbyId, timer);
+      questionTimers.delete(instance.id);
+    }
+    pausedQuestions.delete(lobbyId);
+    activeQuestions.set(lobbyId, instance);
+    instance.state = 'ACTIVE';
+    await resolveQuestionInstance(instance, currentSnapshot, onResolution, onStateChange);
+  }
+}
+
+/**
  * Process answers for a resolved question
  */
 async function processAnswers(

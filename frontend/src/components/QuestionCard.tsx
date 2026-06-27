@@ -1,15 +1,17 @@
 'use client';
 
 import { Chip } from '@/components/ui';
+import QuestionContextPanel from '@/components/QuestionContext';
 import { CATEGORY_LABELS } from '@/lib/categoryLabels';
 import { cn } from '@/lib/cn';
-import { type Difficulty, type QuestionCategory } from '@/lib/types';
+import { type Difficulty, type QuestionCategory, type QuestionContext } from '@/lib/types';
 
 interface QuestionCardProps {
   questionText: string;
   category: QuestionCategory;
   difficulty: Difficulty;
   instanceId: string;
+  questionContext?: QuestionContext;
   onSubmit: (answer: 'YES' | 'NO') => void;
   disabled?: boolean;
   answered?: 'YES' | 'NO' | null;
@@ -32,6 +34,7 @@ export default function QuestionCard({
   questionText,
   category,
   difficulty,
+  questionContext,
   onSubmit,
   disabled = false,
   answered = null,
@@ -50,6 +53,10 @@ export default function QuestionCard({
       <h2 className="font-display text-[1.9rem] font-semibold leading-[1.08] tracking-tight text-[var(--color-fg)] sm:text-4xl">
         {questionText}
       </h2>
+
+      {questionContext && (
+        <QuestionContextPanel context={questionContext} category={category} />
+      )}
 
       <div className="mt-7 grid grid-cols-2 gap-3">
         <button

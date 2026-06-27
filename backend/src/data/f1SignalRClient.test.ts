@@ -68,4 +68,16 @@ describe('F1SignalRClient track status parsing', () => {
 
     expect(statuses).toEqual(['YELLOW', 'GREEN']);
   });
+
+  it('ignores live timing status code 2 (yellow) from the TrackStatus topic', () => {
+    const statuses: TrackStatus[] = [];
+    const client = new F1SignalRClient({
+      onTrackStatusChange: (status) => statuses.push(status),
+    });
+    const testClient = client as unknown as { handleTrackStatus(data: unknown): void };
+
+    testClient.handleTrackStatus({ Status: '2', Message: 'Yellow flag' });
+
+    expect(statuses).toEqual([]);
+  });
 });

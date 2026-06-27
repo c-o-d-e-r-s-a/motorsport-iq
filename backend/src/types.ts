@@ -25,7 +25,10 @@ export interface LeaderStats {
   team: string;
   tyreCompound: string | null;
   tyreAge: number;
+  /** @deprecated UI now shows P2 gap — kept for question context / reconnect compat */
   stintNumber: number | null;
+  /** P2 gap to the leader in seconds (interval-style), when available. */
+  p2Gap: number | null;
 }
 
 // Track status types
@@ -66,6 +69,11 @@ export interface RaceSnapshot {
    * do not neutralize the race (which would otherwise show as plain green).
    */
   localYellowSectors: number[];
+  /**
+   * Track-wide yellow caution — display-only. Does not affect question
+   * triggering or resolution (only SC/VSC/RED neutralize gameplay).
+   */
+  globalYellowActive: boolean;
 }
 
 // OpenF1 API response types
@@ -256,6 +264,26 @@ export interface QuestionInstanceState {
   questionText?: string;
   driver1?: DriverState;
   driver2?: DriverState;
+  /** Frozen driver stats at question trigger — sent to clients for strategic context. */
+  questionContext?: QuestionContext;
+}
+
+/** Driver snapshot included with a question (values frozen at trigger time). */
+export interface QuestionContextDriver {
+  name: string;
+  team: string;
+  position: number;
+  interval: number | null;
+  tyreCompound: string | null;
+  tyreAge: number;
+  stintNumber: number | null;
+  overtakeModeArmed: boolean;
+}
+
+export interface QuestionContext {
+  triggerLap: number;
+  driver1: QuestionContextDriver;
+  driver2?: QuestionContextDriver;
 }
 
 // Lobby state
@@ -337,6 +365,7 @@ export interface QuestionEvent {
   triggeredAt: string;
   answerDeadline?: string;
   suggestedStatKeys?: StatHintKey[];
+  questionContext?: QuestionContext;
 }
 
 export interface QuestionStateEvent {
@@ -418,4 +447,6 @@ export interface RaceSnapshotEvent {
   dataFeedStalled: boolean;
   /** Display-only localized sector yellows (does not affect gameplay). */
   localYellowSectors: number[];
+  /** Display-only track-wide yellow (does not affect gameplay). */
+  globalYellowActive: boolean;
 }

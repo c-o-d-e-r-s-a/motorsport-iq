@@ -60,6 +60,25 @@ export interface QuestionInstanceState {
   questionText?: string;
   cancelledReason?: string;
   suggestedStatKeys?: StatHintKey[];
+  questionContext?: QuestionContext;
+}
+
+/** Driver snapshot frozen at question trigger time. */
+export interface QuestionContextDriver {
+  name: string;
+  team: string;
+  position: number;
+  interval: number | null;
+  tyreCompound: string | null;
+  tyreAge: number;
+  stintNumber: number | null;
+  overtakeModeArmed: boolean;
+}
+
+export interface QuestionContext {
+  triggerLap: number;
+  driver1: QuestionContextDriver;
+  driver2?: QuestionContextDriver;
 }
 
 export interface RaceSnapshot {
@@ -96,7 +115,10 @@ export interface LeaderStats {
   team: string;
   tyreCompound: string | null;
   tyreAge: number;
+  /** @deprecated UI now shows P2 gap — kept for reconnect compat */
   stintNumber: number | null;
+  /** P2 gap to the leader in seconds, when available. */
+  p2Gap: number | null;
 }
 
 export interface LobbyLookupResult {
@@ -138,6 +160,7 @@ export interface QuestionEvent {
   triggeredAt: string;
   answerDeadline?: string;
   suggestedStatKeys?: StatHintKey[];
+  questionContext?: QuestionContext;
 }
 
 export interface QuestionStateEvent {
@@ -156,6 +179,10 @@ export interface QuestionTextUpdateEvent {
 export interface ServerErrorEvent {
   message: string;
   code?: 'SESSION_EXPIRED' | 'TRANSIENT_CONNECTION' | 'VALIDATION_ERROR' | 'FORBIDDEN' | 'UNKNOWN';
+}
+
+export interface AnswersRestoredEvent {
+  answers: Record<string, 'YES' | 'NO'>;
 }
 
 export interface ResolutionEvent {
@@ -225,6 +252,8 @@ export interface RaceSnapshotEvent {
   dataFeedStalled: boolean;
   /** Display-only localized sector yellows (does not affect gameplay). */
   localYellowSectors?: number[];
+  /** Display-only track-wide yellow (does not affect gameplay). */
+  globalYellowActive?: boolean;
 }
 
 export interface SessionInfo {
@@ -263,6 +292,7 @@ export const SERVER_EVENTS = {
   PLAYER_DISCONNECTED: 'player_disconnected',
   PLAYER_RECONNECTED: 'player_reconnected',
   ANSWER_RECEIVED: 'answer_received',
+  ANSWERS_RESTORED: 'answers_restored',
   SESSIONS_LIST: 'sessions_list',
   FEED_STATUS: 'feed_status',
   PRESENCE_EXPIRED: 'presence_expired',

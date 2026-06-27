@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import QuestionCard from '@/components/QuestionCard';
+import QuestionContextPanel from '@/components/QuestionContext';
 import CountdownTimer from '@/components/CountdownTimer';
 import Leaderboard from '@/components/Leaderboard';
 import RaceHud from '@/components/RaceHud';
@@ -36,6 +37,7 @@ import {
   type QuestionState,
   type RaceSnapshotEvent,
   type ResolutionEvent,
+  type AnswersRestoredEvent,
   type ServerErrorEvent,
   type StatHintKey,
 } from '@/lib/types';
@@ -44,9 +46,14 @@ import { hasQuestionAlertHandled, markQuestionAlertHandled } from '@/lib/questio
 import {
   clearInactiveKickRestore,
   clearLobbySession,
+  clearSubmittedAnswers,
   getInactiveKickRestore,
   getStoredLobbySession,
+  getSubmittedAnswers,
+  mergeSubmittedAnswers,
+  removeSubmittedAnswer,
   saveLobbySession,
+  setSubmittedAnswer,
   stashInactiveKickRestore,
 } from '@/lib/sessionPersistence';
 import { shareLobbyLink } from '@/lib/shareLobbyLink';
@@ -71,7 +78,9 @@ export default function GamePage() {
   const [lobbyState, setLobbyState] = useState<LobbyState | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<QuestionEvent | null>(null);
   const [questionState, setQuestionState] = useState<QuestionState | null>(null);
-  const [submittedAnswers, setSubmittedAnswers] = useState<Record<string, 'YES' | 'NO'>>({});
+  const [submittedAnswers, setSubmittedAnswers] = useState<Record<string, 'YES' | 'NO'>>(
+    () => (typeof window === 'undefined' ? {} : getSubmittedAnswers())
+  );
   const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
   const [resolution, setResolution] = useState<ResolutionEvent | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
@@ -122,10 +131,22 @@ export default function GamePage() {
   const currentQuestionRef = useRef<QuestionEvent | null>(null);
   const questionStateRef = useRef<QuestionState | null>(null);
   const resolutionRef = useRef<ResolutionEvent | null>(null);
-  const submittedAnswersRef = useRef<Record<string, 'YES' | 'NO'>>({});
+  const submittedAnswersRef = useRef<Record<string, 'YES' | 'NO'>>(
+    typeof window === 'undefined' ? {} : getSubmittedAnswers()
+  );
   const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
+
+  const applySubmittedAnswers = useCallback((answers: Record<string, 'YES' | 'NO'>) => {
+    if (Object.keys(answers).length === 0) {
+      return;
+    }
+
+    mergeSubmittedAnswers(answers);
+    submittedAnswersRef.current = { ...submittedAnswersRef.current, ...answers };
+    setSubmittedAnswers((current) => ({ ...current, ...answers }));
+  }, []);
 
   const beginLobbyEntry = useCallback((socket: ReturnType<typeof getSocketClient>) => {
     const storedSession = getStoredLobbySession();
@@ -202,6 +223,7 @@ export default function GamePage() {
         answerDeadline,
         state: question.state,
         suggestedStatKeys: question.suggestedStatKeys ?? previous?.suggestedStatKeys ?? [],
+        questionContext: question.questionContext ?? previous?.questionContext,
       };
     });
 
@@ -257,9 +279,11 @@ export default function GamePage() {
 
     if (isStaleSubmissionError) {
       if (currentInstanceId && !acknowledgedAnswerIds.current.has(currentInstanceId)) {
+        removeSubmittedAnswer(currentInstanceId);
         setSubmittedAnswers((current) => {
           const next = { ...current };
           delete next[currentInstanceId];
+          submittedAnswersRef.current = next;
           return next;
         });
       }
@@ -268,9 +292,11 @@ export default function GamePage() {
     }
 
     if (isProcessingAnswer && currentQuestion) {
+      removeSubmittedAnswer(currentQuestion.instanceId);
       setSubmittedAnswers((current) => {
         const next = { ...current };
         delete next[currentQuestion.instanceId];
+        submittedAnswersRef.current = next;
         return next;
       });
       setIsProcessingAnswer(false);
@@ -603,6 +629,9 @@ export default function GamePage() {
         acknowledgedAnswerIds.current.add(data.instanceId);
         setIsProcessingAnswer(false);
       }),
+      socket.on(SERVER_EVENTS.ANSWERS_RESTORED, (data: AnswersRestoredEvent) => {
+        applySubmittedAnswers(data.answers);
+      }),
       socket.on(SERVER_EVENTS.RACE_SNAPSHOT_UPDATE, (snapshot: RaceSnapshotEvent) => {
         setRaceSnapshot(snapshot);
       }),
@@ -648,7 +677,7 @@ export default function GamePage() {
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [beginLobbyEntry, lobbyCode, playCorrectSound, playSound, playWrongSound, router]);
+  }, [applySubmittedAnswers, beginLobbyEntry, lobbyCode, playCorrectSound, playSound, playWrongSound, router]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -685,6 +714,11 @@ export default function GamePage() {
       if (!currentQuestion || questionState !== 'LIVE' || submittedAnswers[currentQuestion.instanceId] || isProcessingAnswer) return;
 
       getSocketClient().submitAnswer(currentQuestion.instanceId, selectedAnswer);
+      setSubmittedAnswer(currentQuestion.instanceId, selectedAnswer);
+      submittedAnswersRef.current = {
+        ...submittedAnswersRef.current,
+        [currentQuestion.instanceId]: selectedAnswer,
+      };
       setSubmittedAnswers((current) => ({
         ...current,
         [currentQuestion.instanceId]: selectedAnswer,
@@ -756,6 +790,7 @@ export default function GamePage() {
       });
     } finally {
       clearLobbySession();
+      clearSubmittedAnswers();
       getSocketClient().disconnect();
       router.push('/');
     }
@@ -785,6 +820,13 @@ export default function GamePage() {
   const showQuestionWaitingState = Boolean(
     currentQuestion && ['TRIGGERED', 'LOCKED', 'ACTIVE'].includes(questionState ?? '')
   );
+  const arcadeQuestionSuspended = Boolean(
+    currentQuestion
+    && (questionState === 'TRIGGERED' || (questionState === 'LIVE' && !currentSubmittedAnswer))
+  );
+  const arcadeQuestionSuspendMessage = questionState === 'TRIGGERED'
+    ? 'Question incoming above — get ready, then jump back in when you are ready.'
+    : 'Live question above — lock in your answer, or keep playing the arcade.';
 
   const notificationsEnabled = Boolean(
     lobbyState
@@ -995,7 +1037,7 @@ export default function GamePage() {
 
       <div className="mx-auto grid w-full max-w-5xl gap-5 px-4 py-5 lg:grid-cols-[1fr_minmax(300px,360px)]">
         {/* Main stage */}
-        <div className="min-w-0">
+        <div id="game-question-stage" className="min-w-0 scroll-mt-28">
           {(() => {
             // 1. Winner screen
             if (showWinnerScreen) {
@@ -1064,10 +1106,14 @@ export default function GamePage() {
                         <div className="relative">
                           <video
                             key={activeMeme.file}
-                            ref={(el) => { if (el) el.muted = isMemesMuted; }}
+                            muted={isMemesMuted}
                             src={`/${activeMeme.folder}/${encodeURIComponent(activeMeme.file)}`}
                             autoPlay
                             playsInline
+                            preload="auto"
+                            onLoadedData={(event) => {
+                              void event.currentTarget.play().catch(() => {});
+                            }}
                             className="w-full rounded-[var(--radius-sm)]"
                           />
                           <button
@@ -1198,6 +1244,7 @@ export default function GamePage() {
                     category={currentQuestion.category}
                     difficulty={currentQuestion.difficulty}
                     instanceId={currentQuestion.instanceId}
+                    questionContext={currentQuestion.questionContext}
                     onSubmit={handleSubmitAnswer}
                     disabled={questionState !== 'LIVE'}
                     answered={currentSubmittedAnswer}
@@ -1229,6 +1276,13 @@ export default function GamePage() {
                   <p className="mt-5 font-display text-2xl font-semibold leading-tight md:text-3xl">
                     {currentQuestion.questionText}
                   </p>
+                  {currentQuestion.questionContext && (
+                    <QuestionContextPanel
+                      context={currentQuestion.questionContext}
+                      category={currentQuestion.category}
+                      className="mt-5 text-left"
+                    />
+                  )}
                   <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
                     {questionState === 'TRIGGERED'
                       ? 'Get ready — answers open in a moment.'
@@ -1264,7 +1318,11 @@ export default function GamePage() {
               Hidden only once the race is over and the winner screen takes over. */}
           {!showWinnerScreen && !lobbyState.isReplayComplete && (
             <div className="mt-5">
-              <PitWallArcade contextLabel={arcadeContextLabel} />
+              <PitWallArcade
+                contextLabel={arcadeContextLabel}
+                questionSuspended={arcadeQuestionSuspended}
+                questionSuspendMessage={arcadeQuestionSuspendMessage}
+              />
             </div>
           )}
 
