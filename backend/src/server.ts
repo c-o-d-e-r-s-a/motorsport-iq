@@ -60,6 +60,7 @@ import {
   startQuestionLifecycle,
   submitAnswer,
   getActiveQuestion,
+  hasBlockingActiveQuestion,
   getAnswerDeadline,
   checkForResolution,
   resumeQuestion,
@@ -877,8 +878,7 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
   if (!lobbyState || lobbyState.status !== 'active') return;
   if (lobbyState.players.length === 0 || !hasPlayersInLobby(lobbyId)) return;
 
-  const existingQuestion = getActiveQuestion(lobbyId);
-  if (existingQuestion) {
+  if (hasBlockingActiveQuestion(lobbyId)) {
     return;
   }
 
@@ -892,7 +892,7 @@ async function checkAndTriggerQuestion(lobbyId: string, snapshot: RaceSnapshot):
     );
   }
 
-  if (getActiveQuestion(lobbyId)) {
+  if (hasBlockingActiveQuestion(lobbyId)) {
     return;
   }
 
