@@ -315,6 +315,10 @@ export async function resumeQuestion(
   // Remove from paused
   pausedQuestions.delete(lobbyId);
 
+  if (!UNRESOLVED_STATES.has(instance.state)) {
+    return;
+  }
+
   // Check if should resume
   if (shouldResume(instance, currentSnapshot)) {
     // Put back in active
@@ -425,8 +429,9 @@ async function resolveQuestionInstance(
       await updateQuestionState(instance.id, 'CLOSED');
       onStateChange({ ...instance });
 
-      // Remove from active
+      // Remove from active and drop any SC/VSC pause entry so resume cannot resurrect this instance.
       activeQuestions.delete(instance.lobbyId);
+      pausedQuestions.delete(instance.lobbyId);
       setCurrentQuestion(instance.lobbyId, null);
     }, EXPLANATION_DURATION_MS);
   }, 1000);
@@ -689,6 +694,22 @@ export async function submitAnswer(
  */
 export function getActiveQuestion(lobbyId: string): QuestionInstanceState | null {
   return activeQuestions.get(lobbyId) ?? null;
+}
+
+/** True when an unresolved question should block new triggers; prunes terminal ghosts from SC/VSC pause cycles. */
+export function hasBlockingActiveQuestion(lobbyId: string): boolean {
+  const instance = activeQuestions.get(lobbyId);
+  if (!instance) {
+    return false;
+  }
+
+  if (!UNRESOLVED_STATES.has(instance.state)) {
+    activeQuestions.delete(lobbyId);
+    pausedQuestions.delete(lobbyId);
+    return false;
+  }
+
+  return true;
 }
 
 export function clearLobbyLifecycle(lobbyId: string): void {
