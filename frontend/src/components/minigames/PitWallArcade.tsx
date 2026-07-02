@@ -8,6 +8,7 @@ import ReactionLights from './ReactionLights';
 import PitStop from './PitStop';
 import GridDash from './GridDash';
 import TyreMemory from './TyreMemory';
+import { scrollQuestionStageIntoView } from '@/lib/scrollQuestionStage';
 import { ARCADE_ROOT_ATTR } from './keys';
 
 type Metric = 'ms' | 's' | 'count';
@@ -184,13 +185,16 @@ function PitWallArcadeBody({ contextLabel, className }: Pick<PitWallArcadeProps,
                     >
                       Keep playing
                     </button>
-                    <a
-                      href="#game-question-stage"
-                      onClick={dismissQuestionSuspend}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        dismissQuestionSuspend();
+                        scrollQuestionStageIntoView();
+                      }}
                       className="inline-flex h-11 items-center justify-center rounded-[var(--radius-pill)] bg-[var(--color-accent)] px-5 font-display text-sm font-bold uppercase tracking-wide text-white shadow-[var(--shadow-accent)] transition-[filter] hover:bg-[var(--color-accent-hot)] active:translate-y-px"
                     >
                       Answer above
-                    </a>
+                    </button>
                   </div>
                 </div>
               </div>

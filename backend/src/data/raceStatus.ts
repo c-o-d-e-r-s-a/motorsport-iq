@@ -30,11 +30,116 @@ function parsePositiveNumber(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function messageTime(message: RaceControlLike): number {
+export function messageTime(message: RaceControlLike): number {
   const raw = message.date ?? message.Utc;
   if (!raw) return 0;
   const parsed = new Date(raw).getTime();
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+const SC_VSC_FALSE_POSITIVE_PATTERNS = [
+  /safety\s+car\s+line/i,
+  /\binfringement\b/i,
+  /\bstewards?\b/i,
+  /\binvestigation\b/i,
+  /\bnoted\b/i,
+  /\bformation\b/i,
+  /\bwill\s+lead\b/i,
+  /\breviewed\b/i,
+  /\bno\s+further\s+action\b/i,
+];
+
+function isScVscFalsePositive(text: string): boolean {
+  return SC_VSC_FALSE_POSITIVE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function isVscDeployment(text: string, category: string, flag: string): boolean {
+  if (isScVscFalsePositive(text)) {
+    return false;
+  }
+
+  if (flag === 'vsc') {
+    return true;
+  }
+
+  if (/\bvsc\s+deployed\b/i.test(text) || /virtual\s+safety\s+car\s+deployed/i.test(text)) {
+    return true;
+  }
+
+  return category === 'safetycar' && /\bvsc\s+deployed\b/i.test(text);
+}
+
+function isScDeployment(text: string, category: string, flag: string): boolean {
+  if (isScVscFalsePositive(text)) {
+    return false;
+  }
+
+  if (flag === 'sc') {
+    return true;
+  }
+
+  if (/safety\s+car\s+deployed/i.test(text) || /safety\s+car\s+will\s+be\s+deployed/i.test(text)) {
+    return true;
+  }
+
+  return category === 'safetycar' && /safety\s+car\s+deployed/i.test(text);
+}
+
+function isNeutralizationEnding(text: string, flag: string): boolean {
+  return /\bvsc\s+ending\b/i.test(text)
+    || /safety\s+car\s+in\s+this\s+lap/i.test(text)
+    || /\btrack\s+(is\s+)?clear\b/i.test(text)
+    || /\ball\s+clear\b/i.test(text)
+    || (flag === 'green' && /\bgreen\s+flag\b/i.test(text));
+}
+
+function isGlobalTrackClearMessage(message: RaceControlLike): boolean {
+  if (!isGlobalRaceControlMessage(message)) {
+    return false;
+  }
+
+  const flag = normalize(message.flag ?? message.Flag);
+  const text = normalize(message.message ?? message.Message);
+  return isNeutralizationEnding(text, flag)
+    || flag === 'green'
+    || text.includes('track clear')
+    || text.includes('track is clear')
+    || text.includes('all clear')
+    || text.includes('green flag');
+}
+
+function isGlobalNeutralizationForSectorClear(message: RaceControlLike): boolean {
+  if (!isGlobalRaceControlMessage(message)) {
+    return false;
+  }
+
+  const category = normalize(message.category ?? message.Category);
+  const flag = normalize(message.flag ?? message.Flag);
+  const text = normalize(message.message ?? message.Message);
+
+  if (isVscDeployment(text, category, flag) || isScDeployment(text, category, flag)) {
+    return true;
+  }
+
+  if ((flag === 'red' || text.includes('red flag'))) {
+    return true;
+  }
+
+  return flag === 'chequered' || flag === 'checkered'
+    || text.includes('chequered') || text.includes('checkered');
+}
+
+function isSectorScopedClear(message: RaceControlLike): boolean {
+  const flag = normalize(message.flag ?? message.Flag);
+  const text = normalize(message.message ?? message.Message);
+  const sector = parsePositiveNumber(message.sector ?? message.Sector);
+  if (sector === null) {
+    return false;
+  }
+
+  return flag === 'clear' || flag === 'green'
+    || /\bclear in track sector\b/.test(text)
+    || /\bgreen in track sector\b/.test(text);
 }
 
 function isPitExitMessage(message: string): boolean {
@@ -106,20 +211,15 @@ function explicitStatusFromText(text: string): TrackStatus | null {
     return 'RED';
   }
 
-  if (text.includes('virtual safety car') || /\bvsc\b/.test(text)) {
+  if (isVscDeployment(text, '', '')) {
     return 'VSC';
   }
 
-  if (text.includes('safety car')) {
+  if (isScDeployment(text, '', '')) {
     return 'SC';
   }
 
-  if (
-    text.includes('track clear')
-    || text.includes('track is clear')
-    || text.includes('all clear')
-    || text.includes('green flag')
-  ) {
+  if (isNeutralizationEnding(text, '')) {
     return 'GREEN';
   }
 
@@ -164,18 +264,16 @@ export function parseRaceControlMessageStatus(message: RaceControlLike): TrackSt
     return 'RED';
   }
 
-  if (
-    category === 'safetycar'
-    || flag === 'sc'
-    || flag === 'vsc'
-    || text.includes('safety car')
-    || text.includes('virtual safety car')
-    || /\bvsc\b/.test(text)
-  ) {
-    if (text.includes('virtual') || flag === 'vsc' || /\bvsc\b/.test(text)) {
-      return 'VSC';
-    }
+  if (isVscDeployment(text, category, flag)) {
+    return 'VSC';
+  }
+
+  if (isScDeployment(text, category, flag)) {
     return 'SC';
+  }
+
+  if (isNeutralizationEnding(text, flag) && isGlobal) {
+    return 'GREEN';
   }
 
   if (
@@ -217,15 +315,8 @@ export function classifySectorFlag(message: RaceControlLike): SectorFlagAction {
   const flag = normalize(message.flag ?? message.Flag);
   const text = normalize(message.message ?? message.Message);
   const sector = parsePositiveNumber(message.sector ?? message.Sector);
-  const isGlobal = isGlobalRaceControlMessage(message);
 
-  // Global states that supersede localized sector cautions on the display.
-  const globalStatus = parseRaceControlMessageStatus(message);
-  if (
-    isGlobal
-    && globalStatus
-    && globalStatus !== 'YELLOW'
-  ) {
+  if (isGlobalTrackClearMessage(message) || isGlobalNeutralizationForSectorClear(message)) {
     return { kind: 'clearAll' };
   }
 
@@ -234,14 +325,13 @@ export function classifySectorFlag(message: RaceControlLike): SectorFlagAction {
   }
 
   const isYellow = flag === 'yellow' || flag === 'double yellow'
-    || text.includes('yellow');
+    || /\byellow in track sector\b/.test(text)
+    || /\bdouble yellow in track sector\b/.test(text);
   if (isYellow) {
     return { kind: 'set', sector };
   }
 
-  const isClear = flag === 'clear' || flag === 'green'
-    || text.includes('clear') || text.includes('green');
-  if (isClear) {
+  if (isSectorScopedClear(message)) {
     return { kind: 'clear', sector };
   }
 
@@ -271,4 +361,33 @@ export function parseLatestRaceControlStatusWithTime(
   }
 
   return null;
+}
+
+/**
+ * Replay state machine: apply a single race-control message to the current
+ * track status. Returns the next status when this message is a valid transition,
+ * otherwise null (no change). Yellow is display-only and never returned.
+ */
+export function applyReplayTrackStatusTransition(
+  current: TrackStatus,
+  message: RaceControlLike
+): TrackStatus | null {
+  const next = parseRaceControlMessageStatus(message);
+  if (!next || next === 'YELLOW') {
+    return null;
+  }
+
+  if (next === 'GREEN') {
+    return 'GREEN';
+  }
+
+  if (next === 'SC' || next === 'VSC') {
+    return next;
+  }
+
+  if (next === 'RED' || next === 'CHEQUERED') {
+    return next;
+  }
+
+  return current === next ? null : next;
 }

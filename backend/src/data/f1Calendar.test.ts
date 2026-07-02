@@ -103,21 +103,21 @@ describe('F1 Calendar', () => {
   });
 
   describe('getPreRaceCalendarSession', () => {
-    it('returns null when the next session is more than 30 minutes away', () => {
+    it('returns null when the next session is more than 45 minutes away', () => {
       const raceSession = getCalendarSession(11291);
       expect(raceSession).not.toBeNull();
 
-      const tooEarly = new Date(raceSession!.date_start).getTime() - (31 * 60 * 1000);
+      const tooEarly = new Date(raceSession!.date_start).getTime() - (46 * 60 * 1000);
       const session = getPreRaceCalendarSession(tooEarly);
       expect(session).toBeNull();
     });
 
-    it('returns the upcoming Race within the 30-minute lobby window', () => {
+    it('returns the upcoming Race within the 45-minute lobby window', () => {
       const raceSession = getCalendarSession(11291);
       expect(raceSession).not.toBeNull();
 
-      const thirtyMinutesBefore = new Date(raceSession!.date_start).getTime() - (30 * 60 * 1000);
-      const session = getPreRaceCalendarSession(thirtyMinutesBefore);
+      const fortyFiveMinutesBefore = new Date(raceSession!.date_start).getTime() - (45 * 60 * 1000);
+      const session = getPreRaceCalendarSession(fortyFiveMinutesBefore);
       expect(session).not.toBeNull();
       expect(session?.session_name).toBe('Race');
       expect(session?.session_key).toBe(11291);
@@ -429,7 +429,7 @@ describe('F1 Calendar', () => {
       expect(toSessionInfo(raceSession!, beforeStart).isPreRace).toBe(false);
     });
 
-    it('marks sessions within the 30-minute pre-race lobby window', () => {
+    it('marks sessions within the 45-minute pre-race lobby window', () => {
       const raceSession = getCalendarSession(11291);
       expect(raceSession).not.toBeNull();
 

@@ -51,7 +51,7 @@ export default function Dialog({ open, onClose, title, children, className }: Di
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn(
-          'relative z-10 w-full animate-slide-up rounded-t-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-panel)] p-6 pb-[max(1.5rem,var(--safe-bottom))] shadow-[var(--shadow-lg)]',
+          'relative z-10 w-full animate-slide-up-spring rounded-t-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-panel)] p-6 pb-[max(1.5rem,var(--safe-bottom))] shadow-[var(--shadow-lg)]',
           'sm:max-w-md sm:rounded-[var(--radius-lg)] sm:pb-6',
           className
         )}

@@ -8,6 +8,8 @@ type ButtonSize = 'sm' | 'md' | 'lg';
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
+  /** Shows an inline spinner and disables the button. */
+  loading?: boolean;
 }
 
 const variantClasses: Record<ButtonVariant, string> = {
@@ -34,21 +36,34 @@ export default function Button({
   variant = 'primary',
   size = 'md',
   type = 'button',
+  loading = false,
+  disabled,
+  children,
   ...props
 }: ButtonProps) {
   return (
     <button
       type={type}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
       className={cn(
         'inline-flex min-w-[44px] select-none items-center justify-center rounded-[var(--radius-pill)] font-display font-semibold uppercase tracking-wide',
         'transition-[transform,background-color,border-color,filter,box-shadow,opacity] duration-[var(--dur-fast)] ease-[var(--ease-out)]',
-        'disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none',
+        'active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none disabled:active:scale-100',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]',
         sizeClasses[size],
         variantClasses[variant],
         className
       )}
       {...props}
-    />
+    >
+      {loading && (
+        <span
+          aria-hidden
+          className="h-4 w-4 shrink-0 animate-spin-slow rounded-full border-2 border-current/30 border-t-current"
+        />
+      )}
+      {children}
+    </button>
   );
 }

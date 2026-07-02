@@ -6,7 +6,7 @@ import supabase from '../db/supabaseClient';
 const ADMIN_CREDENTIAL_ID = 'primary';
 const ADMIN_SESSION_COOKIE = 'msp_admin_session';
 const ADMIN_SESSION_DURATION_MS = 1000 * 60 * 60 * 12;
-const FALLBACK_ADMIN_PASSWORD_HASH = '$2b$10$1pCQ1UWhj.2xbuqumd/8ie53TXUE6Y/u4AA/ywV6huKDOA/UF9AAW';
+const MIN_ADMIN_SESSION_SECRET_LENGTH = 32;
 
 type AdminSessionPayload = {
   exp: number;
@@ -26,11 +26,25 @@ function base64UrlDecode(value: string): string {
 }
 
 function getSessionSecret(): string {
-  return process.env.ADMIN_SESSION_SECRET || process.env.SUPABASE_SERVICE_KEY || 'motorsport-iq-admin';
+  const secret = process.env.ADMIN_SESSION_SECRET?.trim();
+  if (!secret) {
+    throw new Error('ADMIN_SESSION_SECRET is required');
+  }
+
+  if (secret.length < MIN_ADMIN_SESSION_SECRET_LENGTH) {
+    throw new Error(`ADMIN_SESSION_SECRET must be at least ${MIN_ADMIN_SESSION_SECRET_LENGTH} characters`);
+  }
+
+  return secret;
 }
 
 function getInitialPasswordHash(): string {
-  return process.env.ADMIN_INITIAL_PASSWORD_HASH?.trim() || FALLBACK_ADMIN_PASSWORD_HASH;
+  const passwordHash = process.env.ADMIN_INITIAL_PASSWORD_HASH?.trim();
+  if (!passwordHash) {
+    throw new Error('ADMIN_INITIAL_PASSWORD_HASH is required before admin credentials exist in Supabase');
+  }
+
+  return passwordHash;
 }
 
 function isMissingAdminCredentialsTable(error: { message?: string } | null | undefined): boolean {

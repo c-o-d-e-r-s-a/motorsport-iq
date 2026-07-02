@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { AnimatePresence } from 'framer-motion';
 import QuestionCard from '@/components/QuestionCard';
 import QuestionContextPanel from '@/components/QuestionContext';
 import CountdownTimer from '@/components/CountdownTimer';
@@ -25,6 +26,13 @@ import { useMemeQueue } from '@/hooks/useMemeQueue';
 import NotificationPopUpHint from '@/components/NotificationPopUpHint';
 import EmojiReactions from '@/components/EmojiReactions';
 import { PitWallArcade } from '@/components/minigames';
+import OvertakeBroadcast from '@/components/broadcast/OvertakeBroadcast';
+import RivalBattleChip from '@/components/broadcast/RivalBattleChip';
+import TimingTower from '@/components/broadcast/TimingTower';
+import LightsOutSequence from '@/components/broadcast/LightsOutSequence';
+import ParcFermeDebrief from '@/components/broadcast/ParcFermeDebrief';
+import { useLeaderboardBattles } from '@/lib/useLeaderboardBattles';
+import { useRaceStoryline } from '@/lib/useRaceStoryline';
 import {
   SERVER_EVENTS,
   type CreateProblemReportInput,
@@ -58,6 +66,8 @@ import {
 } from '@/lib/sessionPersistence';
 import { shareLobbyLink } from '@/lib/shareLobbyLink';
 import { Button, Brand, Card, Chip, Input } from '@/components/ui';
+import { FadeIn, MotionCard, MotionProvider } from '@/components/motion';
+import { useReducedMotion } from '@/lib/motion/useReducedMotion';
 
 const REPORT_REASON_OPTIONS: Array<{ value: ProblemReportReason; label: string }> = [
   { value: 'WRONG_ANSWER', label: 'Wrong Answer' },
@@ -69,6 +79,14 @@ const REPORT_REASON_OPTIONS: Array<{ value: ProblemReportReason; label: string }
 
 const UNRESOLVED_QUESTION_STATES: QuestionState[] = ['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE'];
 const POST_RESOLUTION_QUESTION_STATES: QuestionState[] = ['RESOLVED', 'EXPLAINED', 'CLOSED'];
+
+function isFinalStretchQuestionId(questionId: string): boolean {
+  return questionId.startsWith('FIN_');
+}
+
+function isVideoMemeFile(file: string): boolean {
+  return /\.(mp4|webm|mov)$/i.test(file);
+}
 
 export default function GamePage() {
   const params = useParams();
@@ -86,6 +104,7 @@ export default function GamePage() {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [raceSnapshot, setRaceSnapshot] = useState<RaceSnapshotEvent | null>(null);
   const [raceCompletedLap, setRaceCompletedLap] = useState<number | null>(null);
+  const [finalStretchSeen, setFinalStretchSeen] = useState(false);
   const [suggestedStatKeys, setSuggestedStatKeys] = useState<StatHintKey[]>([]);
   const [feedStalled, setFeedStalled] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,17 +128,27 @@ export default function GamePage() {
   const [shareLinkStatus, setShareLinkStatus] = useState<'shared' | 'copied' | null>(null);
   // Set to true when a late joiner arrives and there is already an active LIVE question
   const [lateJoinMidQuestion, setLateJoinMidQuestion] = useState(false);
+  // Display-only: final 3s of the answer window — the live card edge glows red.
+  const [timerCritical, setTimerCritical] = useState(false);
+  // Display-only: cinematic lights-out start sequence overlay.
+  const [showLightsOut, setShowLightsOut] = useState(false);
+  const lightsOutDecidedRef = useRef(false);
+  const reducedMotion = useReducedMotion();
 
   const { playSound } = useQuestionSound('/sounds/question-alert.mp3');
   const { playCorrectSound, playWrongSound } = useAnswerOutcomeSounds();
   const { getNextMeme } = useMemeQueue();
 
   const [activeMeme, setActiveMeme] = useState<{ file: string; folder: string } | null>(null);
-  const memeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isMemesMuted, setIsMemesMuted] = useState(() => {
     if (typeof window === 'undefined') return false;
     return localStorage.getItem('msp_memes_muted') === 'true';
   });
+  const isMemesMutedRef = useRef(isMemesMuted);
+
+  useEffect(() => {
+    isMemesMutedRef.current = isMemesMuted;
+  }, [isMemesMuted]);
 
   // Receives the actual userId and sanitized username from the server after joining.
   // Needed because join_lobby/join_solo may sanitize profane names without telling the client.
@@ -137,6 +166,31 @@ export default function GamePage() {
   const joinUsernameRef = useRef(joinUsername);
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
+
+  // Box Box Broadcast — display-only leaderboard battle detection (overtake
+  // strips, rank arrows, rival chip). Reads scores; never writes them.
+  const {
+    events: battleEvents,
+    dismissEvent: dismissBattleEvent,
+    resetBattles,
+    rankDeltas,
+    rival,
+  } = useLeaderboardBattles(leaderboard, currentUserId);
+
+  // Parc Fermé Debrief — records each resolution locally so the post-race
+  // recap can replay the player's calls.
+  const { history: raceStory, recordResolution, clearStoryline } = useRaceStoryline(lobbyCode);
+
+  const recordStoryEntry = useCallback((event: ResolutionEvent) => {
+    const activeQuestion = currentQuestionRef.current;
+    const matchesQuestion = activeQuestion?.instanceId === event.instanceId;
+    recordResolution(event, {
+      category: matchesQuestion ? activeQuestion.category : null,
+      difficulty: matchesQuestion ? activeQuestion.difficulty : null,
+      myAnswer: submittedAnswersRef.current[event.instanceId] ?? null,
+      currentUserId: typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null,
+    });
+  }, [recordResolution]);
 
   const applySubmittedAnswers = useCallback((answers: Record<string, 'YES' | 'NO'>) => {
     if (Object.keys(answers).length === 0) {
@@ -157,6 +211,13 @@ export default function GamePage() {
       // (and any other legitimate remount) always re-sends reconnect_lobby.
       // SessionResume keeps its own 1.5 s + 2 s guards to prevent rapid-fire duplicates.
       socket.reconnectLobby(storedSession.userId, { dedupeWindowMs: 0 });
+      return;
+    }
+
+    // Partial session from flows that only saved userId (e.g. older simulation launcher).
+    const orphanUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
+    if (orphanUserId) {
+      socket.reconnectLobby(orphanUserId, { dedupeWindowMs: 0 });
       return;
     }
 
@@ -241,6 +302,7 @@ export default function GamePage() {
 
   const restoreResolutionFromLobby = useEffectEvent((latestResolution: ResolutionEvent) => {
     processedResolutionIds.current.add(latestResolution.instanceId);
+    recordStoryEntry(latestResolution);
     setCurrentQuestion(null);
     setSuggestedStatKeys([]);
     setIsProcessingAnswer(false);
@@ -265,6 +327,19 @@ export default function GamePage() {
       setShowJoinForm(true);
       setConnectionNotice('You were away for a while. Re-enter your driver name to restore your score.');
       return;
+    }
+
+    if (
+      normalizedMessage.includes('username already taken')
+      && typeof window !== 'undefined'
+    ) {
+      const existingUserId = localStorage.getItem('msp_user_id');
+      if (existingUserId) {
+        setError(null);
+        setIsJoining(true);
+        getSocketClient().reconnectLobby(existingUserId, { dedupeWindowMs: 0 });
+        return;
+      }
     }
 
     const currentInstanceId = currentQuestion?.instanceId ?? null;
@@ -429,6 +504,13 @@ export default function GamePage() {
         ) {
           setLateJoinMidQuestion(true);
         }
+        if (
+          (state.currentQuestion && isFinalStretchQuestionId(state.currentQuestion.questionId))
+          || (state.latestResolution && isFinalStretchQuestionId(state.latestResolution.questionId))
+        ) {
+          setFinalStretchSeen(true);
+        }
+
         if (state.currentQuestion) {
           const serverQuestion = state.currentQuestion;
 
@@ -493,7 +575,14 @@ export default function GamePage() {
           answerDeadline: event.answerDeadline,
         });
         setQuestionState(event.state);
-        setResolution(null);
+        if (event.category === 'FINISH_POSITION') {
+          setFinalStretchSeen(true);
+        }
+        // Only clear a prior resolution when a genuinely new question arrives.
+        if (resolutionRef.current?.instanceId !== event.instanceId) {
+          setResolution(null);
+          setActiveMeme(null);
+        }
         setIsProcessingAnswer(false);
         setSuggestedStatKeys(event.suggestedStatKeys ?? []);
         setIsReportFormOpen(false);
@@ -536,7 +625,10 @@ export default function GamePage() {
           if (data.state !== 'LIVE') {
             setIsProcessingAnswer(false);
           }
-          if (['RESOLVED', 'EXPLAINED', 'CLOSED'].includes(data.state)) {
+          // Keep the question card mounted through RESOLVED/EXPLAINED until resolution_event
+          // paints the result panel — clearing here caused an idle flash that AnimatePresence
+          // amplified into skipped resolutions when the next question arrived quickly.
+          if (data.state === 'CLOSED') {
             setCurrentQuestion((current) => (
               current?.instanceId === data.instanceId ? null : current
             ));
@@ -597,6 +689,10 @@ export default function GamePage() {
         }
         processedResolutionIds.current.add(event.instanceId);
 
+        if (isFinalStretchQuestionId(event.questionId)) {
+          setFinalStretchSeen(true);
+        }
+        recordStoryEntry(event);
         setResolution(event);
         setQuestionState('RESOLVED');
         setCurrentQuestion(null);
@@ -609,17 +705,30 @@ export default function GamePage() {
         setReportNote('');
         setReportReason('WRONG_ANSWER');
 
-        // Check if user submitted an answer and play appropriate sound (first delivery only)
-        if (!isDuplicateEvent) {
-          const userAnswer = submittedAnswersRef.current[event.instanceId];
-          if (userAnswer) {
-            if (userAnswer === event.correctAnswer) {
-              setLocalCorrectAnswers((prev) => prev + 1);
-              playCorrectSound();
-            } else {
-              playWrongSound();
-            }
+        const userAnswer = submittedAnswersRef.current[event.instanceId] ?? null;
+        const answeredCorrectly = userAnswer !== null && userAnswer === event.correctAnswer;
+        const memeFile = getNextMeme(answeredCorrectly);
+        if (memeFile) {
+          const folder = answeredCorrectly ? 'CorrectAnswerMemes' : 'WrongAnswerMemes';
+          setActiveMeme({ file: memeFile, folder });
+        } else {
+          setActiveMeme(null);
+        }
+
+        // Skip outcome SFX when an unmuted video meme will carry the audio.
+        const skipOutcomeSound = Boolean(
+          memeFile && isVideoMemeFile(memeFile) && !isMemesMutedRef.current
+        );
+
+        if (!isDuplicateEvent && userAnswer && !skipOutcomeSound) {
+          if (userAnswer === event.correctAnswer) {
+            setLocalCorrectAnswers((prev) => prev + 1);
+            playCorrectSound();
+          } else {
+            playWrongSound();
           }
+        } else if (!isDuplicateEvent && userAnswer && userAnswer === event.correctAnswer) {
+          setLocalCorrectAnswers((prev) => prev + 1);
         }
       }),
       socket.on(SERVER_EVENTS.LEADERBOARD_UPDATE, (entries: LeaderboardEntry[]) => {
@@ -677,7 +786,7 @@ export default function GamePage() {
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [applySubmittedAnswers, beginLobbyEntry, lobbyCode, playCorrectSound, playSound, playWrongSound, router]);
+  }, [applySubmittedAnswers, beginLobbyEntry, getNextMeme, lobbyCode, playCorrectSound, playSound, playWrongSound, recordStoryEntry, router]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -708,6 +817,50 @@ export default function GamePage() {
       setRaceCompletedLap(raceSnapshot.totalLaps ?? raceSnapshot.lapNumber);
     }
   }, [raceCompletedLap, raceSnapshot]);
+
+  const handleLightsOutComplete = useCallback(() => {
+    setShowLightsOut(false);
+  }, []);
+
+  // Lights Out — decide once, on the first active lobby state: only for a race
+  // that has genuinely just started (no questions asked, no late join), and
+  // only once per lobby per browser session.
+  useEffect(() => {
+    if (lightsOutDecidedRef.current || !lobbyState || lobbyState.status !== 'active') {
+      return;
+    }
+    lightsOutDecidedRef.current = true;
+
+    const storageGuardKey = `msp_lightsout_${lobbyCode.toUpperCase()}`;
+    let alreadyShown = false;
+    try {
+      alreadyShown = sessionStorage.getItem(storageGuardKey) === '1';
+    } catch {
+      alreadyShown = true;
+    }
+
+    const myId = localStorage.getItem('msp_user_id');
+    const me = lobbyState.players.find((player) => player.id === myId);
+    const joinedLate = Boolean(me?.joinedAtLap && me.joinedAtLap > 1);
+    const raceUnderway =
+      lobbyState.questionCount > 0
+      || Boolean(lobbyState.currentQuestion)
+      || Boolean(lobbyState.latestResolution)
+      || lobbyState.isReplayComplete;
+
+    if (!alreadyShown && !joinedLate && !raceUnderway) {
+      try {
+        sessionStorage.setItem(storageGuardKey, '1');
+      } catch {
+        /* ignore — worst case the sequence could repeat after a remount */
+      }
+      // Genuine fresh race start — wipe any residue from a prior race that
+      // happened to share this lobby code (same tab session).
+      resetBattles();
+      clearStoryline();
+      setShowLightsOut(true);
+    }
+  }, [lobbyState, lobbyCode, resetBattles, clearStoryline]);
 
   const handleSubmitAnswer = useCallback(
     (selectedAnswer: 'YES' | 'NO') => {
@@ -801,24 +954,28 @@ export default function GamePage() {
     : null;
   const resolvedAnswer = resolution ? submittedAnswers[resolution.instanceId] ?? null : null;
   const resolvedAnswerIsCorrect = resolvedAnswer !== null && resolvedAnswer === resolution?.correctAnswer;
-  const hasRaceCompleted = raceCompletedLap !== null;
-  const hasActiveQuestion = Boolean(
+  const hasUnresolvedGameplayQuestion = Boolean(
     currentQuestion
     && questionState
     && UNRESOLVED_QUESTION_STATES.includes(questionState)
   );
-  const raceHasEnded = Boolean(
-    hasRaceCompleted
-    || raceSnapshot?.trackStatus === 'CHEQUERED'
+  const raceSessionEnded = Boolean(
+    raceSnapshot?.trackStatus === 'CHEQUERED'
     || raceSnapshot?.isReplayComplete
     || lobbyState?.status === 'finished'
   );
-  const showWinnerScreen = raceHasEnded && !hasActiveQuestion;
+  const showWinnerScreen = raceSessionEnded && !hasUnresolvedGameplayQuestion;
+  const isFinalLapsIdle = Boolean(
+    finalStretchSeen
+    && !raceSessionEnded
+    && !hasUnresolvedGameplayQuestion
+    && !resolution
+  );
   const tireStatsHighlighted = suggestedStatKeys.some((key) => (
     key === 'TYRE_COMPOUND' || key === 'TYRE_AGE' || key === 'STINT_NUMBER'
   ));
   const showQuestionWaitingState = Boolean(
-    currentQuestion && ['TRIGGERED', 'LOCKED', 'ACTIVE'].includes(questionState ?? '')
+    currentQuestion && ['TRIGGERED', 'LOCKED', 'ACTIVE', 'RESOLVED', 'EXPLAINED'].includes(questionState ?? '')
   );
   const arcadeQuestionSuspended = Boolean(
     currentQuestion
@@ -861,26 +1018,11 @@ export default function GamePage() {
     });
   }, [joinUsername, lobbyCode]);
 
-  // Delayed meme: show 3s after resolution so users can read the answer first
   useEffect(() => {
-    if (memeTimerRef.current) clearTimeout(memeTimerRef.current);
     if (!resolution) {
       setActiveMeme(null);
-      return;
     }
-    const userAnswer = submittedAnswersRef.current[resolution.instanceId] ?? null;
-    const isCorrect = userAnswer !== null && userAnswer === resolution.correctAnswer;
-    memeTimerRef.current = setTimeout(() => {
-      const file = getNextMeme(isCorrect);
-      if (file) {
-        const folder = isCorrect ? 'CorrectAnswerMemes' : 'WrongAnswerMemes';
-        setActiveMeme({ file, folder });
-      }
-    }, 3000);
-    return () => {
-      if (memeTimerRef.current) clearTimeout(memeTimerRef.current);
-    };
-  }, [resolution, getNextMeme]);
+  }, [resolution]);
 
   if (showJoinForm) {
     return (
@@ -940,12 +1082,16 @@ export default function GamePage() {
         ? "Your answer is in — we'll reveal the result the moment the lap settles."
         : currentQuestion && questionState === 'TRIGGERED'
           ? 'Question incoming above — get ready, then jump back in.'
-          : `No question right now · ${lobbyState.questionCount} asked so far — we'll alert you the instant one drops.`;
+          : isFinalLapsIdle
+            ? 'Final laps — no more questions. Play on until the chequered flag.'
+            : `No question right now · ${lobbyState.questionCount} asked so far — we'll alert you the instant one drops.`;
 
   return (
+    <MotionProvider>
     <main className="app-bg relative min-h-dvh">
       {/* Sticky HUD */}
       <div
+        data-game-hud
         className="sticky top-0 z-30 border-b border-[var(--color-border)] bg-[var(--color-bg-2)]/85 backdrop-blur"
         style={{ paddingTop: 'var(--safe-top)' }}
       >
@@ -997,19 +1143,26 @@ export default function GamePage() {
               highlightTrackStatus={suggestedStatKeys.includes('TRACK_STATUS')}
             />
           </div>
+          {!raceSessionEnded && rival && (
+            <div className="pb-2.5">
+              <RivalBattleChip rival={rival} className="max-w-sm" />
+            </div>
+          )}
         </div>
       </div>
 
       {connectionNotice && (
-        <div className="mx-auto w-full max-w-5xl px-4 pt-3">
-          <p className="rounded-[var(--radius-sm)] bg-[var(--color-muted)] px-4 py-2.5 text-sm text-[var(--color-muted-fg)]">
-            {connectionNotice}
-          </p>
+        <div className="mx-auto w-full max-w-5xl px-4 pt-2">
+          <FadeIn variant="strip-in">
+            <p className="rounded-[var(--radius-sm)] bg-[var(--color-muted)] px-4 py-2.5 text-sm text-[var(--color-muted-fg)]">
+              {connectionNotice}
+            </p>
+          </FadeIn>
         </div>
       )}
 
       {showNotificationPrompt && (
-        <div className="mx-auto w-full max-w-5xl px-4 pt-3">
+        <div className="mx-auto w-full max-w-5xl px-4 pt-2">
           <div className="flex flex-col gap-3 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm text-[var(--color-fg)]">
               Get alerted when you switch apps — we&apos;ll notify you when a new question appears.
@@ -1027,7 +1180,7 @@ export default function GamePage() {
       )}
 
       {showNotificationPopUpHint && (
-        <div className="mx-auto w-full max-w-5xl px-4 pt-3">
+        <div className="mx-auto w-full max-w-5xl px-4 pt-2">
           <div className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
             <p className="text-sm font-semibold text-[var(--color-fg)]">Alerts enabled</p>
             <NotificationPopUpHint visible />
@@ -1035,34 +1188,46 @@ export default function GamePage() {
         </div>
       )}
 
-      <div className="mx-auto grid w-full max-w-5xl gap-5 px-4 py-5 lg:grid-cols-[1fr_minmax(300px,360px)]">
+      <div className="mx-auto grid w-full max-w-5xl items-start gap-5 px-4 pb-5 overflow-hidden lg:grid-cols-[1fr_minmax(300px,360px)]">
         {/* Main stage */}
-        <div id="game-question-stage" className="min-w-0 scroll-mt-28">
+        <div id="game-question-stage" className="relative min-w-0 overflow-x-clip">
+          <div className="grid">
+          <AnimatePresence initial={false} mode="popLayout">
           {(() => {
             // 1. Winner screen
             if (showWinnerScreen) {
               return (
-                <WinnerScreen
-                  key="winner-screen"
-                  entries={leaderboard}
-                  currentUserId={currentUserId ?? undefined}
-                  onLeaveLobby={handleLeaveSession}
-                  isLeaving={isLeaving}
-                />
+                <FadeIn key="winner-screen" variant="fade">
+                  <WinnerScreen
+                    entries={lobbyState.finalStandings ?? leaderboard}
+                    currentUserId={currentUserId ?? undefined}
+                    onLeaveLobby={handleLeaveSession}
+                    isLeaving={isLeaving}
+                    isPublic={lobbyState.isPublic}
+                  />
+                  <div className="mt-5">
+                    <ParcFermeDebrief
+                      history={raceStory}
+                      entries={lobbyState.finalStandings ?? leaderboard}
+                      currentUserId={currentUserId}
+                      lobbyCode={lobbyCode}
+                    />
+                  </div>
+                </FadeIn>
               );
             }
 
             // 2. Resolution
             if (resolution) {
               return (
-                <Card
+                <MotionCard
                   key={`resolution-${resolution.instanceId}`}
                   tone="elevated"
-                  className="animate-pop-in"
+                  enter="pop"
                 >
                   <div
                     className={cn(
-                      'flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-sm font-bold uppercase tracking-wide',
+                      'animate-stamp-in flex items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-sm font-bold uppercase tracking-wide',
                       resolvedAnswer === null
                         ? 'bg-[var(--color-muted)] text-[var(--color-muted-fg)]'
                         : resolvedAnswerIsCorrect
@@ -1070,28 +1235,35 @@ export default function GamePage() {
                           : 'bg-[rgba(255,59,59,0.14)] text-[var(--color-danger)]'
                     )}
                   >
-                    {resolvedAnswer === null
-                      ? '⏱ No answer locked in'
-                      : resolvedAnswerIsCorrect
-                        ? '✓ Nailed it'
-                        : '✕ Not this time'}
+                    <span
+                      className={cn(
+                        'inline-block',
+                        resolvedAnswer !== null && !resolvedAnswerIsCorrect && 'animate-shake [animation-delay:280ms]'
+                      )}
+                    >
+                      {resolvedAnswer === null
+                        ? '⏱ No answer locked in'
+                        : resolvedAnswerIsCorrect
+                          ? '✓ Nailed it'
+                          : '✕ Not this time'}
+                    </span>
                     {myScore && myScore.pointsChange > 0 && (
-                      <span className="ml-auto">+{myScore.pointsChange} pts</span>
+                      <span className="animate-pop-in ml-auto [animation-delay:320ms]">+{myScore.pointsChange} pts</span>
                     )}
                   </div>
 
-                  <h2 className="mt-4 font-display text-3xl font-semibold leading-tight tracking-tight md:text-4xl">
+                  <h2 className="animate-fade-up delay-1 mt-4 font-display text-3xl font-semibold leading-tight tracking-tight md:text-4xl">
                     {resolution.questionText}
                   </h2>
 
-                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <div className="animate-fade-up delay-2 mt-4 flex flex-wrap items-center gap-2">
                     <Chip tone="go">Correct: {resolution.correctAnswer}</Chip>
                     {resolvedAnswer && (
                       <Chip tone={resolvedAnswerIsCorrect ? 'go' : 'danger'}>You: {resolvedAnswer}</Chip>
                     )}
                   </div>
 
-                  <div className="mt-5 rounded-[var(--radius-sm)] bg-[var(--color-muted)] p-4">
+                  <div className="animate-fade-up delay-3 mt-5 rounded-[var(--radius-sm)] bg-[var(--color-muted)] p-4">
                     <p className="text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
                       Why
                     </p>
@@ -1102,7 +1274,7 @@ export default function GamePage() {
 
                   {activeMeme && (
                     <div className="mt-5 animate-fade-in overflow-hidden rounded-[var(--radius-sm)]">
-                      {/\.(mp4|webm|mov)$/i.test(activeMeme.file) ? (
+                      {isVideoMemeFile(activeMeme.file) ? (
                         <div className="relative">
                           <video
                             key={activeMeme.file}
@@ -1194,14 +1366,14 @@ export default function GamePage() {
                       </div>
                     )}
                   </div>
-                </Card>
+                </MotionCard>
               );
             }
 
             // 3a. Late joiner arrived while a LIVE question was already running
             if (lateJoinMidQuestion && currentQuestion && questionState === 'LIVE') {
               return (
-                <Card key="late-join-waiting" tone="elevated" className="py-14 text-center md:py-20 animate-pop-in">
+                <MotionCard key="late-join-waiting" tone="elevated" enter="pop" className="py-10 text-center md:py-14">
                   <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
                     <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
                   </span>
@@ -1212,7 +1384,7 @@ export default function GamePage() {
                     A question is already in progress. You&apos;ll be able to answer from the very
                     next one — hang tight.
                   </p>
-                </Card>
+                </MotionCard>
               );
             }
 
@@ -1225,10 +1397,11 @@ export default function GamePage() {
               );
 
               return (
-                <Card
-                  key={`question-live-${currentQuestion.instanceId}`}
+                <MotionCard
+                  key={`question-${currentQuestion.instanceId}`}
                   tone="elevated"
-                  className="relative animate-pop-in"
+                  enter="race-in"
+                  className={cn('relative', timerCritical && !reducedMotion && 'animate-edge-glow')}
                 >
                   {answerDeadline && (
                     <div className="mb-5 flex justify-center">
@@ -1236,6 +1409,7 @@ export default function GamePage() {
                         deadline={answerDeadline}
                         totalDurationMs={ANSWER_WINDOW_MS}
                         size="lg"
+                        onCriticalChange={setTimerCritical}
                       />
                     </div>
                   )}
@@ -1258,20 +1432,28 @@ export default function GamePage() {
                       </div>
                     </div>
                   )}
-                </Card>
+                </MotionCard>
               );
             }
 
             // 4. Question waiting (TRIGGERED, LOCKED, ACTIVE)
             if (showQuestionWaitingState && currentQuestion) {
+              const isResolving = questionState === 'RESOLVED' || questionState === 'EXPLAINED';
               return (
-                <Card key={`question-waiting-${currentQuestion.instanceId}`} tone="elevated" className="text-center">
-                  <Chip tone="accent" className="mx-auto animate-flash">
-                    {questionState === 'TRIGGERED'
-                      ? 'Question incoming'
-                      : questionState === 'ACTIVE'
-                        ? 'In play'
-                        : 'Answers locked'}
+                <MotionCard
+                  key={`question-${currentQuestion.instanceId}`}
+                  tone="elevated"
+                  enter={questionState === 'TRIGGERED' ? 'race-in' : 'pop'}
+                  className="text-center"
+                >
+                  <Chip tone="accent" className={cn('mx-auto', !isResolving && 'animate-flash')}>
+                    {isResolving
+                      ? 'Result incoming'
+                      : questionState === 'TRIGGERED'
+                        ? 'Question incoming'
+                        : questionState === 'ACTIVE'
+                          ? 'In play'
+                          : 'Answers locked'}
                   </Chip>
                   <p className="mt-5 font-display text-2xl font-semibold leading-tight md:text-3xl">
                     {currentQuestion.questionText}
@@ -1284,34 +1466,51 @@ export default function GamePage() {
                     />
                   )}
                   <p className="mt-3 text-sm text-[var(--color-muted-fg)]">
-                    {questionState === 'TRIGGERED'
-                      ? 'Get ready — answers open in a moment.'
-                      : questionState === 'ACTIVE'
-                        ? 'Watching the race to settle this one.'
-                        : 'Waiting for the lap to resolve.'}
+                    {isResolving
+                      ? 'Race control is confirming the result…'
+                      : questionState === 'TRIGGERED'
+                        ? 'Get ready — answers open in a moment.'
+                        : questionState === 'ACTIVE'
+                          ? 'Watching the race to settle this one.'
+                          : 'Waiting for the lap to resolve.'}
                   </p>
-                </Card>
+                </MotionCard>
               );
             }
 
             // 5. Idle waiting
             return (
-              <Card key="waiting-for-question" tone="elevated" className="py-14 text-center md:py-20">
+              <MotionCard
+                key={isFinalLapsIdle ? 'final-laps-idle' : 'waiting-for-question'}
+                tone="elevated"
+                enter="pop"
+                className="py-8 text-center md:py-10"
+              >
                 <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
-                  <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+                  {isFinalLapsIdle ? (
+                    <span className="text-2xl" aria-hidden>🏁</span>
+                  ) : (
+                    <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
+                  )}
                 </span>
-                <p className="font-display text-3xl font-bold uppercase md:text-4xl">Waiting for the next call</p>
+                <p className="font-display text-3xl font-bold uppercase md:text-4xl">
+                  {isFinalLapsIdle ? 'Final laps' : 'Waiting for the next call'}
+                </p>
                 <p className="mx-auto mt-3 max-w-sm text-sm text-[var(--color-muted-fg)]">
-                  {lobbyState.isReplayComplete
-                    ? 'Replay finished — final standings are locked in.'
-                    : 'Questions appear as the race throws up the right moments. Stay sharp.'}
+                  {isFinalLapsIdle
+                    ? 'No more questions — watch the race wind down until the chequered flag.'
+                    : lobbyState.isReplayComplete
+                      ? 'Replay finished — final standings are locked in.'
+                      : 'Questions appear as the race throws up the right moments. Stay sharp.'}
                 </p>
                 <p className="mt-5 text-xs font-semibold uppercase tracking-wide text-[var(--color-faint-fg)]">
                   Questions asked: {lobbyState.questionCount}
                 </p>
-              </Card>
+              </MotionCard>
             );
           })()}
+          </AnimatePresence>
+          </div>
 
           {/* Persistent Pit Wall Arcade — always mounted so an in-progress game (and any
               high-score run) is never interrupted when a question or result appears above it.
@@ -1326,7 +1525,12 @@ export default function GamePage() {
             </div>
           )}
 
-          {/* Race leader / tyre stats below the stage */}
+          {/* Timing tower + race leader / tyre stats below the stage */}
+          {!showWinnerScreen && (
+            <div className="mt-5 lg:hidden">
+              <TimingTower snapshot={raceSnapshot} />
+            </div>
+          )}
           <div className="mt-5 lg:hidden">
             <TireStats
               leaderStats={raceSnapshot?.leaderStats ?? null}
@@ -1337,19 +1541,20 @@ export default function GamePage() {
 
           {/* Leaderboard on mobile */}
           <div className="mt-5 lg:hidden">
-            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} players={lobbyState.players} />
+            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} players={lobbyState.players} rankDeltas={rankDeltas} />
           </div>
         </div>
 
         {/* Desktop sidebar */}
         <aside className="hidden flex-col gap-5 lg:flex">
+          {!showWinnerScreen && <TimingTower snapshot={raceSnapshot} />}
           <TireStats
             leaderStats={raceSnapshot?.leaderStats ?? null}
             lapNumber={raceSnapshot?.lapNumber ?? null}
             highlighted={tireStatsHighlighted}
           />
           <div className="sticky top-[150px]">
-            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} players={lobbyState.players} />
+            <Leaderboard entries={leaderboardForDisplay} currentUserId={currentUserId ?? undefined} players={lobbyState.players} rankDeltas={rankDeltas} />
           </div>
         </aside>
       </div>
@@ -1362,7 +1567,20 @@ export default function GamePage() {
         </div>
       )}
 
+      {/* Box Box Broadcast — overtake strips over the whole stage */}
+      {!showWinnerScreen && (
+        <OvertakeBroadcast
+          events={battleEvents}
+          onDismiss={dismissBattleEvent}
+          currentUserId={currentUserId}
+        />
+      )}
+
+      {/* Lights Out — one-shot cinematic race start */}
+      {showLightsOut && <LightsOutSequence onComplete={handleLightsOutComplete} />}
+
       <EmojiReactions />
     </main>
+    </MotionProvider>
   );
 }

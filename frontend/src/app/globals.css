@@ -288,6 +288,104 @@ main {
 .delay-3 { animation-delay: 240ms; }
 .delay-4 { animation-delay: 320ms; }
 
+/* ---- Race Night ambient layer (CSS-only, motion-kit additions) ---------
+   Composited properties only (opacity / transform / box-shadow glow).
+   All classes are additive; existing animate-* classes are untouched. */
+
+/* Final-seconds danger glow around the active card edge */
+@keyframes mq-edge-glow {
+  0%, 100% { box-shadow: inset 0 0 0 1px rgba(255, 33, 20, 0.25), 0 0 24px rgba(255, 33, 20, 0.08); }
+  50% { box-shadow: inset 0 0 0 1px rgba(255, 33, 20, 0.55), 0 0 34px rgba(255, 33, 20, 0.22); }
+}
+
+/* Broadcast scanline sweeping across a strip (race-control bulletin) */
+@keyframes mq-scan {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(220%); }
+}
+
+/* Countdown heartbeat — radial urgency, scale only */
+@keyframes mq-heartbeat {
+  0%, 100% { transform: scale(1); }
+  12% { transform: scale(1.07); }
+  24% { transform: scale(1); }
+}
+
+/* Gold sheen sweep for the winner's podium block */
+@keyframes mq-sheen {
+  0% { transform: translateX(-120%) skewX(-18deg); }
+  100% { transform: translateX(240%) skewX(-18deg); }
+}
+
+/* Checkered flag ripple — background-position drift for .checkers motifs */
+@keyframes mq-checker-drift {
+  from { background-position: 0 0, 7px 7px; }
+  to { background-position: 14px 0, 21px 7px; }
+}
+
+/* Stamp: element scales down onto the surface (chips, verdict labels) */
+@keyframes mq-stamp-in {
+  0% { opacity: 0; transform: scale(1.4); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* Confirm: scale-only pulse for an already-visible element (locked answer) */
+@keyframes mq-confirm {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+/* Countdown tick: gentle settle for a digit that just changed */
+@keyframes mq-tick {
+  0% { opacity: 0.55; transform: translateY(2px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* Signal-colored pulse rings (accent version already exists as mq-pulse-ring) */
+@keyframes mq-pulse-ring-go {
+  0% { box-shadow: 0 0 0 0 rgba(31, 210, 122, 0.45); }
+  70% { box-shadow: 0 0 0 10px rgba(31, 210, 122, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(31, 210, 122, 0); }
+}
+@keyframes mq-pulse-ring-warn {
+  0% { box-shadow: 0 0 0 0 rgba(255, 196, 0, 0.4); }
+  70% { box-shadow: 0 0 0 10px rgba(255, 196, 0, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 196, 0, 0); }
+}
+
+.animate-stamp-in { animation: mq-stamp-in 260ms var(--ease-spring) both; }
+.animate-confirm { animation: mq-confirm 320ms var(--ease-spring) both; }
+.animate-tick { animation: mq-tick 220ms var(--ease-out) both; }
+.animate-pulse-ring-go { animation: mq-pulse-ring-go 1.8s ease-out infinite; }
+.animate-pulse-ring-warn { animation: mq-pulse-ring-warn 1.8s ease-out infinite; }
+
+/* Spring variant of the dialog slide-up (slight overshoot, then settle) */
+.animate-slide-up-spring { animation: mq-slide-up var(--dur-slow) var(--ease-spring) both; }
+.animate-edge-glow { animation: mq-edge-glow 900ms ease-in-out infinite; }
+.animate-heartbeat { animation: mq-heartbeat 1s ease-out infinite; transform-origin: center; }
+.animate-checker-drift { animation: mq-checker-drift 1.2s linear infinite; }
+
+/* Scanline: place inside a position:relative overflow-hidden strip */
+.fx-scan {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+  animation: mq-scan 1.6s var(--ease-out) both;
+}
+
+/* Sheen: place inside a position:relative overflow-hidden block */
+.fx-sheen {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 45%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 212, 0, 0.22), transparent);
+  animation: mq-sheen 1.4s 400ms var(--ease-out) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

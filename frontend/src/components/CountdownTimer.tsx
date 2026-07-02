@@ -2,12 +2,18 @@
 
 import { useMemo, useEffect, useState } from 'react';
 import { computeCountdownSeconds } from '@/lib/answerWindow';
+import { cn } from '@/lib/cn';
 
 interface CountdownTimerProps {
   deadline: Date | string;
   onExpire?: () => void;
   size?: 'sm' | 'md' | 'lg';
   totalDurationMs?: number;
+  /**
+   * Display-only: fires when the final-seconds window (≤3s) starts/ends so the
+   * parent card can apply an urgency treatment (e.g. .animate-edge-glow).
+   */
+  onCriticalChange?: (critical: boolean) => void;
 }
 
 export default function CountdownTimer({
@@ -15,6 +21,7 @@ export default function CountdownTimer({
   onExpire,
   size = 'md',
   totalDurationMs = 45000,
+  onCriticalChange,
 }: CountdownTimerProps) {
   const [timeRemaining, setTimeRemaining] = useState(0);
   const [isExpired, setIsExpired] = useState(false);
@@ -44,6 +51,13 @@ export default function CountdownTimer({
   const progress = Math.max(0, Math.min(1, timeRemaining / totalDurationMs));
   const seconds = computeCountdownSeconds(timeRemaining, totalDurationMs);
   const isUrgent = seconds <= 10 && !isExpired;
+  const isCritical = seconds <= 3 && !isExpired;
+
+  useEffect(() => {
+    onCriticalChange?.(isCritical);
+  }, [isCritical, onCriticalChange]);
+
+  useEffect(() => () => onCriticalChange?.(false), [onCriticalChange]);
 
   const dims = size === 'sm' ? 64 : size === 'md' ? 96 : 132;
   const stroke = size === 'sm' ? 5 : size === 'md' ? 7 : 9;
@@ -91,8 +105,18 @@ export default function CountdownTimer({
           style={{ filter: `drop-shadow(0 0 6px ${color})` }}
         />
       </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center font-display leading-none">
-        <span className={`font-bold ${numberClass}`} style={{ color }}>
+      <div
+        className={cn(
+          'absolute inset-0 flex flex-col items-center justify-center font-display leading-none',
+          isUrgent && 'animate-heartbeat'
+        )}
+      >
+        {/* Red zone: re-key each second so the digit lands with a pop (mq-react-pop). */}
+        <span
+          key={isUrgent ? seconds : 'steady'}
+          className={cn('font-bold', numberClass, isUrgent && 'react-pop')}
+          style={{ color }}
+        >
           {seconds}
         </span>
         {size === 'lg' && (

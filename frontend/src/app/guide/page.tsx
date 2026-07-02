@@ -145,7 +145,7 @@ export default function GuidePage() {
               </div>
               <p className="mt-3 text-sm leading-relaxed text-[var(--color-muted-fg)]">
                 When a real Grand Prix is on, the game runs in real time alongside the broadcast.
-                The lobby opens 30 minutes before lights out, so you can get your friends in,
+                The lobby opens 45 minutes before lights out, so you can get your friends in,
                 pick your name, and settle in early. When the race starts, everyone drops into
                 the action together and questions begin once the opening laps are done.
               </p>

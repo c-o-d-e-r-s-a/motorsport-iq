@@ -35,6 +35,7 @@ import {
   flushUserActivity,
   clearLobbyCache,
   hasPlayersInLobby,
+  freezeFinalStandings,
 } from './lobby/lobbyManager';
 import { restoreOrBootstrapLeaderboard } from './lobby/leaderboardArchive';
 import {
@@ -107,6 +108,12 @@ import {
   validateAdminPassword,
 } from './admin/auth';
 import {
+  clearAdminLoginRateLimit,
+  getRequestClientIp,
+  isAdminLoginRateLimited,
+  recordAdminLoginFailure,
+} from './admin/loginRateLimit';
+import {
   createOrUpdateProblemReport,
   isProblemReportStatus,
   listProblemReports,
@@ -135,6 +142,7 @@ import {
 } from './notifications/pushManager';
 import { RaceReminderScheduler } from './notifications/raceReminderScheduler';
 const app = express();
+app.set('trust proxy', 1);
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'https://motorsport-iq.vercel.app',
@@ -303,9 +311,8 @@ function isOriginAllowed(origin: string | undefined): boolean {
   const normalizedOrigin = normalizeOriginValue(parsed.origin);
   const hostname = parsed.hostname.toLowerCase();
   const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
-  const isVercelDomain = hostname === 'motorsport-iq.vercel.app' || hostname.endsWith('.vercel.app');
 
-  return allowedOrigins.includes(normalizedOrigin) || isLocalhost || isVercelDomain;
+  return allowedOrigins.includes(normalizedOrigin) || isLocalhost;
 }
 
 const corsOptions: CorsOptions = {
@@ -560,6 +567,15 @@ app.post('/reports', async (req, res) => {
 
 app.post('/admin/login', async (req, res) => {
   try {
+    const clientIp = getRequestClientIp(req);
+    const rateLimit = isAdminLoginRateLimited(clientIp);
+    if (rateLimit.limited) {
+      const retryAfterSec = Math.max(1, Math.ceil((rateLimit.retryAfterMs ?? 60_000) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSec));
+      res.status(429).json({ message: 'Too many login attempts. Try again later.' });
+      return;
+    }
+
     const password = String(req.body?.password ?? '');
     if (!password) {
       res.status(400).json({ message: 'Password is required' });
@@ -568,10 +584,12 @@ app.post('/admin/login', async (req, res) => {
 
     const isValid = await validateAdminPassword(password);
     if (!isValid) {
+      recordAdminLoginFailure(clientIp);
       res.status(401).json({ message: 'Incorrect password' });
       return;
     }
 
+    clearAdminLoginRateLimit(clientIp);
     setAdminSessionCookie(res);
     res.json({ success: true });
   } catch (error) {
@@ -712,6 +730,7 @@ const runtimeManager = new SessionRuntimeManager({
       }
 
       await updateLobbyStatus(lobbyId, 'finished');
+      await freezeFinalStandings(lobbyId);
       setLobbyRuntimeMeta(lobbyId, { isReplayComplete: true });
       clearCooldowns(lobbyId);
 
@@ -1637,6 +1656,7 @@ io.on('connection', (socket) => {
           minQuestions: MIN_QUESTIONS_PER_RACE,
           maxQuestions: MAX_QUESTIONS_PER_RACE,
           leaderboard: [],
+          finalStandings: null,
         };
         registerPublicLobbyState(initialState);
 

@@ -147,6 +147,7 @@ export interface LobbyState {
   minQuestions: number;
   maxQuestions: number;
   leaderboard: LeaderboardEntry[];
+  finalStandings: LeaderboardEntry[] | null;
 }
 
 export interface QuestionEvent {

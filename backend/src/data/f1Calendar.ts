@@ -163,7 +163,7 @@ export function getActiveLiveCalendarSession(now: number = Date.now()): OpenF1Se
 }
 
 /**
- * Returns the next Race/Sprint session within the pre-race lobby window (30 min
+ * Returns the next Race/Sprint session within the pre-race lobby window (45 min
  * before start), if any. Used so hosts can open lobbies and invite friends early.
  */
 export function getPreRaceCalendarSession(now: number = Date.now()): OpenF1Session | null {

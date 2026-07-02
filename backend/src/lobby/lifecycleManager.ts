@@ -2,7 +2,7 @@
 import type { QuestionInstanceState, RaceSnapshot } from '../types';
 import type { QuestionInstance, Answer } from '../db/types';
 import supabase from '../db/supabaseClient';
-import { getLobbyState, setCurrentQuestion, incrementQuestionCount, updateLeaderboardCache } from './lobbyManager';
+import { clearCurrentQuestionIfInstance, getLobbyState, setCurrentQuestion, incrementQuestionCount, updateLeaderboardCache } from './lobbyManager';
 import { resolveQuestion, shouldCancel, shouldPause, shouldResume, shouldResolve } from '../engine/resolutionEngine';
 import { recordResolution } from '../engine/questionEngine';
 import { calculateScore, dedupeAnswersByUser, updateLeaderboardEntry } from '../engine/scoringEngine';
@@ -50,6 +50,8 @@ const activeQuestions: Map<string, QuestionInstanceState> = new Map();
 const pausedQuestions: Map<string, QuestionInstanceState> = new Map();
 const scoredQuestionInstances: Set<string> = new Set();
 const UNRESOLVED_STATES = new Set(['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE']);
+/** Block new triggers until the explanation window finishes (not only while lap-active). */
+const BLOCKING_STATES = new Set(['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE', 'RESOLVED', 'EXPLAINED']);
 
 function trackLobbyTimer(lobbyId: string, timer: NodeJS.Timeout): void {
   const timers = lobbyTimers.get(lobbyId) ?? new Set<NodeJS.Timeout>();
@@ -430,9 +432,12 @@ async function resolveQuestionInstance(
       onStateChange({ ...instance });
 
       // Remove from active and drop any SC/VSC pause entry so resume cannot resurrect this instance.
-      activeQuestions.delete(instance.lobbyId);
+      const current = activeQuestions.get(instance.lobbyId);
+      if (current?.id === instance.id) {
+        activeQuestions.delete(instance.lobbyId);
+      }
       pausedQuestions.delete(instance.lobbyId);
-      setCurrentQuestion(instance.lobbyId, null);
+      clearCurrentQuestionIfInstance(instance.lobbyId, instance.id);
     }, EXPLANATION_DURATION_MS);
   }, 1000);
 }
@@ -696,20 +701,24 @@ export function getActiveQuestion(lobbyId: string): QuestionInstanceState | null
   return activeQuestions.get(lobbyId) ?? null;
 }
 
-/** True when an unresolved question should block new triggers; prunes terminal ghosts from SC/VSC pause cycles. */
+/** True while a question occupies the lobby lifecycle (including the post-resolve explanation window). */
 export function hasBlockingActiveQuestion(lobbyId: string): boolean {
   const instance = activeQuestions.get(lobbyId);
   if (!instance) {
     return false;
   }
 
-  if (!UNRESOLVED_STATES.has(instance.state)) {
-    activeQuestions.delete(lobbyId);
-    pausedQuestions.delete(lobbyId);
-    return false;
+  if (BLOCKING_STATES.has(instance.state)) {
+    return true;
   }
 
-  return true;
+  // Prune terminal ghosts left over from SC/VSC pause cycles.
+  if (instance.state === 'CLOSED' || instance.state === 'CANCELLED') {
+    activeQuestions.delete(lobbyId);
+    pausedQuestions.delete(lobbyId);
+  }
+
+  return false;
 }
 
 export function clearLobbyLifecycle(lobbyId: string): void {
