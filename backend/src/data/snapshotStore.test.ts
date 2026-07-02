@@ -637,6 +637,66 @@ describe('SnapshotStore race control updates', () => {
     expect(store.getCurrentSnapshot()?.trackStatus).toBe('GREEN');
   });
 
+  it('keeps sector 11 yellow through replay lap 14 until an explicit sector clear', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [createDriver()]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(11291, { sessionMode: 'replay', replaySpeed: 10 });
+    store.processPositionUpdate([createPosition({ position: 1 })]);
+    store.processLapCompletion(createLap({ lap_number: 12 }));
+
+    store.processRaceControlUpdate([
+      createRaceControl({
+        date: '2026-05-24T20:25:42+00:00',
+        category: 'Flag',
+        flag: 'YELLOW',
+        scope: 'Sector',
+        sector: 11,
+        message: 'YELLOW IN TRACK SECTOR 11',
+      }),
+      createRaceControl({
+        date: '2026-05-24T20:25:50+00:00',
+        category: 'Flag',
+        flag: 'YELLOW',
+        scope: 'Sector',
+        sector: 12,
+        message: 'YELLOW IN TRACK SECTOR 12',
+      }),
+    ]);
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([11, 12]);
+
+    store.processRaceControlUpdate([
+      createRaceControl({
+        date: '2026-05-24T20:25:58+00:00',
+        category: 'Flag',
+        flag: 'CLEAR',
+        scope: 'Sector',
+        sector: 12,
+        message: 'CLEAR IN TRACK SECTOR 12',
+      }),
+    ]);
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([11]);
+
+    store.processLapCompletion(createLap({ lap_number: 13 }));
+    expect(store.getCurrentSnapshot()?.lapNumber).toBe(14);
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([11]);
+
+    store.processRaceControlUpdate([
+      createRaceControl({
+        date: '2026-05-24T20:27:45+00:00',
+        category: 'Flag',
+        flag: 'CLEAR',
+        scope: 'Sector',
+        sector: 11,
+        message: 'CLEAR IN TRACK SECTOR 11',
+      }),
+    ]);
+    expect(store.getCurrentSnapshot()?.localYellowSectors).toEqual([]);
+  });
+
   it('clears localized sector yellows when a global neutralization (SC) is shown', async () => {
     const client = {
       getDrivers: jest.fn(async () => [createDriver()]),

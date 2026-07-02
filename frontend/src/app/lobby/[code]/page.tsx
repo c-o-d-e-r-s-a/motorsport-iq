@@ -2,14 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { AnimatePresence, m, type Variants } from 'framer-motion';
 import { getSocketClient } from '@/lib/socket';
+import { MotionProvider } from '@/components/motion';
+import { reducedFade, springSettle } from '@/lib/motion/presets';
+import { useEntranceControls } from '@/lib/motion/useEntranceControls';
+import { useReducedMotion } from '@/lib/motion/useReducedMotion';
 import {
   applyPlayerDisconnected,
   applyPlayerJoined,
   applyPlayerLeft,
   applyPlayerReconnected,
 } from '@/lib/lobbyPlayerDeltas';
-import { SERVER_EVENTS, type LobbyState, type ServerErrorEvent, type SessionInfo } from '@/lib/types';
+import { SERVER_EVENTS, type LobbyState, type PlayerState, type ServerErrorEvent, type SessionInfo } from '@/lib/types';
 import { shareLobbyLink } from '@/lib/shareLobbyLink';
 import {
   filterSessionsForDisplay,
@@ -18,6 +23,7 @@ import {
 } from '@/lib/sessionDisplay';
 import { Button, Brand, Card, Chip, Dialog, Input } from '@/components/ui';
 import EmojiReactions from '@/components/EmojiReactions';
+import PreRaceCountdownChip from '@/components/PreRaceCountdownChip';
 import { cn } from '@/lib/cn';
 import {
   clearInactiveKickRestore,
@@ -28,6 +34,65 @@ import {
   stashInactiveKickRestore,
 } from '@/lib/sessionPersistence';
 import { resolveJoinedPlayer } from '@/lib/resolveJoinedPlayer';
+
+/* Player rows: race in from the left on join, slide out on leave.
+   AnimatePresence initial={false} keeps the initial roster from replaying this. */
+const playerRowVariants: Variants = {
+  hidden: { opacity: 0, x: -24 },
+  visible: { opacity: 1, x: 0, transition: springSettle },
+  exit: { opacity: 0, x: 24, transition: { duration: 0.14 } },
+};
+
+/* Brief accent wash over a newly joined row (inherits the row's variant state). */
+const joinFlashVariants: Variants = {
+  hidden: { opacity: 1 },
+  visible: { opacity: 0, transition: { duration: 1.2, ease: 'easeOut' } },
+};
+
+function LobbyPlayerRow({
+  player,
+  currentUserId,
+  isHost,
+  isPublic,
+  reducedMotion,
+}: {
+  player: PlayerState;
+  currentUserId: string | null;
+  isHost: boolean;
+  isPublic: boolean;
+  reducedMotion: boolean;
+}) {
+  const controls = useEntranceControls();
+
+  return (
+    <m.div
+      layout
+      variants={reducedMotion ? reducedFade : playerRowVariants}
+      initial="hidden"
+      animate={controls}
+      exit="exit"
+      transition={reducedMotion ? { duration: 0 } : springSettle}
+      className="relative flex items-center gap-3 overflow-hidden rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-3"
+    >
+      {!reducedMotion && (
+        <m.span
+          aria-hidden
+          variants={joinFlashVariants}
+          className="pointer-events-none absolute inset-0 bg-[var(--color-accent-soft)]"
+        />
+      )}
+      <span
+        className="h-2.5 w-2.5 shrink-0 rounded-full"
+        style={{ backgroundColor: player.connected ? 'var(--color-go)' : 'var(--color-faint-fg)' }}
+      />
+      <p className="flex-1 truncate font-display text-lg font-semibold uppercase">{player.username}</p>
+      <div className="flex gap-1.5">
+        {isHost && !isPublic && <Chip tone="accent">Host</Chip>}
+        {player.id === currentUserId && <Chip tone="neutral">You</Chip>}
+      </div>
+    </m.div>
+  );
+}
 
 export default function LobbyPage() {
   const params = useParams();
@@ -54,6 +119,7 @@ export default function LobbyPage() {
   const [isJoining, setIsJoining] = useState(false);
   const joinUsernameRef = useRef(joinUsername);
   const joinedUserIdRef = useRef<string | null>(null);
+  const reducedMotion = useReducedMotion();
 
   const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
 
@@ -447,6 +513,7 @@ export default function LobbyPage() {
   }
 
   return (
+    <MotionProvider>
     <main className="app-bg pad-safe-top relative min-h-dvh">
       <div className="mx-auto w-full max-w-3xl px-5 pb-40">
         <header className="flex items-center justify-between py-4">
@@ -497,22 +564,18 @@ export default function LobbyPage() {
             </h2>
           </div>
           <div className="space-y-2">
-            {lobbyState.players.map((player) => (
-              <div
-                key={player.id}
-                className="flex items-center gap-3 rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-3"
-              >
-                <span
-                  className="h-2.5 w-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: player.connected ? 'var(--color-go)' : 'var(--color-faint-fg)' }}
+            <AnimatePresence initial={false}>
+              {lobbyState.players.map((player) => (
+                <LobbyPlayerRow
+                  key={player.id}
+                  player={player}
+                  currentUserId={currentUserId}
+                  isHost={player.isHost}
+                  isPublic={lobbyState.isPublic}
+                  reducedMotion={reducedMotion}
                 />
-                <p className="flex-1 truncate font-display text-lg font-semibold uppercase">{player.username}</p>
-                <div className="flex gap-1.5">
-                  {player.isHost && !lobbyState.isPublic && <Chip tone="accent">Host</Chip>}
-                  {player.id === currentUserId && <Chip tone="neutral">You</Chip>}
-                </div>
-              </div>
-            ))}
+              ))}
+            </AnimatePresence>
           </div>
         </section>
 
@@ -613,12 +676,18 @@ export default function LobbyPage() {
                               {session.session_name} · {session.country_name}
                             </p>
                           </div>
-                          <Chip tone={isLive ? 'go' : isCompleted ? 'accent' : isPreRace ? 'warn' : 'neutral'}>
-                            {isLive ? 'Live' : isCompleted ? 'Replay' : isPreRace ? 'Soon' : 'Soon'}
-                          </Chip>
+                          {isLive ? (
+                            <Chip tone="go" glow>Live</Chip>
+                          ) : isCompleted ? (
+                            <Chip tone="accent">Replay</Chip>
+                          ) : isPreRace ? (
+                            <PreRaceCountdownChip dateStart={session.date_start} />
+                          ) : (
+                            <Chip tone="neutral">Soon</Chip>
+                          )}
                         </div>
                         {isSelected && isSelectable && (
-                          <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-accent)]">
+                          <p className="animate-fade-in mt-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-accent)]">
                             Tap again to start →
                           </p>
                         )}
@@ -667,11 +736,12 @@ export default function LobbyPage() {
 
       {/* Sticky start bar (private lobby host only) */}
       {isHost && !lobbyState.isPublic && (
-        <div className="pad-safe-bottom fixed inset-x-0 bottom-0 z-20 border-t border-[var(--color-border)] bg-[var(--color-bg-2)]/90 px-5 pt-3 backdrop-blur">
+        <div className="animate-slide-up pad-safe-bottom fixed inset-x-0 bottom-0 z-20 border-t border-[var(--color-border)] bg-[var(--color-bg-2)]/90 px-5 pt-3 backdrop-blur">
           <div className="mx-auto max-w-3xl">
             <Button
               onClick={openStartConfirm}
-              disabled={isStarting || !canStartSession}
+              loading={isStarting}
+              disabled={!canStartSession}
               size="lg"
               className="w-full"
             >
@@ -713,7 +783,7 @@ export default function LobbyPage() {
             <div className="mt-6 flex flex-col gap-2.5">
               <Button
                 onClick={() => handleStartGame(String(confirmSession.session_key))}
-                disabled={isStarting}
+                loading={isStarting}
                 size="lg"
               >
                 {isStarting ? 'Starting…' : 'Lights out'}
@@ -728,5 +798,6 @@ export default function LobbyPage() {
 
       <EmojiReactions bottomOffset={isHost && !lobbyState.isPublic ? 88 : 20} />
     </main>
+    </MotionProvider>
   );
 }

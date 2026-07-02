@@ -1,6 +1,6 @@
 import type { OpenF1Session, SessionMode } from '../types';
 
-export const PRE_RACE_LOBBY_WINDOW_MS = 30 * 60 * 1000;
+export const PRE_RACE_LOBBY_WINDOW_MS = 45 * 60 * 1000;
 
 /** Grace after scheduled date_end so red flags / delays do not flip Race/Sprint to replay early. */
 export const LIVE_RACE_OVERTIME_MS = 3 * 60 * 60 * 1000;

@@ -14,7 +14,8 @@ import type {
 } from '../types';
 import { isOvertakeModeArmed } from '../engine/derivedSignals';
 import type { OpenF1Client } from './openf1Client';
-import { classifySectorFlag, parseLatestRaceControlStatusWithTime } from './raceStatus';
+import { classifySectorFlag, parseLatestRaceControlStatusWithTime, parseRaceControlMessageStatus } from './raceStatus';
+import { ReplayTrackStatusController } from './replayTrackStatus';
 import { mergeStintRecords, resolveTyreCompound } from './tyreCompoundResolver';
 
 interface SnapshotStoreOptions {
@@ -114,6 +115,8 @@ export class SnapshotStore {
   private raceControlHistory: OpenF1RaceControl[] = [];
   /** Timestamp of the last applied global race-control status (stale guard). */
   private lastRaceControlStatusTime = 0;
+  /** Replay-only SC/VSC state machine + telemetry corroboration. */
+  private replayTrackStatus: ReplayTrackStatusController | null = null;
 
   constructor(client: OpenF1Client, options: SnapshotStoreOptions = {}) {
     this.client = client;
@@ -146,6 +149,7 @@ export class SnapshotStore {
     this.raceControlHistory = [];
     this.lastRaceControlStatusTime = 0;
     this.sessionMode = config?.sessionMode ?? 'live';
+    this.replayTrackStatus = this.sessionMode === 'replay' ? new ReplayTrackStatusController() : null;
     this.openF1LapNumbering = config?.openF1LapNumbering ?? false;
     this.replaySpeed = config?.replaySpeed ?? null;
     this.lastHudSnapshotAt = 0;
@@ -370,6 +374,14 @@ export class SnapshotStore {
 
     this.buildSnapshot();
 
+    if (this.replayTrackStatus && lapAdvanced && this.currentSnapshot) {
+      const correctedStatus = this.replayTrackStatus.onLapComplete(this.currentSnapshot);
+      if (correctedStatus !== null) {
+        this.applyParsedTrackStatus(correctedStatus);
+        this.buildSnapshot();
+      }
+    }
+
     const shouldEmitLapComplete = this.sessionMode === 'live'
       ? Boolean(this.currentSnapshot)
       : lapAdvanced && Boolean(this.currentSnapshot);
@@ -521,20 +533,37 @@ export class SnapshotStore {
     const sectorFlagsChanged = this.applySectorFlagMessages(messages);
 
     this.raceControlHistory.push(...messages);
-    const latest = parseLatestRaceControlStatusWithTime(this.raceControlHistory);
 
     let trackStatusChanged = false;
-    if (latest) {
-      const isStale = latest.time > 0 && latest.time < this.lastRaceControlStatusTime;
-      if (!isStale) {
-        if (latest.time > 0) {
-          this.lastRaceControlStatusTime = Math.max(this.lastRaceControlStatusTime, latest.time);
+    if (this.replayTrackStatus) {
+      const nextStatus = this.replayTrackStatus.processMessages(messages);
+      if (nextStatus !== null) {
+        trackStatusChanged = this.applyParsedTrackStatus(nextStatus);
+      }
+
+      for (const message of messages) {
+        const parsed = parseRaceControlMessageStatus(message);
+        if (parsed === 'YELLOW') {
+          trackStatusChanged = this.applyParsedTrackStatus('YELLOW') || trackStatusChanged;
+        } else if (parsed === 'GREEN') {
+          trackStatusChanged = this.applyParsedTrackStatus('GREEN') || trackStatusChanged;
         }
-        trackStatusChanged = this.applyParsedTrackStatus(latest.status);
+      }
+    } else {
+      const latest = parseLatestRaceControlStatusWithTime(this.raceControlHistory);
+
+      if (latest) {
+        const isStale = latest.time > 0 && latest.time < this.lastRaceControlStatusTime;
+        if (!isStale) {
+          if (latest.time > 0) {
+            this.lastRaceControlStatusTime = Math.max(this.lastRaceControlStatusTime, latest.time);
+          }
+          trackStatusChanged = this.applyParsedTrackStatus(latest.status);
+        }
       }
     }
 
-    if ((trackStatusChanged || sectorFlagsChanged) && this.currentSnapshot) {
+    if (trackStatusChanged || sectorFlagsChanged) {
       this.buildSnapshot();
     }
   }

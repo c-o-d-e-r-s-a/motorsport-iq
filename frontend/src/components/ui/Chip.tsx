@@ -5,6 +5,8 @@ type ChipTone = 'neutral' | 'accent' | 'go' | 'warn' | 'danger' | 'info';
 interface ChipProps extends React.HTMLAttributes<HTMLSpanElement> {
   tone?: ChipTone;
   highlighted?: boolean;
+  /** Soft repeating pulse ring in the chip's signal color (live/warn states). */
+  glow?: boolean;
 }
 
 const toneClasses: Record<ChipTone, string> = {
@@ -16,13 +18,21 @@ const toneClasses: Record<ChipTone, string> = {
   info: 'bg-[rgba(61,139,255,0.14)] text-[var(--color-info)] border-[var(--color-info)]/40',
 };
 
-export default function Chip({ tone = 'neutral', highlighted, className, ...props }: ChipProps) {
+const glowClasses: Partial<Record<ChipTone, string>> = {
+  go: 'animate-pulse-ring-go',
+  warn: 'animate-pulse-ring-warn',
+  accent: 'animate-pulse-ring',
+  danger: 'animate-pulse-ring',
+};
+
+export default function Chip({ tone = 'neutral', highlighted, glow, className, ...props }: ChipProps) {
   return (
     <span
       className={cn(
         'inline-flex items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-pill)] border px-3 py-1 text-xs font-semibold uppercase tracking-wide',
         toneClasses[tone],
         highlighted && 'ring-2 ring-[var(--color-accent)] ring-offset-1 ring-offset-[var(--color-bg)]',
+        glow && glowClasses[tone],
         className
       )}
       {...props}

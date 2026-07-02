@@ -16,6 +16,7 @@ import { cn } from '@/lib/cn';
 import { saveLobbySession } from '@/lib/sessionPersistence';
 import { Button, Brand, Input, Chip } from '@/components/ui';
 import RaceAlertOptIn from '@/components/RaceAlertOptIn';
+import PreRaceCountdownChip from '@/components/PreRaceCountdownChip';
 
 async function wakeBackend(): Promise<void> {
   try {
@@ -48,6 +49,7 @@ export default function Home() {
   const [selectedSessionKey, setSelectedSessionKey] = useState<string>('');
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
   const prevYearRef = useRef(selectedYear);
+  const sessionListRef = useRef<HTMLDivElement>(null);
 
   const usernameRef = useRef(username);
   useEffect(() => { usernameRef.current = username; }, [username]);
@@ -67,8 +69,12 @@ export default function Home() {
   const displaySessions = useMemo(() => filterSessionsForDisplay(sessions), [sessions]);
   const preRaceSession = displaySessions.find(isPreRacePlayableSession) ?? null;
   const isPreRaceWindow = isPreRacePlayableWindow(sessions);
-  const replaySessions = displaySessions.filter((s) => s.isCompleted);
-  const canJoinSolo = homeStatus.isLive || isPreRaceWindow || Boolean(selectedSessionKey);
+  const selectedSessionInfo = displaySessions.find(
+    (session) => String(session.session_key) === selectedSessionKey
+  ) ?? null;
+  const canJoinSolo = homeStatus.isLive
+    || isPreRaceWindow
+    || Boolean(selectedSessionInfo && (selectedSessionInfo.isLive || selectedSessionInfo.isCompleted));
 
   useEffect(() => {
     const socket = getSocketClient();
@@ -169,6 +175,24 @@ export default function Home() {
     getSocketClient().getSessions(selectedYear);
   }, [mode, selectedYear]);
 
+  // Keep the auto-selected (latest) race visible without manual scrolling.
+  useEffect(() => {
+    if (mode !== 'solo' || sessionsLoading || !selectedSessionKey) return;
+    if (homeStatus.isLive || isPreRaceWindow) return;
+
+    const selectedEl = sessionListRef.current?.querySelector<HTMLElement>(
+      `[data-session-key="${selectedSessionKey}"]`
+    );
+    selectedEl?.scrollIntoView({ block: 'nearest' });
+  }, [
+    mode,
+    sessionsLoading,
+    selectedSessionKey,
+    displaySessions,
+    homeStatus.isLive,
+    isPreRaceWindow,
+  ]);
+
   const requireUsername = (): boolean => {
     if (!username.trim()) {
       setError('Enter your driver name first');
@@ -251,20 +275,20 @@ export default function Home() {
 
       <div className="relative z-10 mx-auto flex w-full max-w-md flex-1 flex-col justify-center gap-6 lg:max-w-5xl lg:flex-row lg:items-center lg:gap-12">
         {/* Hero */}
-        <section className="animate-fade-up lg:flex-1">
-          <h1 className="font-display text-[2.6rem] font-bold uppercase leading-[0.95] tracking-tight sm:text-5xl lg:text-6xl">
+        <section className="lg:flex-1">
+          <h1 className="animate-fade-up font-display text-[2.6rem] font-bold uppercase leading-[0.95] tracking-tight sm:text-5xl lg:text-6xl">
             Predict the race.
             <br />
             <span className="text-[var(--color-accent)]">Beat your mates.</span>
           </h1>
-          <p className="mt-4 max-w-md text-base leading-relaxed text-[var(--color-muted-fg)]">
+          <p className="animate-fade-up delay-1 mt-4 max-w-md text-base leading-relaxed text-[var(--color-muted-fg)]">
             Live Formula 1 prediction game. Join a lobby, call live race moments in 45 seconds,
             and climb the leaderboard as the laps tick down.
           </p>
-          <div className="mt-5 max-w-md">
+          <div className="animate-fade-up delay-2 mt-5 max-w-md">
             <RaceAlertOptIn />
           </div>
-          <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2">
+          <div className="animate-fade-up delay-3 mt-5 flex flex-wrap items-center gap-x-5 gap-y-2">
             <Link
               href="/guide"
               className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
@@ -307,7 +331,7 @@ export default function Home() {
             onKeyDown={(e) => {
               if (e.key === 'Enter' && mode === 'select') handlePlaySolo();
             }}
-            placeholder="e.g. Lewis Hamilton"
+            placeholder="Your Name"
             maxLength={20}
             autoComplete="nickname"
           />
@@ -378,7 +402,7 @@ export default function Home() {
               {homeStatus.isLive && homeStatus.joinable && (
                 <div className="mt-4 rounded-[var(--radius)] border border-[var(--color-go)]/40 bg-[var(--color-go-soft)] px-4 py-3">
                   <div className="flex items-center gap-2">
-                    <span className="h-2 w-2 animate-flash rounded-full bg-[var(--color-go)]" />
+                    <span className="animate-pulse-ring-go h-2 w-2 rounded-full bg-[var(--color-go)]" />
                     <p className="text-sm font-semibold text-[var(--color-go)]">Race is live now</p>
                   </div>
                   <p className="mt-0.5 text-sm text-[var(--color-fg)]">{homeStatus.sessionPrimary}</p>
@@ -391,7 +415,7 @@ export default function Home() {
                 <div className="mt-4 rounded-[var(--radius)] border border-[var(--color-warn)]/40 bg-[rgba(255,196,0,0.1)] px-4 py-3">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-semibold text-[var(--color-warn)]">Race has not started yet</p>
-                    <Chip tone="warn">Soon</Chip>
+                    <PreRaceCountdownChip dateStart={preRaceSession.date_start} />
                   </div>
                   <p className="mt-1 font-display text-lg font-semibold uppercase text-[var(--color-fg)]">
                     {preRaceSession.location}
@@ -405,7 +429,7 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Session picker (replay only — hidden during live or pre-race windows) */}
+              {/* Session picker — hidden during live or pre-race windows */}
               {!homeStatus.isLive && !isPreRaceWindow && (
                 <div className="mt-4">
                   <div className="mb-3 flex items-center justify-between">
@@ -429,34 +453,77 @@ export default function Home() {
                       <span className="h-5 w-5 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
                       <span className="text-sm text-[var(--color-muted-fg)]">Loading sessions…</span>
                     </div>
-                  ) : replaySessions.length === 0 ? (
+                  ) : displaySessions.length === 0 ? (
                     <p className="rounded-[var(--radius)] border border-dashed border-[var(--color-border)] p-4 text-center text-sm text-[var(--color-muted-fg)]">
-                      No completed races found for {selectedYear}.
+                      No race sessions found for {selectedYear}.
                     </p>
                   ) : (
-                    <div className="max-h-[240px] space-y-2 overflow-y-auto pr-1 [scrollbar-width:thin]">
-                      {replaySessions.map((session) => {
+                    <div
+                      ref={sessionListRef}
+                      className="max-h-[240px] space-y-2 overflow-y-auto pr-1 [scrollbar-width:thin]"
+                    >
+                      {displaySessions.map((session, index) => {
                         const key = String(session.session_key);
                         const isSelected = key === selectedSessionKey;
+                        const isLive = session.isLive;
+                        const isCompleted = session.isCompleted;
+                        const isPreRace = session.isPreRace;
+                        const isSelectable = isLive || isCompleted;
+                        const isFutureSoon = !isSelectable && !isPreRace;
+
                         return (
                           <button
                             key={key}
                             type="button"
-                            onClick={() => setSelectedSessionKey(key)}
+                            data-session-key={key}
+                            disabled={!isSelectable}
+                            onClick={() => {
+                              if (isSelectable) setSelectedSessionKey(key);
+                            }}
+                            style={{ animationDelay: `${Math.min(index * 45, 270)}ms` }}
                             className={cn(
-                              'w-full rounded-[var(--radius)] border px-4 py-3 text-left transition-all duration-[var(--dur-fast)] active:scale-[0.99]',
-                              isSelected
-                                ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)]'
-                                : 'border-[var(--color-border)] bg-[var(--color-panel)] hover:border-[var(--color-border-strong)]'
+                              'animate-fade-up w-full rounded-[var(--radius)] border px-4 py-3 text-left transition-all duration-[var(--dur-fast)]',
+                              isSelected && isSelectable
+                                ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] active:scale-[0.99]'
+                                : isFutureSoon
+                                  ? 'border-[var(--color-border)]/40 bg-[var(--color-bg)]/70'
+                                  : 'border-[var(--color-border)] bg-[var(--color-panel)]',
+                              isSelectable
+                                ? 'hover:border-[var(--color-border-strong)] active:scale-[0.99]'
+                                : isFutureSoon
+                                  ? 'cursor-not-allowed'
+                                  : 'cursor-not-allowed opacity-50'
                             )}
                           >
                             <div className="flex items-center justify-between gap-2">
-                              <p className="truncate font-display text-base font-semibold uppercase leading-tight">
+                              <p
+                                className={cn(
+                                  'truncate font-display text-base font-semibold uppercase leading-tight',
+                                  isFutureSoon && 'text-[var(--color-faint-fg)]'
+                                )}
+                              >
                                 {session.location}
                               </p>
-                              <Chip tone="accent">Replay</Chip>
+                              {isLive ? (
+                                <Chip tone="go" glow>Live</Chip>
+                              ) : isCompleted ? (
+                                <Chip tone="accent">Replay</Chip>
+                              ) : isPreRace ? (
+                                <PreRaceCountdownChip dateStart={session.date_start} />
+                              ) : (
+                                <Chip tone="neutral" className={isFutureSoon ? 'opacity-50' : undefined}>
+                                  Soon
+                                </Chip>
+                              )}
                             </div>
-                            <p className="mt-0.5 truncate text-xs text-[var(--color-muted-fg)]">
+                            <p
+                              className={cn(
+                                'mt-0.5 truncate text-xs',
+                                isFutureSoon
+                                  ? 'text-[var(--color-faint-fg)]/70'
+                                  : 'text-[var(--color-muted-fg)]'
+                              )}
+                            >
                               {session.session_name} · {session.country_name} · {session.year}
                             </p>
                           </button>

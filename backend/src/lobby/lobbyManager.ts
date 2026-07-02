@@ -164,6 +164,7 @@ export async function createLobby(
       questionsAnswered: bootstrap.entry.questionsAnswered,
       accuracy: bootstrap.entry.accuracy,
     }],
+    finalStandings: null,
   };
   lobbyStates.set(lobby.id, lobbyState);
   userLobbies.set(user.id, lobby.id);
@@ -409,6 +410,7 @@ export async function getLobbyState(lobbyId: string): Promise<LobbyState | null>
         joinedAtLap: normalizeJoinedAtLapForDisplay(joinedAtLap),
       };
     }),
+    finalStandings: null,
   };
 
   // Cache it
@@ -532,6 +534,14 @@ export function setCurrentQuestion(lobbyId: string, question: QuestionInstanceSt
   }
 }
 
+/** Clear lobby currentQuestion only when it still refers to this instance (avoids wiping a newer question). */
+export function clearCurrentQuestionIfInstance(lobbyId: string, instanceId: string): void {
+  const lobbyState = lobbyStates.get(lobbyId);
+  if (lobbyState?.currentQuestion?.id === instanceId) {
+    lobbyState.currentQuestion = null;
+  }
+}
+
 export function setLatestResolution(lobbyId: string, resolution: ResolutionEvent | null): void {
   const lobbyState = lobbyStates.get(lobbyId);
   if (lobbyState) {
@@ -613,6 +623,7 @@ export async function removePlayer(
       ...player,
       isHost: player.id === nextHostId,
     }));
+    // Remove from live leaderboard — finalStandings (if frozen) remains unchanged
     cachedLobbyState.leaderboard = cachedLobbyState.leaderboard.filter((lb) => lb.userId !== userId);
     cachedLobbyState.hostId = nextHostId ?? '';
   }
@@ -772,4 +783,65 @@ export function clearLobbyCache(lobbyId: string): void {
     }
     lobbyStates.delete(lobbyId);
   }
+}
+
+/**
+ * Freeze final standings at race end.
+ * Merges live leaderboard + archived entries so everyone who participated appears on the podium.
+ */
+export async function freezeFinalStandings(lobbyId: string): Promise<void> {
+  const lobbyState = lobbyStates.get(lobbyId);
+  if (!lobbyState) {
+    return;
+  }
+
+  // Already frozen — don't overwrite
+  if (lobbyState.finalStandings) {
+    return;
+  }
+
+  // Start with current leaderboard (active players)
+  const entriesMap = new Map<string, LeaderboardEntryState>();
+  for (const entry of lobbyState.leaderboard) {
+    entriesMap.set(entry.userId, entry);
+  }
+
+  // Merge archived entries (players who left early but scored)
+  trackDbQuery('leaderboard_archives.read_for_freeze');
+  const { data: archives, error: archiveError } = await supabase
+    .from('leaderboard_archives')
+    .select('*')
+    .eq('lobby_id', lobbyId);
+
+  if (archiveError) {
+    console.warn(`Failed to read archives for freeze: ${archiveError.message}`);
+  } else if (archives) {
+    for (const archive of archives) {
+      // Don't overwrite if a rejoined player is already in the live leaderboard
+      if (!entriesMap.has(archive.archived_user_id)) {
+        entriesMap.set(archive.archived_user_id, {
+          userId: archive.archived_user_id,
+          username: archive.username,
+          points: archive.points ?? 0,
+          streak: archive.streak ?? 0,
+          maxStreak: archive.max_streak ?? 0,
+          correctAnswers: archive.correct_answers ?? 0,
+          wrongAnswers: archive.wrong_answers ?? 0,
+          questionsAnswered: archive.questions_answered ?? 0,
+          accuracy: Number(archive.accuracy ?? 0),
+          joinedAtLap: archive.joined_at_lap ?? undefined,
+        });
+      }
+    }
+  }
+
+  // Sort by points, then accuracy, then maxStreak
+  const frozen = Array.from(entriesMap.values()).sort((a, b) => {
+    if (b.points !== a.points) return b.points - a.points;
+    if (b.accuracy !== a.accuracy) return b.accuracy - a.accuracy;
+    return b.maxStreak - a.maxStreak;
+  });
+
+  lobbyState.finalStandings = frozen;
+  console.log(`[freezeFinalStandings] Lobby ${lobbyState.code}: ${frozen.length} participants frozen`);
 }

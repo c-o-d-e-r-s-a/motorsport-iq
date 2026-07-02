@@ -33,8 +33,7 @@ export default function RaceHud({
   const badgeStatus = snapshot
     ? getBadgeTrackStatus(snapshot.trackStatus)
     : 'GREEN';
-  const showSectorYellow =
-    !hasCompleted && badgeStatus === 'GREEN' && yellowSectors.length > 0;
+  const showSectorYellow = !hasCompleted && yellowSectors.length > 0;
 
   return (
     <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">

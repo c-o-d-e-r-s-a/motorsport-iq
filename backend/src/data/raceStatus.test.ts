@@ -1,5 +1,6 @@
 import type { OpenF1RaceControl } from '../types';
 import {
+  classifySectorFlag,
   isRaceNeutralized,
   parseLatestRaceControlStatus,
   parseRaceControlMessageStatus,
@@ -103,5 +104,94 @@ describe('raceStatus parsing', () => {
       flag: 'CHEQUERED',
       message: 'Chequered flag',
     }))).toBe('CHEQUERED');
+  });
+
+  it('does not treat safety car line steward messages as SC', () => {
+    expect(parseRaceControlMessageStatus(raceControl({
+      category: 'Other',
+      flag: null as never,
+      message: 'INCIDENT INVOLVING CARS 77 (BOT) AND 18 (STR) NOTED - STARTING PROCEDURE INFRINGEMENT - OUT OF POSITION AT SAFETY CAR LINE',
+    }))).toBeNull();
+  });
+
+  it('does not treat VSC infringement notices as VSC deployment', () => {
+    expect(parseRaceControlMessageStatus(raceControl({
+      category: 'Other',
+      flag: null as never,
+      message: 'INCIDENT INVOLVING CAR 5 (BOR) NOTED - VSC INFRINGEMENT',
+    }))).toBeNull();
+  });
+
+  it('accepts OpenF1-style VSC DEPLOYED messages from the SafetyCar category', () => {
+    expect(parseRaceControlMessageStatus(raceControl({
+      category: 'SafetyCar',
+      flag: null as never,
+      message: 'VSC DEPLOYED',
+    }))).toBe('VSC');
+  });
+
+  it('accepts OpenF1-style SAFETY CAR DEPLOYED messages from the SafetyCar category', () => {
+    expect(parseRaceControlMessageStatus(raceControl({
+      category: 'SafetyCar',
+      flag: null as never,
+      message: 'SAFETY CAR DEPLOYED',
+    }))).toBe('SC');
+  });
+
+  it('keeps localized sector yellows through Canadian GP-style lap 13-14 sequence', () => {
+    const sectors = new Set<number>();
+    const apply = (overrides: Partial<OpenF1RaceControl>) => {
+      const action = classifySectorFlag(raceControl(overrides));
+      if (action.kind === 'set') sectors.add(action.sector);
+      if (action.kind === 'clear') sectors.delete(action.sector);
+      if (action.kind === 'clearAll') sectors.clear();
+      return action;
+    };
+
+    apply({
+      date: '2026-05-24T20:25:42+00:00',
+      category: 'Flag',
+      flag: 'YELLOW',
+      scope: 'Sector',
+      sector: 11,
+      message: 'YELLOW IN TRACK SECTOR 11',
+    });
+    apply({
+      date: '2026-05-24T20:25:50+00:00',
+      category: 'Flag',
+      flag: 'YELLOW',
+      scope: 'Sector',
+      sector: 12,
+      message: 'YELLOW IN TRACK SECTOR 12',
+    });
+    expect([...sectors].sort()).toEqual([11, 12]);
+
+    apply({
+      date: '2026-05-24T20:25:43+00:00',
+      category: 'Other',
+      flag: null as never,
+      message: 'FIA STEWARDS: 5 SECOND TIME PENALTY FOR CAR 27 (HUL) - SPEEDING IN THE PIT LANE',
+    });
+    expect([...sectors].sort()).toEqual([11, 12]);
+
+    apply({
+      date: '2026-05-24T20:25:58+00:00',
+      category: 'Flag',
+      flag: 'CLEAR',
+      scope: 'Sector',
+      sector: 12,
+      message: 'CLEAR IN TRACK SECTOR 12',
+    });
+    expect([...sectors]).toEqual([11]);
+
+    apply({
+      date: '2026-05-24T20:27:45+00:00',
+      category: 'Flag',
+      flag: 'CLEAR',
+      scope: 'Sector',
+      sector: 11,
+      message: 'CLEAR IN TRACK SECTOR 11',
+    });
+    expect([...sectors]).toEqual([]);
   });
 });

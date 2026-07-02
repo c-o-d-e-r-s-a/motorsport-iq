@@ -1,32 +1,42 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSocketClient } from '@/lib/socket';
 import { SERVER_EVENTS, type LobbyState, type ServerErrorEvent } from '@/lib/types';
 import { Card, SectionLabel } from '@/components/ui';
 import { DEFAULT_SIMULATION_SESSION_KEY } from '@/lib/simulation';
+import { saveLobbySession } from '@/lib/sessionPersistence';
 
 export default function CanadianGpSimulationPage() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('Starting Canadian GP simulation…');
+  const startedRef = useRef(false);
 
   useEffect(() => {
     const socket = getSocketClient();
     socket.connect();
 
+    const startSimulation = () => {
+      if (startedRef.current) return;
+      startedRef.current = true;
+      const username = localStorage.getItem('msp_username') || 'Sim Driver';
+      socket.startSimulation({ username, sessionKey: DEFAULT_SIMULATION_SESSION_KEY });
+    };
+
     const unsubscribers = [
-      socket.on('connected', () => {
-        const username = localStorage.getItem('msp_username') || 'Sim Driver';
-        socket.startSimulation({ username, sessionKey: DEFAULT_SIMULATION_SESSION_KEY });
-      }),
+      socket.on('connected', startSimulation),
       socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
         const host = state.players.find((player) => player.isHost);
         if (host) {
-          localStorage.setItem('msp_user_id', host.id);
+          saveLobbySession({
+            userId: host.id,
+            username: host.username,
+            lobbyCode: state.code,
+            lobbyStatus: state.status === 'waiting' ? 'waiting' : 'active',
+          });
         }
-        localStorage.setItem('msp_username', host?.username ?? 'Sim Driver');
 
         if (state.status === 'active') {
           router.push(`/game/${state.code}`);
@@ -41,6 +51,10 @@ export default function CanadianGpSimulationPage() {
         setStatus('Connection failed');
       }),
     ];
+
+    if (socket.isConnected()) {
+      startSimulation();
+    }
 
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());

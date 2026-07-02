@@ -43,14 +43,18 @@ export default function QuestionCard({
 
   return (
     <div className="flex w-full flex-col">
+      {/* Entrance choreography (runs once per mount — parent keys by instanceId):
+          chip stamps down → question reads → answers land last. */}
       <div className="mb-4 flex items-center justify-between gap-3">
-        <Chip tone={CATEGORY_TONE[category]}>{CATEGORY_LABELS[category]}</Chip>
-        <span className="text-xs font-medium uppercase tracking-wide text-[var(--color-faint-fg)]">
+        <Chip tone={CATEGORY_TONE[category]} className="animate-stamp-in [animation-delay:180ms]">
+          {CATEGORY_LABELS[category]}
+        </Chip>
+        <span className="animate-fade-in delay-3 text-xs font-medium uppercase tracking-wide text-[var(--color-faint-fg)]">
           {DIFFICULTY_LABELS[difficulty]}
         </span>
       </div>
 
-      <h2 className="font-display text-[1.9rem] font-semibold leading-[1.08] tracking-tight text-[var(--color-fg)] sm:text-4xl">
+      <h2 className="animate-fade-up delay-1 font-display text-[1.9rem] font-semibold leading-[1.08] tracking-tight text-[var(--color-fg)] sm:text-4xl">
         {questionText}
       </h2>
 
@@ -58,16 +62,16 @@ export default function QuestionCard({
         <QuestionContextPanel context={questionContext} category={category} />
       )}
 
-      <div className="mt-7 grid grid-cols-2 gap-3">
+      <div className="animate-fade-up delay-4 mt-7 grid grid-cols-2 gap-3">
         <button
           type="button"
           onClick={() => onSubmit('YES')}
           disabled={locked}
           className={cn(
-            'flex h-[72px] items-center justify-center rounded-[var(--radius)] font-display text-2xl font-bold uppercase tracking-wide transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)] active:scale-[0.98]',
+            'flex h-[72px] items-center justify-center rounded-[var(--radius)] font-display text-2xl font-bold uppercase tracking-wide transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)] active:scale-[0.97]',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-go)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]',
             answered === 'YES'
-              ? 'bg-[var(--color-go)] text-[#04130b] shadow-[0_8px_30px_var(--color-go-soft)]'
+              ? 'animate-confirm bg-[var(--color-go)] text-[#04130b] shadow-[0_8px_30px_var(--color-go-soft)]'
               : answered === 'NO'
                 ? 'bg-[var(--color-muted)] text-[var(--color-faint-fg)] opacity-50'
                 : 'bg-[var(--color-go)] text-[#04130b] hover:brightness-110 disabled:opacity-60'
@@ -80,10 +84,10 @@ export default function QuestionCard({
           onClick={() => onSubmit('NO')}
           disabled={locked}
           className={cn(
-            'flex h-[72px] items-center justify-center rounded-[var(--radius)] font-display text-2xl font-bold uppercase tracking-wide transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)] active:scale-[0.98]',
+            'flex h-[72px] items-center justify-center rounded-[var(--radius)] font-display text-2xl font-bold uppercase tracking-wide transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)] active:scale-[0.97]',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]',
             answered === 'NO'
-              ? 'bg-[var(--color-accent)] text-white shadow-[var(--shadow-accent)]'
+              ? 'animate-confirm bg-[var(--color-accent)] text-white shadow-[var(--shadow-accent)]'
               : answered === 'YES'
                 ? 'bg-[var(--color-muted)] text-[var(--color-faint-fg)] opacity-50'
                 : 'border border-[var(--color-border-strong)] bg-[var(--color-elevated)] text-[var(--color-fg)] hover:border-[var(--color-accent)] disabled:opacity-60'
@@ -94,7 +98,7 @@ export default function QuestionCard({
       </div>
 
       {answered && (
-        <p className="mt-4 text-center text-sm text-[var(--color-muted-fg)]">
+        <p className="animate-fade-up mt-4 text-center text-sm text-[var(--color-muted-fg)]">
           Locked in: <span className="font-semibold text-[var(--color-fg)]">{answered}</span>
         </p>
       )}

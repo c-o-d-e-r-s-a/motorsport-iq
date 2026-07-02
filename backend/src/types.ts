@@ -313,6 +313,7 @@ export interface LobbyState {
   minQuestions: number;
   maxQuestions: number;
   leaderboard: LeaderboardEntryState[];
+  finalStandings: LeaderboardEntryState[] | null;
 }
 
 export interface PlayerState {
