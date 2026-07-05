@@ -17,6 +17,22 @@ const STATUS_CONFIG: Record<TrackStatus, { label: string; dot: string; text: str
   CHEQUERED: { label: 'Chequered', dot: 'var(--color-fg)', text: 'var(--color-fg)' },
 };
 
+function getHighlightClass(status: TrackStatus, highlighted: boolean): string {
+  if (!highlighted) {
+    return '';
+  }
+
+  if (status === 'GREEN') {
+    return 'ring-2 ring-[var(--color-go)] ring-offset-1 ring-offset-[var(--color-bg)]';
+  }
+
+  if (status === 'RED') {
+    return 'ring-2 ring-[var(--color-danger)] ring-offset-1 ring-offset-[var(--color-bg)]';
+  }
+
+  return 'ring-2 ring-[var(--color-warn)] ring-offset-1 ring-offset-[var(--color-bg)]';
+}
+
 export default function RaceConditionBadge({ status, highlighted = false }: RaceConditionBadgeProps) {
   const config = STATUS_CONFIG[status] ?? {
     label: `Unknown`,
@@ -29,7 +45,7 @@ export default function RaceConditionBadge({ status, highlighted = false }: Race
     <span
       className={cn(
         'inline-flex items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-pill)] border border-[var(--color-border)] bg-[var(--color-muted)] px-3 py-1 text-xs font-semibold uppercase tracking-wide',
-        highlighted && 'ring-2 ring-[var(--color-accent)] ring-offset-1 ring-offset-[var(--color-bg)]'
+        getHighlightClass(status, highlighted)
       )}
       style={{ color: config.text }}
     >

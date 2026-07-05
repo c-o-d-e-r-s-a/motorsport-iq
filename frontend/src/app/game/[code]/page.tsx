@@ -49,7 +49,7 @@ import {
   type ServerErrorEvent,
   type StatHintKey,
 } from '@/lib/types';
-import { ANSWER_WINDOW_MS, resolveAnswerDeadline } from '@/lib/answerWindow';
+import { ANSWER_WINDOW_MS, POST_RESOLUTION_DISPLAY_MS, resolveAnswerDeadline } from '@/lib/answerWindow';
 import { hasQuestionAlertHandled, markQuestionAlertHandled } from '@/lib/questionAlerts';
 import {
   clearInactiveKickRestore,
@@ -160,6 +160,10 @@ export default function GamePage() {
   const currentQuestionRef = useRef<QuestionEvent | null>(null);
   const questionStateRef = useRef<QuestionState | null>(null);
   const resolutionRef = useRef<ResolutionEvent | null>(null);
+  const pendingQuestionRef = useRef<QuestionEvent | null>(null);
+  const resolutionHoldUntilRef = useRef(0);
+  const videoMemePlayingRef = useRef(false);
+  const resolutionHoldTimerRef = useRef<number | null>(null);
   const submittedAnswersRef = useRef<Record<string, 'YES' | 'NO'>>(
     typeof window === 'undefined' ? {} : getSubmittedAnswers()
   );
@@ -246,6 +250,77 @@ export default function GamePage() {
   useEffect(() => {
     joinUsernameRef.current = joinUsername;
   }, [joinUsername]);
+
+  const clearResolutionHoldTimer = useCallback(() => {
+    if (resolutionHoldTimerRef.current !== null) {
+      window.clearTimeout(resolutionHoldTimerRef.current);
+      resolutionHoldTimerRef.current = null;
+    }
+  }, []);
+
+  const applyIncomingQuestion = useEffectEvent((event: QuestionEvent) => {
+    acknowledgedAnswerIds.current.delete(event.instanceId);
+    setCurrentQuestion({
+      ...event,
+      answerDeadline: event.answerDeadline,
+    });
+    setQuestionState(event.state);
+    if (event.category === 'FINISH_POSITION') {
+      setFinalStretchSeen(true);
+    }
+    if (resolutionRef.current?.instanceId !== event.instanceId) {
+      setResolution(null);
+      setActiveMeme(null);
+      videoMemePlayingRef.current = false;
+      resolutionHoldUntilRef.current = 0;
+      clearResolutionHoldTimer();
+    }
+    setIsProcessingAnswer(false);
+    setSuggestedStatKeys(event.suggestedStatKeys ?? []);
+    setIsReportFormOpen(false);
+    setIsSubmittingReport(false);
+    setReportSuccess(false);
+    setReportError(null);
+    setReportNote('');
+    setReportReason('WRONG_ANSWER');
+    setLateJoinMidQuestion(false);
+
+    if (hasQuestionAlertHandled(event.instanceId)) {
+      return;
+    }
+
+    const isForeground = document.visibilityState === 'visible' && document.hasFocus();
+    if (isForeground) {
+      markQuestionAlertHandled(event.instanceId);
+      playSound();
+    }
+  });
+
+  const tryReleasePendingQuestion = useEffectEvent(() => {
+    if (Date.now() < resolutionHoldUntilRef.current) {
+      return;
+    }
+    if (videoMemePlayingRef.current) {
+      return;
+    }
+
+    const pending = pendingQuestionRef.current;
+    if (!pending) {
+      return;
+    }
+
+    pendingQuestionRef.current = null;
+    applyIncomingQuestion(pending);
+  });
+
+  const beginResolutionHold = useEffectEvent(() => {
+    clearResolutionHoldTimer();
+    resolutionHoldUntilRef.current = Date.now() + POST_RESOLUTION_DISPLAY_MS;
+    resolutionHoldTimerRef.current = window.setTimeout(() => {
+      resolutionHoldTimerRef.current = null;
+      tryReleasePendingQuestion();
+    }, POST_RESOLUTION_DISPLAY_MS + 50);
+  });
 
   const hydrateQuestionFromLobby = useEffectEvent((state: LobbyState) => {
     const question = state.currentQuestion;
@@ -569,43 +644,15 @@ export default function GamePage() {
         }
       }),
       socket.on(SERVER_EVENTS.QUESTION_EVENT, (event: QuestionEvent) => {
-        acknowledgedAnswerIds.current.delete(event.instanceId);
-        setCurrentQuestion({
-          ...event,
-          answerDeadline: event.answerDeadline,
-        });
-        setQuestionState(event.state);
-        if (event.category === 'FINISH_POSITION') {
-          setFinalStretchSeen(true);
-        }
-        // Only clear a prior resolution when a genuinely new question arrives.
-        if (resolutionRef.current?.instanceId !== event.instanceId) {
-          setResolution(null);
-          setActiveMeme(null);
-        }
-        setIsProcessingAnswer(false);
-        setSuggestedStatKeys(event.suggestedStatKeys ?? []);
-        setIsReportFormOpen(false);
-        setIsSubmittingReport(false);
-        setReportSuccess(false);
-        setReportError(null);
-        setReportNote('');
-        setReportReason('WRONG_ANSWER');
-        // New question arrived — this one they see from the start, clear late-join gate
-        setLateJoinMidQuestion(false);
-
-        // Guard against playing the sound twice: reconnect catch-up re-sends
-        // question_event for the already-active question, but the user already
-        // heard it the first time (or saw it hydrated from lobby_state).
-        if (hasQuestionAlertHandled(event.instanceId)) {
+        if (
+          resolutionRef.current
+          && (Date.now() < resolutionHoldUntilRef.current || videoMemePlayingRef.current)
+        ) {
+          pendingQuestionRef.current = event;
           return;
         }
 
-        const isForeground = document.visibilityState === 'visible' && document.hasFocus();
-        if (isForeground) {
-          markQuestionAlertHandled(event.instanceId);
-          playSound();
-        }
+        applyIncomingQuestion(event);
       }),
       socket.on(
         SERVER_EVENTS.QUESTION_STATE,
@@ -711,9 +758,13 @@ export default function GamePage() {
         if (memeFile) {
           const folder = answeredCorrectly ? 'CorrectAnswerMemes' : 'WrongAnswerMemes';
           setActiveMeme({ file: memeFile, folder });
+          if (isVideoMemeFile(memeFile)) {
+            videoMemePlayingRef.current = true;
+          }
         } else {
           setActiveMeme(null);
         }
+        beginResolutionHold();
 
         // Skip outcome SFX when an unmuted video meme will carry the audio.
         const skipOutcomeSound = Boolean(
@@ -786,7 +837,7 @@ export default function GamePage() {
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [applySubmittedAnswers, beginLobbyEntry, getNextMeme, lobbyCode, playCorrectSound, playSound, playWrongSound, recordStoryEntry, router]);
+  }, [applyIncomingQuestion, applySubmittedAnswers, beginLobbyEntry, beginResolutionHold, clearResolutionHoldTimer, getNextMeme, lobbyCode, playCorrectSound, playSound, playWrongSound, recordStoryEntry, router, tryReleasePendingQuestion]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -1019,8 +1070,15 @@ export default function GamePage() {
   }, [joinUsername, lobbyCode]);
 
   useEffect(() => {
+    return () => {
+      clearResolutionHoldTimer();
+    };
+  }, [clearResolutionHoldTimer]);
+
+  useEffect(() => {
     if (!resolution) {
       setActiveMeme(null);
+      videoMemePlayingRef.current = false;
     }
   }, [resolution]);
 
@@ -1285,6 +1343,13 @@ export default function GamePage() {
                             preload="auto"
                             onLoadedData={(event) => {
                               void event.currentTarget.play().catch(() => {});
+                            }}
+                            onPlay={() => {
+                              videoMemePlayingRef.current = true;
+                            }}
+                            onEnded={() => {
+                              videoMemePlayingRef.current = false;
+                              tryReleasePendingQuestion();
                             }}
                             className="w-full rounded-[var(--radius-sm)]"
                           />
