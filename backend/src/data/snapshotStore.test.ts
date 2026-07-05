@@ -432,6 +432,42 @@ describe('SnapshotStore race control updates', () => {
     expect(onSnapshotUpdate).toHaveBeenCalledTimes(1);
   });
 
+  it('holds the last valid live P2 gap when timing updates omit gap_to_leader', async () => {
+    jest.useFakeTimers();
+    const client = {
+      getDrivers: jest.fn(async () => [
+        createDriver({ driver_number: 1, full_name: 'Leader', broadcast_name: 'ONE' }),
+        createDriver({ driver_number: 2, full_name: 'Chaser', broadcast_name: 'TWO' }),
+      ]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+
+    store.processPositionUpdate([
+      createPosition({ driver_number: 1, position: 1, date: '2025-09-01T13:05:00Z' }),
+      createPosition({ driver_number: 2, position: 2, date: '2025-09-01T13:05:00Z' }),
+    ]);
+    store.processIntervalUpdate([
+      createInterval({ driver_number: 1, gap_to_leader: 0, date: '2025-09-01T13:05:00Z' }),
+      createInterval({ driver_number: 2, gap_to_leader: 1.8, date: '2025-09-01T13:05:00Z' }),
+    ]);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    const p2WithGap = store.getCurrentSnapshot()?.drivers.find((driver) => driver.position === 2);
+    expect(p2WithGap?.gap).toBe(1.8);
+
+    store.processIntervalUpdate([
+      createInterval({ driver_number: 2, gap_to_leader: null, date: '2025-09-01T13:06:00Z' }),
+    ]);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    const p2AfterStaleUpdate = store.getCurrentSnapshot()?.drivers.find((driver) => driver.position === 2);
+    expect(p2AfterStaleUpdate?.gap).toBe(1.8);
+    jest.useRealTimers();
+  });
+
   it('keeps the previous known leader when incoming position telemetry is 0', async () => {
     const client = {
       getDrivers: jest.fn(async () => [

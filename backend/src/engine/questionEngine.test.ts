@@ -621,7 +621,7 @@ describe('questionEngine — repetition, final stretch, and closing-lap rules', 
     const result = selectQuestionWithMeta(snapshot, previous, lobbyId, null, 6);
     expect(result.instance).not.toBeNull();
     expect(getQuestionById(result.instance!.questionId)?.category).toBe('FINISH_POSITION');
-    // Window is sized so it resolves exactly on the final lap, before the winner screen.
+    // Window spans the remaining laps; resolution waits until after the final lap completes.
     expect(result.instance!.targetLap).toBe(totalLaps);
 
     // Once the final-stretch question is asked, no further question may appear.

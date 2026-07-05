@@ -2,6 +2,23 @@ import type { RaceSnapshot, QuestionInstanceState } from '../types';
 import { getQuestionById } from './questionBank';
 import { getDriverByNumber } from './derivedSignals';
 
+function isFinishPositionQuestion(questionId: string): boolean {
+  return getQuestionById(questionId)?.category === 'FINISH_POSITION';
+}
+
+function hasFinalLapCompleted(snapshot: RaceSnapshot): boolean {
+  if (snapshot.trackStatus === 'CHEQUERED') {
+    return true;
+  }
+
+  if (!snapshot.totalLaps) {
+    return false;
+  }
+
+  // Live/replay feeds advance lapNumber to totalLaps + 1 once the final lap completes.
+  return snapshot.lapNumber > snapshot.totalLaps;
+}
+
 export interface ResolutionResult {
   instanceId: string;
   outcome: boolean;
@@ -27,7 +44,11 @@ export function shouldResolve(
   }
 
   // Check if we've reached the target lap
-  if (currentSnapshot.lapNumber >= instance.targetLap) {
+  if (isFinishPositionQuestion(instance.questionId)) {
+    if (hasFinalLapCompleted(currentSnapshot)) {
+      return true;
+    }
+  } else if (currentSnapshot.lapNumber >= instance.targetLap) {
     return true;
   }
 

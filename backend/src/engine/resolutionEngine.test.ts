@@ -92,3 +92,55 @@ describe('resolutionEngine — retired driver hard rule', () => {
     expect(result.explanation).not.toContain('out of the race');
   });
 });
+
+describe('resolutionEngine — final stretch timing', () => {
+  it('does not resolve a finish-position question when the final lap begins', () => {
+    const triggerDriver = createDriver({ position: 2, interval: 1.2 });
+    const rival = createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null });
+    const instance = createInstance(triggerDriver, {
+      questionId: 'FIN_AHEAD_OF_RIVAL',
+      targetLap: 30,
+      driver2: rival,
+    });
+
+    const finalLapStart = createSnapshot(
+      [rival, triggerDriver],
+      { lapNumber: 30, totalLaps: 30, trackStatus: 'GREEN' }
+    );
+
+    expect(shouldResolve(instance, finalLapStart)).toBe(false);
+  });
+
+  it('resolves a finish-position question after the final lap completes', () => {
+    const triggerDriver = createDriver({ position: 2, interval: 1.2 });
+    const rival = createDriver({ driverNumber: 44, name: 'Leader', position: 1, gap: 0, interval: null });
+    const instance = createInstance(triggerDriver, {
+      questionId: 'FIN_AHEAD_OF_RIVAL',
+      targetLap: 30,
+      driver2: rival,
+    });
+
+    const afterFinalLap = createSnapshot(
+      [rival, triggerDriver],
+      { lapNumber: 31, totalLaps: 30, trackStatus: 'GREEN' }
+    );
+
+    expect(shouldResolve(instance, afterFinalLap)).toBe(true);
+  });
+
+  it('resolves a finish-position question on the chequered flag', () => {
+    const triggerDriver = createDriver({ position: 2, interval: 1.2 });
+    const instance = createInstance(triggerDriver, {
+      questionId: 'FIN_AHEAD_OF_RIVAL',
+      targetLap: 30,
+    });
+
+    const chequered = createSnapshot([createDriver({ position: 1 })], {
+      lapNumber: 30,
+      totalLaps: 30,
+      trackStatus: 'CHEQUERED',
+    });
+
+    expect(shouldResolve(instance, chequered)).toBe(true);
+  });
+});

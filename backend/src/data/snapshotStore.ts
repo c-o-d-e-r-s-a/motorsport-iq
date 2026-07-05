@@ -117,6 +117,8 @@ export class SnapshotStore {
   private lastRaceControlStatusTime = 0;
   /** Replay-only SC/VSC state machine + telemetry corroboration. */
   private replayTrackStatus: ReplayTrackStatusController | null = null;
+  /** Live-only: last valid P2 gap-to-leader so HUD does not flicker to "—" between timing updates. */
+  private lastValidP2Gap: number | null = null;
 
   constructor(client: OpenF1Client, options: SnapshotStoreOptions = {}) {
     this.client = client;
@@ -148,6 +150,7 @@ export class SnapshotStore {
     this.globalYellowActive = false;
     this.raceControlHistory = [];
     this.lastRaceControlStatusTime = 0;
+    this.lastValidP2Gap = null;
     this.sessionMode = config?.sessionMode ?? 'live';
     this.replayTrackStatus = this.sessionMode === 'replay' ? new ReplayTrackStatusController() : null;
     this.openF1LapNumbering = config?.openF1LapNumbering ?? false;
@@ -727,6 +730,17 @@ export class SnapshotStore {
           `[SnapshotStore] Missing compound for leader #${driverNumber} at lap ${this.lapNumber} ` +
           `(stints=${data.stints.length}, latestCompound=${data.latestCompound ?? 'null'})`
         );
+      }
+    }
+
+    if (this.sessionMode === 'live') {
+      const p2Driver = driverStates.find((driver) => driver.position === 2 && !driver.retired);
+      if (p2Driver) {
+        if (p2Driver.gap !== null && Number.isFinite(p2Driver.gap)) {
+          this.lastValidP2Gap = p2Driver.gap;
+        } else if (this.lastValidP2Gap !== null) {
+          p2Driver.gap = this.lastValidP2Gap;
+        }
       }
     }
 

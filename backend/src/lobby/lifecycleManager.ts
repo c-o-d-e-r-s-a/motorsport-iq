@@ -4,7 +4,7 @@ import type { QuestionInstance, Answer } from '../db/types';
 import supabase from '../db/supabaseClient';
 import { clearCurrentQuestionIfInstance, getLobbyState, setCurrentQuestion, incrementQuestionCount, updateLeaderboardCache } from './lobbyManager';
 import { resolveQuestion, shouldCancel, shouldPause, shouldResume, shouldResolve } from '../engine/resolutionEngine';
-import { recordResolution } from '../engine/questionEngine';
+import { recordResolution, markPostResolutionDisplayWindow } from '../engine/questionEngine';
 import { calculateScore, dedupeAnswersByUser, updateLeaderboardEntry } from '../engine/scoringEngine';
 import { getQuestionById } from '../engine/questionBank';
 import { generateResolutionExplanation } from '../ai/explanationGenerator';
@@ -13,6 +13,7 @@ import { FF_BATCH_SCORING } from '../runtime/featureFlags';
 import { trackDbQuery, trackDbWrite } from '../observability/dbMetrics';
 import {
   ANSWER_WINDOW_MS,
+  POST_RESOLUTION_DISPLAY_MS,
   TRIGGER_TO_LIVE_MS,
   computeLiveAnswerDeadlineFromTrigger,
   resolveLiveAnswerDeadline,
@@ -36,7 +37,7 @@ import {
  */
 
 // Timers — re-exported via answerWindow.ts for tests and reconnect fallbacks
-const EXPLANATION_DURATION_MS = 10000; // 10 seconds to show explanation
+const EXPLANATION_DURATION_MS = POST_RESOLUTION_DISPLAY_MS;
 
 // Active timers tracking
 const questionTimers: Map<string, NodeJS.Timeout> = new Map();
@@ -396,6 +397,7 @@ async function resolveQuestionInstance(
   instance.resolvedAt = new Date();
   if (question) {
     recordResolution(instance.lobbyId, question.category, currentSnapshot.lapNumber);
+    markPostResolutionDisplayWindow(instance.lobbyId);
   }
 
   // Update database
@@ -411,21 +413,20 @@ async function resolveQuestionInstance(
   // Process answers and update scores
   await processAnswers(instance, result.correctAnswer);
 
-  // RESOLVED -> EXPLAINED -> CLOSED (after delay)
+  // Broadcast resolution immediately so clients can show the answer and meme.
+  onResolution({
+    instance: { ...instance },
+    outcome: result.outcome,
+    correctAnswer: result.correctAnswer,
+    explanation,
+  });
+
+  // RESOLVED -> EXPLAINED -> CLOSED (after the post-resolution display window)
   scheduleLobbyTimer(instance.lobbyId, async () => {
     instance.state = 'EXPLAINED';
     await updateQuestionState(instance.id, 'EXPLAINED');
     onStateChange({ ...instance });
 
-    // Call resolution callback
-    onResolution({
-      instance: { ...instance },
-      outcome: result.outcome,
-      correctAnswer: result.correctAnswer,
-      explanation,
-    });
-
-    // EXPLAINED -> CLOSED
     scheduleLobbyTimer(instance.lobbyId, async () => {
       instance.state = 'CLOSED';
       await updateQuestionState(instance.id, 'CLOSED');
@@ -439,7 +440,7 @@ async function resolveQuestionInstance(
       pausedQuestions.delete(instance.lobbyId);
       clearCurrentQuestionIfInstance(instance.lobbyId, instance.id);
     }, EXPLANATION_DURATION_MS);
-  }, 1000);
+  }, 0);
 }
 
 /**

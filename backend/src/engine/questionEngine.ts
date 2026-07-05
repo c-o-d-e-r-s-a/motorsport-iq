@@ -1,5 +1,6 @@
 import type { RaceSnapshot, DriverState, Question, QuestionInstanceState, DerivedSignals, QuestionCategory } from '../types';
 import { buildQuestionContext } from '../lobby/questionPayload';
+import { POST_RESOLUTION_DISPLAY_MS } from '../lobby/answerWindow';
 import { QUESTION_BANK } from './questionBank';
 import { calculateDerivedSignals, type SignalOverrides } from './derivedSignals';
 import { isRaceNeutralized } from '../data/raceStatus';
@@ -111,6 +112,7 @@ const FINAL_STRETCH_LAST_LAPS = 3;
 type LobbyGuardState = {
   lastCategory: QuestionCategory | null;
   lastResolvedLap: number | null;
+  lastResolvedAt: Date | null;
   restartCooldownUntilLap: number | null;
   /** `${questionId}:${driver1Number}` for every question already asked — prevents repeats. */
   askedDriverQuestionKeys: Set<string>;
@@ -135,6 +137,7 @@ function getLobbyGuardState(lobbyId: string): LobbyGuardState {
   const created: LobbyGuardState = {
     lastCategory: null,
     lastResolvedLap: null,
+    lastResolvedAt: null,
     restartCooldownUntilLap: null,
     askedDriverQuestionKeys: new Set<string>(),
     categoryCounts: createCategoryCounts(),
@@ -337,6 +340,11 @@ export function recordResolution(lobbyId: string, category: QuestionCategory, la
   state.lastResolvedLap = lapNumber;
 }
 
+/** Starts the wall-clock display window that blocks the next question trigger. */
+export function markPostResolutionDisplayWindow(lobbyId: string): void {
+  getLobbyGuardState(lobbyId).lastResolvedAt = new Date();
+}
+
 export function checkGlobalEligibility(
   snapshot: RaceSnapshot,
   activeQuestion: QuestionInstanceState | null,
@@ -377,6 +385,13 @@ export function checkGlobalEligibility(
 
   if (state.lastResolvedLap !== null && snapshot.lapNumber - state.lastResolvedLap < postResolutionCooldown) {
     return { eligible: false, reason: 'Post-resolution cooldown active' };
+  }
+
+  if (state.lastResolvedAt !== null) {
+    const elapsedMs = Date.now() - state.lastResolvedAt.getTime();
+    if (elapsedMs < POST_RESOLUTION_DISPLAY_MS) {
+      return { eligible: false, reason: 'Post-resolution display window active' };
+    }
   }
 
   if (snapshot.totalLaps && snapshot.lapNumber >= snapshot.totalLaps) {
@@ -957,7 +972,7 @@ function getLapsRemaining(snapshot: RaceSnapshot): number | null {
 
 /**
  * Build the single, guaranteed end-of-race "Final Stretch" question. Its window
- * is sized so it resolves exactly on the final lap (before the winner screen),
+ * is sized so it resolves after the final lap completes (before the winner screen),
  * and it avoids any driver+question combo already used this race.
  */
 function buildFinalStretchInstance(
