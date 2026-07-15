@@ -44,6 +44,7 @@ const ENTRY_FLASH_MS = 2200;
 export default function TimingTower({ snapshot, className }: TimingTowerProps) {
   const reduced = useReducedMotion();
   const topThree = snapshot?.topThree ?? [];
+  const topThreePositions = snapshot?.topThreePositions ?? [];
 
   // Flash drivers that just broke into the top 3.
   const prevNamesRef = useRef<Set<string>>(new Set());
@@ -96,7 +97,7 @@ export default function TimingTower({ snapshot, className }: TimingTowerProps) {
         <ol className="mt-3 space-y-1">
           <AnimatePresence initial={false}>
             {topThree.slice(0, 3).map((name, index) => {
-              const position = index + 1;
+              const position = topThreePositions[index] ?? index + 1;
               const isLeader = position === 1;
               const arriving = flashNames.has(name);
               return (

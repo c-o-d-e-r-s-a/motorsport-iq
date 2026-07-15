@@ -33,7 +33,14 @@ export default function RaceHud({
   const badgeStatus = snapshot
     ? getBadgeTrackStatus(snapshot.trackStatus)
     : 'GREEN';
-  const showSectorYellow = !hasCompleted && yellowSectors.length > 0;
+  // Yellow is an informational overlay only. It accompanies the green flag,
+  // but must never compete with an SC/VSC/red-flag race-control state.
+  const showYellowCaution = !hasCompleted
+    && badgeStatus === 'GREEN'
+    && (yellowSectors.length > 0 || Boolean(snapshot?.globalYellowActive));
+  const yellowLabel = yellowSectors.length > 0
+    ? `Sector ${yellowSectors.length > 1 ? 'Yellows' : 'Yellow'} ${yellowSectors.join(', ')}`
+    : 'Yellow Flag';
 
   return (
     <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -56,12 +63,12 @@ export default function RaceHud({
             <RaceConditionBadge status={badgeStatus} highlighted={highlightTrackStatus} />
           )}
 
-          {showSectorYellow && (
-            <Chip tone="warn" title={`Localized yellow flag in sector ${yellowSectors.join(', ')}`}>
+          {showYellowCaution && (
+            <Chip tone="warn" title={yellowSectors.length > 0
+              ? `Localized yellow flag in sector ${yellowSectors.join(', ')}`
+              : 'Track-wide yellow flag'}>
               <span className="animate-flash">🟡</span>
-              <span className="font-semibold">
-                Sector {yellowSectors.length > 1 ? 'Yellows' : 'Yellow'} {yellowSectors.join(', ')}
-              </span>
+              <span className="font-semibold">{yellowLabel}</span>
             </Chip>
           )}
 

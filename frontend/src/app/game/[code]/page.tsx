@@ -211,17 +211,14 @@ export default function GamePage() {
     const normalizedCode = lobbyCode.toUpperCase();
 
     if (storedSession && storedSession.lobbyCode.toUpperCase() === normalizedCode) {
-      // Bypass the SocketClient-level dedupe so React Strict Mode's double-invoke
-      // (and any other legitimate remount) always re-sends reconnect_lobby.
-      // SessionResume keeps its own 1.5 s + 2 s guards to prevent rapid-fire duplicates.
-      socket.reconnectLobby(storedSession.userId, { dedupeWindowMs: 0 });
+      socket.reconnectLobby(storedSession.userId);
       return;
     }
 
     // Partial session from flows that only saved userId (e.g. older simulation launcher).
     const orphanUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
     if (orphanUserId) {
-      socket.reconnectLobby(orphanUserId, { dedupeWindowMs: 0 });
+      socket.reconnectLobby(orphanUserId);
       return;
     }
 
@@ -412,7 +409,7 @@ export default function GamePage() {
       if (existingUserId) {
         setError(null);
         setIsJoining(true);
-        getSocketClient().reconnectLobby(existingUserId, { dedupeWindowMs: 0 });
+        getSocketClient().reconnectLobby(existingUserId);
         return;
       }
     }

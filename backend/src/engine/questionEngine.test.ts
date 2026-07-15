@@ -111,6 +111,33 @@ describe('questionEngine MVP guardrails', () => {
     expect(selectQuestion(snapshot, previous, lobbyId, null, 0)).not.toBeNull();
   });
 
+  it('never selects a transient P0 driver from a live timing update', () => {
+    const drivers = [
+      createDriver({
+        driverNumber: 44,
+        name: 'Leader',
+        position: 1,
+        gap: 0,
+        interval: null,
+        tyreAge: 4,
+        pitCount: 2,
+      }),
+      createDriver({
+        driverNumber: 18,
+        name: 'Lance Stroll',
+        position: 0,
+        gap: 38,
+        interval: 0.1,
+        tyreAge: 28,
+        pitCount: 0,
+      }),
+    ];
+    const snapshot = createSnapshot({ drivers });
+    const previous = createSnapshot({ lapNumber: 9, drivers });
+
+    expect(selectQuestion(snapshot, previous, lobbyId, null, 0)).toBeNull();
+  });
+
   it('does not apply restart cooldown after display-only yellow clears', () => {
     const afterYellow = createSnapshot({ lapNumber: 12, trackStatus: 'GREEN', globalYellowActive: false });
     const duringYellow = createSnapshot({ lapNumber: 11, trackStatus: 'GREEN', globalYellowActive: true });

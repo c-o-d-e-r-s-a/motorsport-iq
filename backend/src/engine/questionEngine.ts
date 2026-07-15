@@ -172,7 +172,12 @@ function getDriverAhead(snapshot: RaceSnapshot, driver1: DriverState): DriverSta
     return null;
   }
 
-  return snapshot.drivers.find((driver) => driver.position === driver1.position - 1) ?? null;
+  return snapshot.drivers.find((driver) => (
+    driver.position === driver1.position - 1
+    && driver.position > 0
+    && !driver.retired
+    && !driver.inPit
+  )) ?? null;
 }
 
 function getRaceProgress(snapshot: RaceSnapshot): number {
@@ -546,7 +551,12 @@ export function evaluateAllTriggers(
     return candidates;
   }
 
-  const drivers = snapshot.drivers.filter((driver) => !driver.retired && !driver.inPit);
+  // A live timing line can briefly use P0 while a car is in the pits or its
+  // classification delta is incomplete. P0 is not a race position: never let
+  // it create a question, score as a top-10 runner, or become a fallback pick.
+  const drivers = snapshot.drivers.filter(
+    (driver) => driver.position > 0 && !driver.retired && !driver.inPit
+  );
   const triggers = relaxTriggersForTier(question, tier);
 
   for (const driver1 of drivers) {

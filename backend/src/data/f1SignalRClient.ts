@@ -388,6 +388,9 @@ export class F1SignalRClient {
       case 'Position':
         this.handlePositionData(decompressed);
         break;
+      case 'TopThree':
+        this.handleTopThree(decompressed);
+        break;
       case 'TimingData':
         this.handleTimingData(decompressed);
         break;
@@ -443,6 +446,7 @@ export class F1SignalRClient {
         date: timestamp,
         meeting_key: 0,
         session_key: 0,
+        source: 'position_z' as const,
       };
     });
 
@@ -464,16 +468,20 @@ export class F1SignalRClient {
       const driverNumber = parseInt(driverNumberStr, 10);
       if (!Number.isFinite(driverNumber)) return;
 
-      const positionRaw = lineData.Position ?? lineData.Line;
-      const position = parseInt(String(positionRaw ?? ''), 10);
-      if (Number.isFinite(position) && position > 0) {
-        positions.push({
-          driver_number: driverNumber,
-          position,
-          date: timestamp,
-          meeting_key: 0,
-          session_key: 0,
-        });
+      // Delta updates only include changed fields — emit position only when the
+      // feed explicitly sends Position. Never fall back to Line (grid/pit-lane slot).
+      if (Object.prototype.hasOwnProperty.call(lineData, 'Position')) {
+        const position = parseInt(String(lineData.Position ?? ''), 10);
+        if (Number.isFinite(position) && position >= 0) {
+          positions.push({
+            driver_number: driverNumber,
+            position,
+            date: timestamp,
+            meeting_key: 0,
+            session_key: 0,
+            source: 'timing_data',
+          });
+        }
       }
 
       intervals.push({
@@ -532,7 +540,7 @@ export class F1SignalRClient {
       }
     });
 
-    if (positions.length > 0 || maxLap > 0) {
+    if (maxLap > 0) {
       this.options.onTimingProgress?.(completedLapsToCurrentLap(maxLap));
     }
 
@@ -541,6 +549,54 @@ export class F1SignalRClient {
     }
     if (intervals.length > 0) {
       this.options.onIntervalUpdate?.(intervals);
+    }
+  }
+
+  private handleTopThree(data: any): void {
+    const lines = data?.Lines;
+    if (!lines) return;
+
+    const timestamp = new Date().toISOString();
+    const positions: OpenF1Position[] = [];
+
+    const pushTopThreeEntry = (
+      positionKey: string,
+      line: Record<string, unknown>
+    ): void => {
+      const racingNumber = parseInt(
+        String(line.RacingNumber ?? line.racingNumber ?? ''),
+        10
+      );
+      const position = parseInt(String(line.Position ?? positionKey), 10);
+      if (!Number.isFinite(racingNumber) || !Number.isFinite(position) || position <= 0) {
+        return;
+      }
+
+      positions.push({
+        driver_number: racingNumber,
+        position,
+        date: timestamp,
+        meeting_key: 0,
+        session_key: 0,
+        source: 'top_three',
+      });
+    };
+
+    if (Array.isArray(lines)) {
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        if (!line || typeof line !== 'object') continue;
+        pushTopThreeEntry(String(index + 1), line as Record<string, unknown>);
+      }
+    } else if (typeof lines === 'object') {
+      for (const [positionKey, line] of Object.entries(lines as Record<string, Record<string, unknown>>)) {
+        if (!line || typeof line !== 'object') continue;
+        pushTopThreeEntry(positionKey, line);
+      }
+    }
+
+    if (positions.length > 0) {
+      this.options.onPositionUpdate?.(positions);
     }
   }
 

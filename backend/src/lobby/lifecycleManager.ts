@@ -49,6 +49,7 @@ const activeQuestions: Map<string, QuestionInstanceState> = new Map();
 
 // Paused questions (SC/VSC)
 const pausedQuestions: Map<string, QuestionInstanceState> = new Map();
+/** Score de-duplication only needs to live through an instance's lifecycle. */
 const scoredQuestionInstances: Set<string> = new Set();
 const UNRESOLVED_STATES = new Set(['TRIGGERED', 'LIVE', 'LOCKED', 'ACTIVE']);
 /** Block new triggers until the explanation window finishes (not only while lap-active). */
@@ -439,6 +440,9 @@ async function resolveQuestionInstance(
       }
       pausedQuestions.delete(instance.lobbyId);
       clearCurrentQuestionIfInstance(instance.lobbyId, instance.id);
+      // The instance is terminal and persisted, so keeping this UUID would only
+      // grow the in-memory de-duplication set across completed races.
+      scoredQuestionInstances.delete(instance.id);
     }, EXPLANATION_DURATION_MS);
   }, 0);
 }
@@ -742,6 +746,7 @@ export function clearLobbyLifecycle(lobbyId: string): void {
       questionTimers.delete(instance.id);
     }
     answerDeadlines.delete(instance.id);
+    scoredQuestionInstances.delete(instance.id);
   }
 
   activeQuestions.delete(lobbyId);
@@ -811,4 +816,5 @@ export function clearAllTimers(): void {
   answerDeadlines.clear();
   activeQuestions.clear();
   pausedQuestions.clear();
+  scoredQuestionInstances.clear();
 }

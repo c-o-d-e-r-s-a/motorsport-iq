@@ -128,7 +128,7 @@ export default function LobbyPage() {
     const normalizedCode = lobbyCode.toUpperCase();
 
     if (storedSession && storedSession.lobbyCode.toUpperCase() === normalizedCode) {
-      socket.reconnectLobby(storedSession.userId, { dedupeWindowMs: 0 });
+      socket.reconnectLobby(storedSession.userId);
       return;
     }
 

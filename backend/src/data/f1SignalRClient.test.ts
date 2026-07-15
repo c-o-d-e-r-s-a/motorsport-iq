@@ -81,3 +81,69 @@ describe('F1SignalRClient track status parsing', () => {
     expect(statuses).toEqual([]);
   });
 });
+
+describe('F1SignalRClient position parsing', () => {
+  it('does not treat TimingData Line as race position', () => {
+    const positions: Array<{ driver_number: number; position: number }> = [];
+    const client = new F1SignalRClient({
+      onPositionUpdate: (updates) => positions.push(...updates),
+    });
+
+    (client as unknown as { handleTimingData(data: unknown): void }).handleTimingData({
+      Lines: {
+        '18': {
+          Line: 1,
+          GapToLeader: 'LEADER',
+        },
+      },
+    });
+
+    expect(positions).toEqual([]);
+  });
+
+  it('maps explicit TimingData Position fields into position updates', () => {
+    const positions: Array<{ driver_number: number; position: number; source?: string }> = [];
+    const client = new F1SignalRClient({
+      onPositionUpdate: (updates) => positions.push(...updates),
+    });
+
+    (client as unknown as { handleTimingData(data: unknown): void }).handleTimingData({
+      Lines: {
+        '16': { Position: '1', GapToLeader: 'LEADER' },
+        '18': { Line: 1, GapToLeader: '+2.5' },
+      },
+    });
+
+    expect(positions).toEqual([
+      {
+        driver_number: 16,
+        position: 1,
+        source: 'timing_data',
+        date: expect.any(String),
+        meeting_key: 0,
+        session_key: 0,
+      },
+    ]);
+  });
+
+  it('maps TopThree classification into position updates', () => {
+    const positions: Array<{ driver_number: number; position: number; source?: string }> = [];
+    const client = new F1SignalRClient({
+      onPositionUpdate: (updates) => positions.push(...updates),
+    });
+
+    (client as unknown as { handleTopThree(data: unknown): void }).handleTopThree({
+      Lines: {
+        '1': { RacingNumber: '16' },
+        '2': { RacingNumber: '12' },
+        '3': { RacingNumber: '44' },
+      },
+    });
+
+    expect(positions).toEqual([
+      { driver_number: 16, position: 1, source: 'top_three', date: expect.any(String), meeting_key: 0, session_key: 0 },
+      { driver_number: 12, position: 2, source: 'top_three', date: expect.any(String), meeting_key: 0, session_key: 0 },
+      { driver_number: 44, position: 3, source: 'top_three', date: expect.any(String), meeting_key: 0, session_key: 0 },
+    ]);
+  });
+});

@@ -56,6 +56,7 @@ describe('removePlayer public lobby retention', () => {
       minQuestions: 8,
       maxQuestions: 15,
       leaderboard: [],
+      finalStandings: null,
     };
 
     registerPublicLobbyState(initialState);
@@ -110,6 +111,7 @@ describe('removePlayer public lobby retention', () => {
       minQuestions: 8,
       maxQuestions: 15,
       leaderboard: [],
+      finalStandings: null,
     };
 
     registerPublicLobbyState(initialState);

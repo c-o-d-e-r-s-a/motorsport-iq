@@ -71,6 +71,7 @@ import {
 } from './lobby/lifecycleManager';
 import { resolveLiveAnswerDeadline } from './lobby/answerWindow';
 import { LobbyLifecycleQueue } from './lobby/lifecycleQueue';
+import { LapProcessingGate } from './runtime/lapProcessingGate';
 import { OpenF1Client } from './data/openf1Client';
 import {
   dedupeWeekendSessions,
@@ -354,11 +355,16 @@ function emitSocketError(
   socket.emit('error', { message, code });
 }
 
+function classifyActiveDrivers(snapshot: RaceSnapshot) {
+  return snapshot.drivers
+    .filter((driver) => driver.position > 0 && !driver.retired)
+    .sort((a, b) => a.position - b.position);
+}
+
 function toRaceSnapshotEvent(snapshot: RaceSnapshot): RaceSnapshotEvent {
-  const leader = snapshot.drivers[0] ?? null;
-  const p2 = snapshot.drivers.find(
-    (driver) => driver.position === 2 && !driver.retired
-  ) ?? null;
+  const classified = classifyActiveDrivers(snapshot);
+  const leader = classified[0] ?? snapshot.drivers[0] ?? null;
+  const p2 = classified.find((driver) => driver.position === 2) ?? classified[1] ?? null;
 
   return {
     sessionId: snapshot.sessionId,
@@ -384,7 +390,8 @@ function toRaceSnapshotEvent(snapshot: RaceSnapshot): RaceSnapshotEvent {
           p2Gap: p2?.gap ?? null,
         }
       : null,
-    topThree: snapshot.drivers.slice(0, 3).map((driver) => driver.name),
+    topThree: classified.slice(0, 3).map((driver) => driver.name),
+    topThreePositions: classified.slice(0, 3).map((driver) => driver.position),
     dataFeedStalled: snapshot.dataFeedStalled,
     localYellowSectors: snapshot.localYellowSectors ?? [],
     globalYellowActive: snapshot.globalYellowActive ?? false,
@@ -663,8 +670,20 @@ if (bootstrapSessions.length > 0) {
 }
 startSeasonCalendarRefresh(async (year) => sessionLookupClient.getSessions(year));
 const lifecycleQueue = new LobbyLifecycleQueue();
+const lapProcessingGate = new LapProcessingGate();
+
+function claimNewLapForLobbies(snapshot: RaceSnapshot, lobbyIds: Set<string>): Set<string> {
+  const claimedLobbyIds = new Set<string>();
+  for (const lobbyId of lobbyIds) {
+    if (lapProcessingGate.claim(lobbyId, snapshot.sessionId, snapshot.lapNumber)) {
+      claimedLobbyIds.add(lobbyId);
+    }
+  }
+  return claimedLobbyIds;
+}
+
 async function processLapCompleteForLobby(lobbyId: string, snapshot: RaceSnapshot): Promise<void> {
-  const lockKey = `lap:${lobbyId}:${snapshot.lapNumber}`;
+  const lockKey = `lap:${snapshot.sessionId}:${lobbyId}:${snapshot.lapNumber}`;
   const lockToken = await distributedLocks.acquire(lockKey, 20_000);
   if (!lockToken) {
     metrics.incrementCounter('runtime.lap_lock_skipped_total');
@@ -701,14 +720,20 @@ const runtimeManager = new SessionRuntimeManager({
   },
   onLapComplete: async (snapshot, lobbyIds) => {
     metrics.incrementCounter('runtime.lap_complete_events_total');
-    metrics.setGauge('runtime.lap_complete_lobby_count', lobbyIds.size);
+    const claimedLobbyIds = claimNewLapForLobbies(snapshot, lobbyIds);
+    metrics.setGauge('runtime.lap_complete_lobby_count', claimedLobbyIds.size);
 
-    if (snapshot.sessionMode === 'live' && LIVE_BROADCAST_DELAY_MS > 0) {
-      scheduleLiveBroadcastAction(() => processLapCompleteForLobbies(snapshot, lobbyIds));
+    if (claimedLobbyIds.size === 0) {
+      metrics.incrementCounter('runtime.lap_duplicate_events_total');
       return;
     }
 
-    await processLapCompleteForLobbies(snapshot, lobbyIds);
+    if (snapshot.sessionMode === 'live' && LIVE_BROADCAST_DELAY_MS > 0) {
+      scheduleLiveBroadcastAction(() => processLapCompleteForLobbies(snapshot, claimedLobbyIds));
+      return;
+    }
+
+    await processLapCompleteForLobbies(snapshot, claimedLobbyIds);
   },
   onFeedStall: (stalled, lobbyIds) => {
     for (const lobbyId of lobbyIds) {
@@ -733,6 +758,7 @@ const runtimeManager = new SessionRuntimeManager({
       await freezeFinalStandings(lobbyId);
       setLobbyRuntimeMeta(lobbyId, { isReplayComplete: true });
       clearCooldowns(lobbyId);
+      lapProcessingGate.clear(lobbyId);
 
       const lobbyState = await getLobbyState(lobbyId);
       if (snapshot) {
@@ -775,6 +801,7 @@ async function handleUserRemoval(
 
   if (removal.lobbyDeleted) {
     clearCooldowns(removal.lobbyId);
+    lapProcessingGate.clear(removal.lobbyId);
     clearLobbyLifecycle(removal.lobbyId);
     runtimeManager.detachLobbyFromSession(removal.lobbyId);
     return;
@@ -805,6 +832,7 @@ const presenceManager = new PresenceManager({
 async function handleStaleLobbyDeleted(lobbyId: string, lobbyCode: string): Promise<void> {
   presenceManager.removeLobby(lobbyId);
   clearCooldowns(lobbyId);
+  lapProcessingGate.clear(lobbyId);
   clearLobbyLifecycle(lobbyId);
   runtimeManager.detachLobbyFromSession(lobbyId);
   metrics.incrementCounter('lobby.stale_deleted_total');
@@ -1347,6 +1375,7 @@ async function startSessionForLobby(
   await updateLobbyStatus(lobbyId, 'active');
   await setLobbySession(lobbyId, String(session.session_key));
   setLatestResolution(lobbyId, null);
+  lapProcessingGate.clear(lobbyId);
 
   const requestedReplaySpeed = isCompleted
     ? normalizeReplaySpeed(replaySpeed ?? 1)
@@ -1447,6 +1476,7 @@ io.on('connection', (socket) => {
 
   let currentUserId: string | null = null;
   let currentLobbyId: string | null = null;
+  let reconnectInFlight = false;
   const reactionTimestamps: number[] = [];
 
   /**
@@ -1836,6 +1866,7 @@ io.on('connection', (socket) => {
       await updateLobbyStatus(data.lobbyId, 'active');
       await setLobbySession(data.lobbyId, String(session.session_key));
       setLatestResolution(data.lobbyId, null);
+      lapProcessingGate.clear(data.lobbyId);
 
       const requestedReplaySpeed = isCompleted
         ? normalizeReplaySpeed(data.replaySpeed ?? 1)
@@ -1973,6 +2004,21 @@ io.on('connection', (socket) => {
    * Reconnect to lobby
    */
   socket.on('reconnect_lobby', async (data: { userId: string }) => {
+    if (reconnectInFlight) {
+      metrics.incrementCounter('lobby.reconnect_deduplicated_total');
+      return;
+    }
+
+    if (
+      currentUserId === data.userId
+      && currentLobbyId !== null
+      && socket.rooms.has(currentLobbyId)
+    ) {
+      metrics.incrementCounter('lobby.reconnect_deduplicated_total');
+      return;
+    }
+
+    reconnectInFlight = true;
     try {
       const reconnectStartedAt = Date.now();
       const lobbyId = getUserLobby(data.userId) ?? await getUserLobbyFromDatabase(data.userId);
@@ -2018,6 +2064,8 @@ io.on('connection', (socket) => {
       metrics.recordDuration('socket.reconnect_recovery_ms', Date.now() - reconnectStartedAt);
     } catch (error) {
       emitSocketError(socket, (error as Error).message);
+    } finally {
+      reconnectInFlight = false;
     }
   });
 

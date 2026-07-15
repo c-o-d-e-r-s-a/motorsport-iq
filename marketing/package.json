@@ -1,0 +1,12 @@
+{
+  "name": "motorsport-iq-marketing",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pdf": "node generate-pdf.mjs",
+    "graphic": "node generate-graphic.mjs"
+  },
+  "devDependencies": {
+    "puppeteer": "^24.0.0"
+  }
+}
