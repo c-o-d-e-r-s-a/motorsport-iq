@@ -444,6 +444,12 @@ describe('SnapshotStore race control updates', () => {
 
     const store = new SnapshotStore(client);
     await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+    store.processDriverListUpdate([
+      createDriver({ driver_number: 16, full_name: 'Charles Leclerc', broadcast_name: 'LEC' }),
+      createDriver({ driver_number: 12, full_name: 'Kimi Antonelli', broadcast_name: 'ANT' }),
+      createDriver({ driver_number: 44, full_name: 'Lewis Hamilton', broadcast_name: 'HAM' }),
+      createDriver({ driver_number: 18, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+    ]);
 
     store.processPositionUpdate([
       createPosition({ driver_number: 1, position: 1, date: '2025-09-01T13:05:00Z' }),
@@ -810,6 +816,12 @@ describe('SnapshotStore race control updates', () => {
 
     const store = new SnapshotStore(client);
     await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+    store.processDriverListUpdate([
+      createDriver({ driver_number: 16, full_name: 'Charles Leclerc', broadcast_name: 'LEC' }),
+      createDriver({ driver_number: 12, full_name: 'Kimi Antonelli', broadcast_name: 'ANT' }),
+      createDriver({ driver_number: 44, full_name: 'Lewis Hamilton', broadcast_name: 'HAM' }),
+      createDriver({ driver_number: 18, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+    ]);
 
     store.processPositionUpdate([createPosition({ position: 1 })]);
     store.processStintUpdate([
@@ -874,5 +886,183 @@ describe('SnapshotStore race control updates', () => {
     expect(afterPit?.stintNumber).toBe(2);
     expect(afterPit?.tyreCompound).toBe('SOFT');
     expect(afterPit?.tyreAge).toBe(1);
+  });
+
+  it('does not retire live leaders when position briefly drops to 0 during a pit stop', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [
+        createDriver({ driver_number: 16, full_name: 'Charles Leclerc', broadcast_name: 'LEC' }),
+        createDriver({ driver_number: 18, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+      ]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+    store.processDriverListUpdate([
+      createDriver({ driver_number: 16, full_name: 'Charles Leclerc', broadcast_name: 'LEC' }),
+      createDriver({ driver_number: 18, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+    ]);
+
+    store.processPositionUpdate([
+      createPosition({ driver_number: 16, position: 1, source: 'position_z' }),
+      createPosition({ driver_number: 18, position: 4, source: 'position_z' }),
+    ]);
+    for (let lap = 1; lap <= 4; lap += 1) {
+      store.processLapCompletion(createLap({ driver_number: 16, lap_number: lap }));
+      store.processLapCompletion(createLap({ driver_number: 18, lap_number: lap }));
+    }
+    store.processPositionUpdate([
+      createPosition({ driver_number: 16, position: 0, source: 'position_z', date: '2025-09-01T13:06:00Z' }),
+    ]);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    const snapshot = store.getCurrentSnapshot();
+    expect(snapshot?.drivers[0]?.name).toBe('Charles Leclerc');
+    expect(snapshot?.drivers[0]?.retired).toBe(false);
+    expect(snapshot?.drivers.find((driver) => driver.driverNumber === 18)?.name).toBe('Lance Stroll');
+  });
+
+  it('keeps active drivers ahead of falsely retired cars in the timing tower order', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [
+        createDriver({ driver_number: 16, full_name: 'Charles Leclerc', broadcast_name: 'LEC' }),
+        createDriver({ driver_number: 12, full_name: 'Kimi Antonelli', broadcast_name: 'ANT' }),
+        createDriver({ driver_number: 44, full_name: 'Lewis Hamilton', broadcast_name: 'HAM' }),
+        createDriver({ driver_number: 18, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+      ]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+    store.processDriverListUpdate([
+      createDriver({ driver_number: 16, full_name: 'Charles Leclerc', broadcast_name: 'LEC' }),
+      createDriver({ driver_number: 12, full_name: 'Kimi Antonelli', broadcast_name: 'ANT' }),
+      createDriver({ driver_number: 44, full_name: 'Lewis Hamilton', broadcast_name: 'HAM' }),
+      createDriver({ driver_number: 18, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+    ]);
+
+    store.processPositionUpdate([
+      createPosition({ driver_number: 16, position: 1, source: 'position_z' }),
+      createPosition({ driver_number: 12, position: 2, source: 'position_z' }),
+      createPosition({ driver_number: 44, position: 3, source: 'position_z' }),
+      createPosition({ driver_number: 18, position: 4, source: 'position_z' }),
+    ]);
+
+    (store as unknown as { retiredDrivers: Set<number> }).retiredDrivers.add(16);
+    (store as unknown as { retiredDrivers: Set<number> }).retiredDrivers.add(12);
+    (store as unknown as { retiredDrivers: Set<number> }).retiredDrivers.add(44);
+    store.processIntervalUpdate([
+      createInterval({ driver_number: 44, gap_to_leader: 2.1 }),
+    ]);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    const topThree = store.getCurrentSnapshot()?.drivers.slice(0, 3).map((driver) => driver.name);
+    expect(topThree).toEqual(['Lance Stroll', 'Charles Leclerc', 'Kimi Antonelli']);
+  });
+
+  it('prefers Position.z over TopThree when both streams disagree', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [
+        createDriver({ driver_number: 16, full_name: 'Charles Leclerc', broadcast_name: 'LEC' }),
+        createDriver({ driver_number: 18, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+      ]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+    store.processDriverListUpdate([
+      createDriver({ driver_number: 16, full_name: 'Charles Leclerc', broadcast_name: 'LEC' }),
+      createDriver({ driver_number: 18, full_name: 'Lance Stroll', broadcast_name: 'STR' }),
+    ]);
+
+    store.processPositionUpdate([
+      createPosition({
+        driver_number: 18,
+        position: 1,
+        source: 'top_three',
+        date: '2025-09-01T13:05:00Z',
+      }),
+      createPosition({
+        driver_number: 16,
+        position: 1,
+        source: 'position_z',
+        date: '2025-09-01T13:05:00Z',
+      }),
+      createPosition({
+        driver_number: 18,
+        position: 4,
+        source: 'position_z',
+        date: '2025-09-01T13:05:00Z',
+      }),
+    ]);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(store.getCurrentSnapshot()?.drivers[0]?.name).toBe('Charles Leclerc');
+  });
+
+  it('does not lap-stall retire running cars during a live session', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [
+        createDriver({ driver_number: 16, full_name: 'Charles Leclerc' }),
+        createDriver({ driver_number: 23, full_name: 'Alex Albon' }),
+      ]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+    store.processDriverListUpdate([
+      createDriver({ driver_number: 16, full_name: 'Charles Leclerc' }),
+      createDriver({ driver_number: 23, full_name: 'Alex Albon' }),
+    ]);
+
+    store.processPositionUpdate([
+      createPosition({ driver_number: 16, position: 1, source: 'timing_data' }),
+      createPosition({ driver_number: 23, position: 15, source: 'timing_data' }),
+    ]);
+
+    for (let lap = 1; lap <= 37; lap += 1) {
+      store.processLapCompletion(createLap({ driver_number: 16, lap_number: lap }));
+    }
+    for (let lap = 1; lap <= 34; lap += 1) {
+      store.processLapCompletion(createLap({ driver_number: 23, lap_number: lap }));
+    }
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    const albon = store.getCurrentSnapshot()?.drivers.find((driver) => driver.driverNumber === 23);
+    expect(albon?.retired).toBe(false);
+  });
+
+  it('reconciles the live leader from zero gap when position integers are stale', async () => {
+    const client = {
+      getDrivers: jest.fn(async () => [
+        createDriver({ driver_number: 16, full_name: 'Charles Leclerc' }),
+        createDriver({ driver_number: 18, full_name: 'Lance Stroll' }),
+      ]),
+      parseTrackStatus: jest.fn(() => 'GREEN' as const),
+    } as any;
+
+    const store = new SnapshotStore(client);
+    await store.initialize(1001, { sessionMode: 'live', skipDriverPreload: true });
+    store.processDriverListUpdate([
+      createDriver({ driver_number: 16, full_name: 'Charles Leclerc' }),
+      createDriver({ driver_number: 18, full_name: 'Lance Stroll' }),
+    ]);
+
+    store.processPositionUpdate([
+      createPosition({ driver_number: 18, position: 1, source: 'timing_data' }),
+      createPosition({ driver_number: 16, position: 2, source: 'timing_data' }),
+    ]);
+    store.processIntervalUpdate([
+      createInterval({ driver_number: 16, gap_to_leader: 0, date: '2025-09-01T13:05:00Z' }),
+      createInterval({ driver_number: 18, gap_to_leader: 2.4, date: '2025-09-01T13:05:00Z' }),
+    ]);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(store.getCurrentSnapshot()?.drivers[0]?.name).toBe('Charles Leclerc');
+    expect(store.getCurrentSnapshot()?.drivers[0]?.position).toBe(1);
   });
 });

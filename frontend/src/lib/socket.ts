@@ -26,7 +26,8 @@ class SocketClient {
   private socket: Socket | null = null;
   private listeners: Map<string, Set<Listener>> = new Map();
   private lastError: ConnectionError | null = null;
-  private lastReconnectLobby = { userId: '', at: 0 };
+  /** One recovery event is enough for each Socket.io connection generation. */
+  private lastReconnectLobby = { userId: '', socketId: '' };
   private sessionsPollInterval: number | null = null;
   private sessionsPollYear: number | null = null;
 
@@ -273,18 +274,21 @@ class SocketClient {
     this.socket?.emit(CLIENT_EVENTS.SUBMIT_ANSWER, { instanceId, answer });
   }
 
-  reconnectLobby(userId: string, options?: { dedupeWindowMs?: number }): void {
-    const dedupeWindowMs = options?.dedupeWindowMs ?? 2000;
-    const now = Date.now();
+  reconnectLobby(userId: string): void {
+    if (!this.socket?.connected || !this.socket.id) {
+      return;
+    }
+
+    const socketId = this.socket.id;
     if (
       this.lastReconnectLobby.userId === userId
-      && now - this.lastReconnectLobby.at < dedupeWindowMs
+      && this.lastReconnectLobby.socketId === socketId
     ) {
       return;
     }
 
-    this.lastReconnectLobby = { userId, at: now };
-    this.socket?.emit(CLIENT_EVENTS.RECONNECT_LOBBY, { userId });
+    this.lastReconnectLobby = { userId, socketId };
+    this.socket.emit(CLIENT_EVENTS.RECONNECT_LOBBY, { userId });
   }
 
   getSessions(year?: number): void {

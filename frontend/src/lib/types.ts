@@ -250,6 +250,7 @@ export interface RaceSnapshotEvent {
   leaderTelemetryTimestamp?: string | null;
   leaderStats: LeaderStats | null;
   topThree: string[];
+  topThreePositions?: number[];
   dataFeedStalled: boolean;
   /** Display-only localized sector yellows (does not affect gameplay). */
   localYellowSectors?: number[];

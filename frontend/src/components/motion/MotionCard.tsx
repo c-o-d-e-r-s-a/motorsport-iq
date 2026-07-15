@@ -1,9 +1,9 @@
 'use client';
 
-import { m, usePresence } from 'framer-motion';
-import { useEffect } from 'react';
+import { m } from 'framer-motion';
 import { cn } from '@/lib/cn';
 import { popIn, raceIn, reducedFade, slidePanel } from '@/lib/motion/presets';
+import { useEntranceControls } from '@/lib/motion/useEntranceControls';
 import { useReducedMotion } from '@/lib/motion/useReducedMotion';
 
 type CardTone = 'default' | 'muted' | 'elevated';
@@ -35,33 +35,14 @@ interface MotionCardProps extends React.ComponentPropsWithoutRef<typeof m.div> {
  */
 export function MotionCard({ tone = 'elevated', enter = 'pop', className, children, ...props }: MotionCardProps) {
   const reduced = useReducedMotion();
-  const [isPresent, safeToRemove] = usePresence();
-
-  useEffect(() => {
-    const onVisibilityReturn = () => {
-      if (document.visibilityState !== 'visible') return;
-      if (!isPresent) {
-        safeToRemove?.();
-      }
-    };
-
-    document.addEventListener('visibilitychange', onVisibilityReturn);
-    window.addEventListener('focus', onVisibilityReturn);
-    window.addEventListener('pageshow', onVisibilityReturn);
-
-    return () => {
-      document.removeEventListener('visibilitychange', onVisibilityReturn);
-      window.removeEventListener('focus', onVisibilityReturn);
-      window.removeEventListener('pageshow', onVisibilityReturn);
-    };
-  }, [isPresent, safeToRemove]);
+  const controls = useEntranceControls();
 
   return (
     <m.div
       layout
       variants={reduced ? reducedFade : enterVariants[enter]}
       initial="hidden"
-      animate="visible"
+      animate={controls}
       exit="exit"
       className={cn(
         'col-start-1 row-start-1 w-full rounded-[var(--radius)] p-5 md:p-6',

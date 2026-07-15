@@ -134,12 +134,16 @@ export interface OpenF1Lap {
   segments_sector_3: number[];
 }
 
+export type PositionSource = 'position_z' | 'top_three' | 'timing_data';
+
 export interface OpenF1Position {
   date: string;
   meeting_key: number;
   session_key: number;
   driver_number: number;
   position: number;
+  /** Live feed origin — used to prefer Position.z over partial TimingData deltas. */
+  source?: PositionSource;
 }
 
 export interface OpenF1Interval {
@@ -445,6 +449,8 @@ export interface RaceSnapshotEvent {
   leaderTelemetryTimestamp?: string | null;
   leaderStats: LeaderStats | null;
   topThree: string[];
+  /** Race positions aligned with `topThree` — avoids inferring P1/P2/P3 from array index. */
+  topThreePositions?: number[];
   dataFeedStalled: boolean;
   /** Display-only localized sector yellows (does not affect gameplay). */
   localYellowSectors: number[];

@@ -5,6 +5,7 @@ import type {
   OpenF1Driver,
   OpenF1Lap,
   OpenF1Position,
+  PositionSource,
   OpenF1Interval,
   OpenF1Pit,
   OpenF1Stint,
@@ -35,6 +36,7 @@ interface ActiveStintLock {
 interface DriverData {
   driver: OpenF1Driver | null;
   latestPosition: OpenF1Position | null;
+  positionSource: PositionSource | null;
   latestInterval: OpenF1Interval | null;
   latestLap: OpenF1Lap | null;
   pits: OpenF1Pit[];
@@ -56,6 +58,33 @@ const MAX_REASONABLE_USED_TYRE_START_AGE_AFTER_LIVE_PIT = 8;
  * flags merely-lapped cars; only genuinely stopped cars exceed it.
  */
 const STALE_RACE_LAPS_FOR_RETIREMENT = 3;
+
+const POSITION_SOURCE_PRIORITY: Record<PositionSource, number> = {
+  position_z: 3,
+  top_three: 2,
+  timing_data: 1,
+};
+
+function positionSourcePriority(source: PositionSource | null | undefined): number {
+  return source ? POSITION_SOURCE_PRIORITY[source] : 0;
+}
+
+function shouldAcceptPositionUpdate(
+  incoming: OpenF1Position,
+  existing: OpenF1Position | null,
+  existingSource: PositionSource | null
+): boolean {
+  const incomingPriority = positionSourcePriority(incoming.source ?? 'timing_data');
+  const existingPriority = positionSourcePriority(existingSource);
+
+  if (incomingPriority > existingPriority) {
+    return true;
+  }
+  if (incomingPriority < existingPriority) {
+    return false;
+  }
+  return hasNewerTimestamp(incoming.date, existing?.date);
+}
 
 function toTimestamp(value: string | null | undefined): number {
   if (!value) return 0;
@@ -119,6 +148,8 @@ export class SnapshotStore {
   private replayTrackStatus: ReplayTrackStatusController | null = null;
   /** Live-only: last valid P2 gap-to-leader so HUD does not flicker to "—" between timing updates. */
   private lastValidP2Gap: number | null = null;
+  /** Live-only: throttle leader-change diagnostics. */
+  private lastLoggedLeaderNumber: number | null = null;
 
   constructor(client: OpenF1Client, options: SnapshotStoreOptions = {}) {
     this.client = client;
@@ -151,6 +182,7 @@ export class SnapshotStore {
     this.raceControlHistory = [];
     this.lastRaceControlStatusTime = 0;
     this.lastValidP2Gap = null;
+    this.lastLoggedLeaderNumber = null;
     this.sessionMode = config?.sessionMode ?? 'live';
     this.replayTrackStatus = this.sessionMode === 'replay' ? new ReplayTrackStatusController() : null;
     this.openF1LapNumbering = config?.openF1LapNumbering ?? false;
@@ -173,6 +205,7 @@ export class SnapshotStore {
           this.drivers.set(driver.driver_number, {
             driver,
             latestPosition: null,
+            positionSource: null,
             latestInterval: null,
             latestLap: null,
             pits: [],
@@ -242,6 +275,7 @@ export class SnapshotStore {
         this.drivers.set(driver.driver_number, {
           driver,
           latestPosition: null,
+          positionSource: null,
           latestInterval: null,
           latestLap: null,
           pits: [],
@@ -338,6 +372,7 @@ export class SnapshotStore {
         meeting_key: meetingKey,
       },
       latestPosition: null,
+      positionSource: null,
       latestInterval: null,
       latestLap: null,
       pits: [],
@@ -419,18 +454,26 @@ export class SnapshotStore {
   processPositionUpdate(positions: OpenF1Position[]): void {
     for (const pos of positions) {
       const driverData = this.ensureDriverEntry(pos.driver_number, pos.session_key, pos.meeting_key);
-      if (hasNewerTimestamp(pos.date, driverData.latestPosition?.date)) {
+      const incomingSource = pos.source ?? 'timing_data';
+
+      if (shouldAcceptPositionUpdate(pos, driverData.latestPosition, driverData.positionSource)) {
         driverData.latestPosition = pos;
+        driverData.positionSource = incomingSource;
       }
 
       if (pos.position > 0) {
         this.driverHadValidPosition.add(pos.driver_number);
+        // A car can briefly report position 0 while pitting — clear a false retirement.
+        if (this.sessionMode === 'live' && this.retiredDrivers.has(pos.driver_number)) {
+          this.retiredDrivers.delete(pos.driver_number);
+        }
       } else if (
         pos.position === 0
+        && this.sessionMode !== 'live'
         && this.lapNumber > 3
         && this.driverHadValidPosition.has(pos.driver_number)
       ) {
-        // Driver had a valid race position, now shows 0 — they have retired.
+        // Replay-only: position → 0 after being in the race means retired.
         if (!this.retiredDrivers.has(pos.driver_number)) {
           console.log(`[SnapshotStore] Driver #${pos.driver_number} marked as retired (position → 0 at lap ${this.lapNumber})`);
           this.retiredDrivers.add(pos.driver_number);
@@ -649,6 +692,12 @@ export class SnapshotStore {
    * leader), while a car that genuinely stops still falls behind the field.
    */
   private updateRetirementStatus(): void {
+    // Live classification comes from the F1 timing feed (position + gaps).
+    // Lap-stall retirement falsely marks legitimately lapped cars as out.
+    if (this.sessionMode === 'live') {
+      return;
+    }
+
     let fieldMaxLap = 0;
     for (const driverNumber of this.driverHadValidPosition) {
       const lap = this.driverLapProgress.get(driverNumber) ?? 0;
@@ -675,6 +724,35 @@ export class SnapshotStore {
         );
         this.retiredDrivers.add(driverNumber);
       }
+    }
+  }
+
+  /**
+   * When interval data says one car is on zero gap but position integers disagree,
+   * trust the timing gap (authoritative during races) over stale position slots.
+   */
+  private reconcileLivePositionsFromGap(driverStates: DriverState[]): void {
+    const active = driverStates.filter((driver) => !driver.retired);
+    const gapLeader = active.find((driver) => driver.gap === 0);
+    if (!gapLeader) {
+      return;
+    }
+
+    const currentLeader = active.find((driver) => driver.position === 1);
+    if (currentLeader?.driverNumber === gapLeader.driverNumber) {
+      return;
+    }
+
+    gapLeader.position = 1;
+    const chasing = active
+      .filter((driver) => driver.driverNumber !== gapLeader.driverNumber)
+      .filter((driver) => driver.gap !== null && Number.isFinite(driver.gap) && driver.gap > 0)
+      .sort((a, b) => (a.gap ?? Number.MAX_SAFE_INTEGER) - (b.gap ?? Number.MAX_SAFE_INTEGER));
+
+    let nextPosition = 2;
+    for (const driver of chasing) {
+      driver.position = nextPosition;
+      nextPosition += 1;
     }
   }
 
@@ -734,6 +812,10 @@ export class SnapshotStore {
     }
 
     if (this.sessionMode === 'live') {
+      this.reconcileLivePositionsFromGap(driverStates);
+    }
+
+    if (this.sessionMode === 'live') {
       const p2Driver = driverStates.find((driver) => driver.position === 2 && !driver.retired);
       if (p2Driver) {
         if (p2Driver.gap !== null && Number.isFinite(p2Driver.gap)) {
@@ -746,24 +828,53 @@ export class SnapshotStore {
 
     const normalizedPosition = (value: number): number => (value > 0 ? value : Number.MAX_SAFE_INTEGER);
 
-    driverStates.sort((a, b) => normalizedPosition(a.position) - normalizedPosition(b.position));
+    const activeByPosition = driverStates
+      .filter((driver) => driver.position > 0 && !driver.retired)
+      .sort((a, b) => normalizedPosition(a.position) - normalizedPosition(b.position));
+    const retiredByPosition = driverStates
+      .filter((driver) => driver.retired && driver.position > 0)
+      .sort((a, b) => normalizedPosition(a.position) - normalizedPosition(b.position));
+    const inactiveDrivers = driverStates.filter(
+      (driver) => driver.position <= 0 && !driver.retired
+    );
+
     const previousLeaderDriverNumber = this.previousSnapshot?.drivers.find(
       (driver) => driver.position > 0 && !driver.retired
     )?.driverNumber;
     // A retired car keeps its last (frozen) position, so it must never be picked
     // as the leader — otherwise a retired race leader would stay on the leader card.
-    const leader = driverStates.find((driver) => driver.position > 0 && !driver.retired)
-      ?? (previousLeaderDriverNumber
-        ? driverStates.find((driver) => driver.driverNumber === previousLeaderDriverNumber)
-        : null)
+    const previousLeader = previousLeaderDriverNumber != null
+      ? driverStates.find((driver) => driver.driverNumber === previousLeaderDriverNumber)
+      : null;
+    const classifiedLeader = activeByPosition[0] ?? null;
+
+    // During a live pit stop the race leader often reports position 0 briefly.
+    // Keep them on the leader card until a fresh classified P1 arrives.
+    const leader = (
+      this.sessionMode === 'live'
+      && previousLeader
+      && !previousLeader.retired
+      && previousLeader.position === 0
+      && classifiedLeader
+    )
+      ? previousLeader
+      : classifiedLeader
+      ?? previousLeader
       ?? driverStates.find((driver) => driver.position > 0)
       ?? driverStates[0];
     const leaderLapStartTime = leader
       ? this.drivers.get(leader.driverNumber)?.latestLap?.date_start ?? null
       : null;
-    const orderedDrivers = leader
-      ? [leader, ...driverStates.filter((driver) => driver.driverNumber !== leader.driverNumber)]
-      : driverStates;
+    let orderedDrivers = [...activeByPosition, ...retiredByPosition, ...inactiveDrivers];
+    if (
+      leader
+      && !activeByPosition.some((driver) => driver.driverNumber === leader.driverNumber)
+    ) {
+      orderedDrivers = [
+        leader,
+        ...orderedDrivers.filter((driver) => driver.driverNumber !== leader.driverNumber),
+      ];
+    }
 
     const draftSnapshot: RaceSnapshot = {
       sessionId: this.sessionId,
@@ -800,6 +911,19 @@ export class SnapshotStore {
         source: leader.nameSource ?? 'unknown',
         telemetryTimestamp: leader.lastTelemetryTimestamp ?? null,
       });
+    }
+
+    if (
+      this.sessionMode === 'live'
+      && leader
+      && leader.driverNumber !== this.lastLoggedLeaderNumber
+    ) {
+      this.lastLoggedLeaderNumber = leader.driverNumber;
+      const positionSource = this.drivers.get(leader.driverNumber)?.positionSource ?? 'unknown';
+      console.log(
+        `[SnapshotStore] Live leader P${leader.position}: ` +
+        `#${leader.driverNumber} ${leader.name} (posSource=${positionSource})`
+      );
     }
 
     this.options.onSnapshotUpdate?.(this.currentSnapshot);
