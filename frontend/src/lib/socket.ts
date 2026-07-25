@@ -28,6 +28,8 @@ class SocketClient {
   private lastError: ConnectionError | null = null;
   /** One recovery event is enough for each Socket.io connection generation. */
   private lastReconnectLobby = { userId: '', socketId: '' };
+  /** Latest lobby_state — used to hydrate SPA navigations (home → lobby/game). */
+  private lastLobbyState: LobbyState | null = null;
   private sessionsPollInterval: number | null = null;
   private sessionsPollYear: number | null = null;
 
@@ -115,6 +117,7 @@ class SocketClient {
     });
 
     this.socket.on(SERVER_EVENTS.LOBBY_STATE, (state: LobbyState) => {
+      this.lastLobbyState = state;
       this.emit(SERVER_EVENTS.LOBBY_STATE, state);
     });
 
@@ -376,6 +379,17 @@ class SocketClient {
 
   getSocketId(): string | undefined {
     return this.socket?.id;
+  }
+
+  /** Cached lobby_state for the given code, if this tab already received it. */
+  getCachedLobbyState(lobbyCode: string): LobbyState | null {
+    if (!this.lastLobbyState) {
+      return null;
+    }
+    if (this.lastLobbyState.code.toUpperCase() !== lobbyCode.toUpperCase()) {
+      return null;
+    }
+    return this.lastLobbyState;
   }
 
   getResolvedUrl(): string {
