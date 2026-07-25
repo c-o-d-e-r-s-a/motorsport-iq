@@ -274,14 +274,21 @@ class SocketClient {
     this.socket?.emit(CLIENT_EVENTS.SUBMIT_ANSWER, { instanceId, answer });
   }
 
-  reconnectLobby(userId: string): void {
+  /**
+   * Ask the server to re-bind this socket to the player's lobby and emit lobby_state.
+   * Dedupes automatic recovery on the same Socket.io connection generation.
+   * Pass `force: true` on route entry (lobby/game mount) — otherwise SPA navigations
+   * like lobby → game skip the emit and hang on "Connecting to race…".
+   */
+  reconnectLobby(userId: string, options?: { force?: boolean }): void {
     if (!this.socket?.connected || !this.socket.id) {
       return;
     }
 
     const socketId = this.socket.id;
     if (
-      this.lastReconnectLobby.userId === userId
+      !options?.force
+      && this.lastReconnectLobby.userId === userId
       && this.lastReconnectLobby.socketId === socketId
     ) {
       return;

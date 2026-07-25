@@ -211,14 +211,16 @@ export default function GamePage() {
     const normalizedCode = lobbyCode.toUpperCase();
 
     if (storedSession && storedSession.lobbyCode.toUpperCase() === normalizedCode) {
-      socket.reconnectLobby(storedSession.userId);
+      // Force: lobby → game uses the same socket, so non-forced reconnect is deduped
+      // and this page would hang forever on "Connecting to race…".
+      socket.reconnectLobby(storedSession.userId, { force: true });
       return;
     }
 
     // Partial session from flows that only saved userId (e.g. older simulation launcher).
     const orphanUserId = typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null;
     if (orphanUserId) {
-      socket.reconnectLobby(orphanUserId);
+      socket.reconnectLobby(orphanUserId, { force: true });
       return;
     }
 
@@ -500,6 +502,28 @@ export default function GamePage() {
       window.clearTimeout(timer);
     };
   }, [isSocketConnected]);
+
+  // If lobby_state never arrives (e.g. a missed reconnect after SPA navigation), retry once.
+  useEffect(() => {
+    if (lobbyState || showJoinForm || !isSocketConnected) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      const storedSession = getStoredLobbySession();
+      const userId = storedSession?.userId
+        ?? (typeof window !== 'undefined' ? localStorage.getItem('msp_user_id') : null);
+      if (!userId) {
+        return;
+      }
+      setConnectionNotice('Still connecting to the race server… retrying.');
+      getSocketClient().reconnectLobby(userId, { force: true });
+    }, 4000);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [lobbyState, showJoinForm, isSocketConnected]);
 
   useEffect(() => {
     const socket = getSocketClient();
@@ -1111,9 +1135,12 @@ export default function GamePage() {
 
   if (!lobbyState) {
     return (
-      <main className="app-bg flex min-h-dvh flex-col items-center justify-center gap-4">
+      <main className="app-bg flex min-h-dvh flex-col items-center justify-center gap-4 px-5">
         <span className="h-10 w-10 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
         <p className="font-display text-lg uppercase tracking-wide text-[var(--color-muted-fg)]">Connecting to race…</p>
+        {connectionNotice && (
+          <p className="max-w-sm text-center text-sm text-[var(--color-muted-fg)]">{connectionNotice}</p>
+        )}
       </main>
     );
   }
