@@ -2009,12 +2009,33 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // Socket is already bound to this lobby (common after create/join → SPA
+    // navigate to /lobby or /game). Skip presence churn, but still emit
+    // lobby_state — otherwise the new page hangs on "Loading lobby…".
     if (
       currentUserId === data.userId
       && currentLobbyId !== null
       && socket.rooms.has(currentLobbyId)
     ) {
       metrics.incrementCounter('lobby.reconnect_deduplicated_total');
+      try {
+        await touchUserActivity(data.userId);
+        const lobbyState = await getLobbyState(currentLobbyId);
+        if (!lobbyState) {
+          emitSocketError(socket, 'Session expired. Lobby no longer exists.', 'SESSION_EXPIRED');
+          return;
+        }
+        const restoredAnswers = await fetchUserAnswersForReconnect(data.userId, lobbyState);
+        if (Object.keys(restoredAnswers).length > 0) {
+          socket.emit('answers_restored', { answers: restoredAnswers });
+        }
+        socket.emit('lobby_state', lobbyState);
+        if (lobbyState.sessionId) {
+          emitSessionCatchUp(socket, currentLobbyId, lobbyState);
+        }
+      } catch (error) {
+        emitSocketError(socket, (error as Error).message);
+      }
       return;
     }
 

@@ -278,6 +278,17 @@ export default function LobbyPage() {
       }),
     ];
 
+    // Home → lobby already received lobby_state on this socket; hydrate immediately.
+    const cached = socket.getCachedLobbyState(lobbyCode);
+    if (cached) {
+      setLobbyState(cached);
+      setIsLoading(false);
+      setShowJoinForm(false);
+      if (cached.status === 'active') {
+        router.push(`/game/${cached.code}`);
+      }
+    }
+
     socket.startSessionsPolling(selectedYear, 60_000);
 
     if (socket.isConnected()) {
@@ -289,6 +300,26 @@ export default function LobbyPage() {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, [beginLobbyEntry, lobbyCode, router, selectedYear]);
+
+  // If lobby_state never arrives after join/create navigation, retry reconnect.
+  useEffect(() => {
+    if (!isLoading || showJoinForm) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      const storedSession = getStoredLobbySession();
+      if (!storedSession || storedSession.lobbyCode.toUpperCase() !== lobbyCode.toUpperCase()) {
+        return;
+      }
+      setConnectionNotice('Still loading lobby… retrying.');
+      getSocketClient().reconnectLobby(storedSession.userId, { force: true });
+    }, 4000);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isLoading, showJoinForm, lobbyCode]);
 
   useEffect(() => {
     if (!currentUserId) {

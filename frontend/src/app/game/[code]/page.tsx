@@ -855,6 +855,14 @@ export default function GamePage() {
       beginLobbyEntry(socket);
     }
 
+    // Home/lobby → game already received lobby_state on this socket; hydrate immediately.
+    const cached = socket.getCachedLobbyState(lobbyCode);
+    if (cached) {
+      setLobbyState(cached);
+      setLeaderboard(cached.leaderboard);
+      setShowJoinForm(false);
+    }
+
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
