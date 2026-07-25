@@ -128,7 +128,8 @@ export default function LobbyPage() {
     const normalizedCode = lobbyCode.toUpperCase();
 
     if (storedSession && storedSession.lobbyCode.toUpperCase() === normalizedCode) {
-      socket.reconnectLobby(storedSession.userId);
+      // Force: page entry must sync even if this socket already reconnect_lobby'd earlier.
+      socket.reconnectLobby(storedSession.userId, { force: true });
       return;
     }
 
