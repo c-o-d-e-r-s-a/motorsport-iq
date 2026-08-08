@@ -4,7 +4,9 @@
 
 Motorsport IQ transforms live F1 telemetry into interactive gameplay. Users join private lobbies to predict race outcomes in real-time, competing for points and leaderboard dominance.
 
-**Try it Out:** [Motorsport IQ](https://motorsport-iq.vercel.app/)
+**Try it Out:** [Motorsport IQ](https://motorsport-iq.vercel.app)
+
+**Watch the trailer:** [Motorsport IQ - Official Trailer](https://www.youtube.com/watch?v=ph13qlNgtEY)
 
 ---
 
