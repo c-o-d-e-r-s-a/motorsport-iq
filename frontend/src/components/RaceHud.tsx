@@ -58,7 +58,7 @@ export default function RaceHud({
           </Chip>
 
           {hasCompleted ? (
-            <Chip tone="accent">🏁 Finished</Chip>
+            <Chip tone="accent">Finished</Chip>
           ) : (
             <RaceConditionBadge status={badgeStatus} highlighted={highlightTrackStatus} />
           )}
@@ -67,7 +67,6 @@ export default function RaceHud({
             <Chip tone="warn" title={yellowSectors.length > 0
               ? `Localized yellow flag in sector ${yellowSectors.join(', ')}`
               : 'Track-wide yellow flag'}>
-              <span className="animate-flash">🟡</span>
               <span className="font-semibold">{yellowLabel}</span>
             </Chip>
           )}

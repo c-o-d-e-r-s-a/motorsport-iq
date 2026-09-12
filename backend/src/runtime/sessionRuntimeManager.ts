@@ -95,7 +95,7 @@ class LiveSessionRuntime extends BaseRuntime {
     if (!hasOpenF1ApiKey()) {
       console.error(
         `[Live Runtime] Cannot fall back to OpenF1 (${reason}). ` +
-        'Set OPENF1_API_KEY on the backend or F1_LIVE_TIMING_TOKEN for SignalR Core auth.'
+        'Set OPENF1_USERNAME and OPENF1_PASSWORD on the backend, or F1_LIVE_TIMING_TOKEN for SignalR Core auth.'
       );
       this.setFeedStalled(true);
       return false;

@@ -14,7 +14,7 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    'bg-[var(--color-accent)] text-white shadow-[var(--shadow-accent)] hover:bg-[var(--color-accent-hot)] active:translate-y-px',
+    'bg-[var(--color-accent)] text-white shadow-[var(--shadow-sm)] hover:bg-[var(--color-accent-hot)] active:translate-y-px',
   secondary:
     'bg-[var(--color-elevated)] text-[var(--color-fg)] border border-[var(--color-border-strong)] hover:border-[var(--color-fg)] active:translate-y-px',
   ghost:
@@ -26,7 +26,7 @@ const variantClasses: Record<ButtonVariant, string> = {
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
-  sm: 'h-10 px-4 text-sm gap-1.5',
+  sm: 'h-11 px-4 text-sm gap-1.5',
   md: 'h-12 px-5 text-[0.95rem] gap-2',
   lg: 'h-14 px-7 text-base gap-2',
 };
@@ -47,7 +47,7 @@ export default function Button({
       disabled={disabled || loading}
       aria-busy={loading || undefined}
       className={cn(
-        'inline-flex min-w-[44px] select-none items-center justify-center rounded-[var(--radius-pill)] font-display font-semibold uppercase tracking-wide',
+        'inline-flex min-h-[44px] min-w-[44px] select-none items-center justify-center rounded-[var(--radius-sm)] font-display font-semibold uppercase tracking-wide',
         'transition-[transform,background-color,border-color,filter,box-shadow,opacity] duration-[var(--dur-fast)] ease-[var(--ease-out)]',
         'active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none disabled:active:scale-100',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)]',

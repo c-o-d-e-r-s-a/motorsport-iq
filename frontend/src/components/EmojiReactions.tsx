@@ -177,9 +177,9 @@ export default function EmojiReactions({ enabled = true, bottomOffset = 20 }: Em
             <button
               type="button"
               onClick={toggleMuted}
-              className="mt-0.5 flex items-center gap-1.5 self-end rounded-[var(--radius-pill)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-muted-fg)] transition-colors hover:bg-[var(--color-muted)] hover:text-[var(--color-fg)]"
+              className="mt-0.5 flex min-h-11 items-center gap-1.5 self-end rounded-[var(--radius-sm)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-muted-fg)] transition-colors hover:bg-[var(--color-muted)] hover:text-[var(--color-fg)]"
             >
-              {muted ? '🔔 Turn reactions on' : '🔕 Turn reactions off'}
+              {muted ? 'Turn reactions on' : 'Turn reactions off'}
             </button>
           </div>
         )}
@@ -190,13 +190,20 @@ export default function EmojiReactions({ enabled = true, bottomOffset = 20 }: Em
           aria-label={isOpen ? 'Close reactions' : muted ? 'Reactions are off' : 'Send a reaction'}
           aria-expanded={isOpen}
           className={cn(
-            'flex h-12 w-12 items-center justify-center rounded-full border text-2xl shadow-[var(--shadow)] backdrop-blur transition-all duration-[var(--dur-fast)] active:scale-90',
+            'flex h-12 w-12 items-center justify-center rounded-full border shadow-[var(--shadow)] backdrop-blur transition-all duration-[var(--dur-fast)] active:scale-90',
             isOpen
               ? 'rotate-90 border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-accent)]'
               : 'border-[var(--color-border-strong)] bg-[var(--color-elevated)]/90 hover:border-[var(--color-accent)]/40 hover:bg-[var(--color-elevated)]'
           )}
         >
-          {isOpen ? '✕' : muted ? '🔕' : '🎉'}
+          {isOpen ? (
+            '×'
+          ) : (
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden>
+              <path d="M12 2.75l1.5 6.25L20 10.5l-6.5 1.5L12 18.25l-1.5-6.25L4 10.5l6.5-1.5L12 2.75Z" fill="currentColor" />
+              <path d="M19 16.25l.65 2.1 2.1.65-2.1.65-.65 2.1-.65-2.1-2.1-.65 2.1-.65.65-2.1Z" fill="currentColor" opacity=".65" />
+            </svg>
+          )}
         </button>
       </div>
     </>

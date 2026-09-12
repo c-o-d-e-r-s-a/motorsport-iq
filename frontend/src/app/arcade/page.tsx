@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Brand, Chip } from '@/components/ui';
+import { Brand } from '@/components/ui';
 import { PitWallArcade } from '@/components/minigames';
 
 export default function ArcadePage() {
@@ -14,7 +14,7 @@ export default function ArcadePage() {
         <Brand />
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
+          className="inline-flex min-h-11 items-center gap-1.5 text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
         >
           <span className="text-base">←</span> Back to play
         </Link>
@@ -23,8 +23,12 @@ export default function ArcadePage() {
       <div className="relative z-10 mx-auto w-full max-w-2xl">
         {/* Hero */}
         <section className="animate-fade-up pt-4 text-center">
-          <div className="mb-4 flex items-center justify-center gap-2">
-            <Chip tone="accent">Pit Wall Arcade</Chip>
+          <div className="mb-4 flex items-center justify-center gap-3">
+            <span className="h-px w-8 bg-[var(--color-accent)]" aria-hidden />
+            <p className="font-display text-xs font-bold uppercase tracking-[0.24em] text-[var(--color-accent)]">
+              Pit wall arcade
+            </p>
+            <span className="h-px w-8 bg-[var(--color-accent)]" aria-hidden />
           </div>
           <h1 className="font-display text-[2.2rem] font-bold uppercase leading-[0.95] tracking-tight sm:text-4xl">
             Four games.

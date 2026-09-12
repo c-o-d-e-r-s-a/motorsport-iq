@@ -276,8 +276,8 @@ export default function Home() {
       <div className="relative z-10 mx-auto flex w-full max-w-md flex-1 flex-col justify-center gap-6 lg:max-w-5xl lg:flex-row lg:items-center lg:gap-12">
         {/* Hero */}
         <section className="lg:flex-1">
-          <h1 className="animate-fade-up font-display text-[2.6rem] font-bold uppercase leading-[0.95] tracking-tight sm:text-5xl lg:text-6xl">
-            Predict the race.
+          <h1 className="animate-fade-up max-w-[12ch] font-display text-[2.35rem] font-bold uppercase leading-[0.95] tracking-tight sm:max-w-none sm:text-5xl lg:text-6xl">
+            Read the race.
             <br />
             <span className="text-[var(--color-accent)]">Beat your mates.</span>
           </h1>
@@ -308,8 +308,7 @@ export default function Home() {
 
         {/* Access card */}
         <section className="animate-fade-up delay-1 surface-elevated relative w-full overflow-hidden rounded-[var(--radius-lg)] p-6 ring-1 ring-[var(--color-border-strong)] sm:p-7 lg:w-[420px]">
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-[var(--color-accent)] via-[var(--color-accent-hot)] to-transparent" />
-          <div className="checkers pointer-events-none absolute right-0 top-0 h-10 w-20 text-[var(--color-fg)] opacity-[0.06]" />
+          <div className="race-rule pointer-events-none absolute inset-x-0 top-0 h-0.5" />
 
           {isWarmingUp && (
             <div className="mb-5 flex items-start gap-3 rounded-[var(--radius-sm)] border border-[var(--color-warn)]/40 bg-[rgba(255,196,0,0.1)] p-3.5">
@@ -344,7 +343,7 @@ export default function Home() {
                 type="button"
                 onClick={handlePlaySolo}
                 disabled={isLoading}
-                className="group relative w-full overflow-hidden rounded-[var(--radius)] border border-[var(--color-accent)]/60 bg-[var(--color-accent-soft)] px-5 py-4 text-left transition-all duration-[var(--dur-fast)] hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] active:scale-[0.99]"
+                className="group relative min-h-[76px] w-full cursor-pointer overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-accent)]/60 bg-[var(--color-accent-soft)] px-5 py-4 text-left transition-colors duration-[var(--dur-fast)] hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)] disabled:cursor-not-allowed"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -364,7 +363,7 @@ export default function Home() {
                 type="button"
                 onClick={handlePlayFriends}
                 disabled={isLoading}
-                className="group relative w-full overflow-hidden rounded-[var(--radius)] border border-[var(--color-border-strong)] bg-[var(--color-panel)] px-5 py-4 text-left transition-all duration-[var(--dur-fast)] hover:border-[var(--color-accent)]/50 active:scale-[0.99]"
+                className="group relative min-h-[76px] w-full cursor-pointer overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] bg-[var(--color-panel)] px-5 py-4 text-left transition-colors duration-[var(--dur-fast)] hover:border-[var(--color-accent)]/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-bg)] disabled:cursor-not-allowed"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -388,7 +387,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => { setMode('select'); setError(null); }}
-                  className="text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
+                  className="inline-flex min-h-11 items-center text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
                 >
                   ← Back
                 </button>
@@ -440,7 +439,7 @@ export default function Home() {
                         setSelectedYear(Number(e.target.value));
                         setSelectedSessionKey('');
                       }}
-                      className="h-8 rounded-[var(--radius-pill)] border border-[var(--color-border-strong)] bg-[var(--color-elevated)] px-3 font-display text-xs font-semibold uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                      className="h-11 rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] bg-[var(--color-elevated)] px-3 font-display text-xs font-semibold uppercase focus-visible:border-[var(--color-accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]"
                     >
                       {years.map((y) => (
                         <option key={y} value={y}>{y}</option>
@@ -482,14 +481,14 @@ export default function Home() {
                             }}
                             style={{ animationDelay: `${Math.min(index * 45, 270)}ms` }}
                             className={cn(
-                              'animate-fade-up w-full rounded-[var(--radius)] border px-4 py-3 text-left transition-all duration-[var(--dur-fast)]',
+                              'animate-fade-up w-full cursor-pointer rounded-[var(--radius-sm)] border px-4 py-3 text-left transition-colors duration-[var(--dur-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]',
                               isSelected && isSelectable
-                                ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] active:scale-[0.99]'
+                                ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)]'
                                 : isFutureSoon
                                   ? 'border-[var(--color-border)]/40 bg-[var(--color-bg)]/70'
                                   : 'border-[var(--color-border)] bg-[var(--color-panel)]',
                               isSelectable
-                                ? 'hover:border-[var(--color-border-strong)] active:scale-[0.99]'
+                                ? 'hover:border-[var(--color-border-strong)]'
                                 : isFutureSoon
                                   ? 'cursor-not-allowed'
                                   : 'cursor-not-allowed opacity-50'
@@ -558,7 +557,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => { setMode('select'); setError(null); }}
-                  className="text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
+                  className="inline-flex min-h-11 items-center text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
                 >
                   ← Back
                 </button>

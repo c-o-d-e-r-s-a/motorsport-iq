@@ -1332,10 +1332,10 @@ export default function GamePage() {
                       )}
                     >
                       {resolvedAnswer === null
-                        ? '⏱ No answer locked in'
+                        ? 'No answer locked in'
                         : resolvedAnswerIsCorrect
-                          ? '✓ Nailed it'
-                          : '✕ Not this time'}
+                          ? 'Nailed it'
+                          : 'Not this time'}
                     </span>
                     {myScore && myScore.pointsChange > 0 && (
                       <span className="animate-pop-in ml-auto [animation-delay:320ms]">+{myScore.pointsChange} pts</span>
@@ -1585,7 +1585,7 @@ export default function GamePage() {
               >
                 <span className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-muted)]">
                   {isFinalLapsIdle ? (
-                    <span className="text-2xl" aria-hidden>🏁</span>
+                    <span className="font-display text-sm font-bold uppercase tracking-wide text-[var(--color-accent)]">End</span>
                   ) : (
                     <span className="h-6 w-6 animate-spin-slow rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]" />
                   )}

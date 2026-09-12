@@ -13,11 +13,14 @@ import type {
 import { parseLatestRaceControlStatus } from './raceStatus';
 
 const OPENF1_BASE_URL = process.env.OPENF1_BASE_URL || 'https://api.openf1.org/v1';
-const OPENF1_API_KEY = process.env.OPENF1_API_KEY || ''; // Required for live-session telemetry when F1 SignalR auth is unavailable
+const OPENF1_API_KEY = process.env.OPENF1_API_KEY || '';
+const OPENF1_USERNAME = process.env.OPENF1_USERNAME || '';
+const OPENF1_PASSWORD = process.env.OPENF1_PASSWORD || '';
+const OPENF1_TOKEN_URL = process.env.OPENF1_TOKEN_URL || 'https://api.openf1.org/token';
 const OPENF1_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.OPENF1_REQUEST_TIMEOUT_MS ?? '', 10) || 12_000;
 
 export function hasOpenF1ApiKey(): boolean {
-  return OPENF1_API_KEY.trim().length > 0;
+  return OPENF1_API_KEY.trim().length > 0 || Boolean(OPENF1_USERNAME.trim() && OPENF1_PASSWORD);
 }
 const POLLING_INTERVAL = 10000;
 const MAX_RETRIES = 4;
@@ -59,6 +62,8 @@ export class OpenF1Client {
   private lastLapNumbers: Map<number, number> = new Map();
   private options: OpenF1ClientOptions;
   private fetchImpl: FetchType;
+  private accessToken: { value: string; expiresAt: number } | null = null;
+  private accessTokenRequest: Promise<string> | null = null;
   private bypassLiveLock = false;
   // Sticky flag — once OpenF1 returns 401 "Live F1 session in progress" we
   // stop banging on data endpoints for the rest of this client's lifetime.
@@ -87,6 +92,37 @@ export class OpenF1Client {
 
   setBypassLiveLock(value: boolean): void {
     this.bypassLiveLock = value;
+  }
+
+  private async getAccessToken(): Promise<string> {
+    if (OPENF1_API_KEY) return OPENF1_API_KEY;
+    if (!OPENF1_USERNAME || !OPENF1_PASSWORD) return '';
+    if (this.accessToken && Date.now() < this.accessToken.expiresAt) return this.accessToken.value;
+    if (this.accessTokenRequest) return this.accessTokenRequest;
+
+    this.accessTokenRequest = (async () => {
+      const response = await this.fetchImpl(OPENF1_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ username: OPENF1_USERNAME, password: OPENF1_PASSWORD }),
+      });
+      if (!response.ok) throw new Error(`OpenF1 authentication failed: ${response.status}`);
+
+      const token = await response.json() as { access_token?: string; expires_in?: string | number };
+      if (!token.access_token) throw new Error('OpenF1 authentication response did not include an access token');
+      const expiresIn = Number(token.expires_in) || 3600;
+      this.accessToken = {
+        value: token.access_token,
+        expiresAt: Date.now() + Math.max(0, expiresIn - 60) * 1000,
+      };
+      return token.access_token;
+    })();
+
+    try {
+      return await this.accessTokenRequest;
+    } finally {
+      this.accessTokenRequest = null;
+    }
   }
 
   startPolling(): void {
@@ -206,9 +242,8 @@ export class OpenF1Client {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       try {
         const headers: Record<string, string> = {};
-        if (OPENF1_API_KEY) {
-          headers['Authorization'] = `Bearer ${OPENF1_API_KEY}`;
-        }
+        const accessToken = await this.getAccessToken();
+        if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), OPENF1_REQUEST_TIMEOUT_MS);

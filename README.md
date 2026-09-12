@@ -57,6 +57,7 @@ Motorsport IQ transforms live F1 telemetry into interactive gameplay. Users join
 
 ## 📘 Documentation
 
+- **[ONBOARDING.md](./ONBOARDING.md):** Start here if you are new — product story, current state, and where we are heading.
 - **[AGENTS.md](./AGENTS.md):** The primary technical reference for AI agents and developers. Contains full environment variable specs, deployment history, and architecture details.
 - **[documentation/](./documentation/):** Deep dives into race mechanics, question logic, and historical context.
 

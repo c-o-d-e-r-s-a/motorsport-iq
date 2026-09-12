@@ -10,6 +10,7 @@
   --color-bg: #07090d;
   --color-bg-2: #0b0e14;
   --color-panel: #12161f;
+  --color-surface: #12161f;
   --color-elevated: #1a1f2b;
   --color-muted: #161b25;
 
@@ -35,16 +36,16 @@
   --color-border-strong: rgba(255, 255, 255, 0.16);
 
   /* Radius */
-  --radius-sm: 10px;
-  --radius: 16px;
-  --radius-lg: 24px;
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
   --radius-pill: 999px;
 
   /* Elevation */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.55);
-  --shadow-accent: 0 10px 40px rgba(255, 33, 20, 0.28);
+  --shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 16px 32px rgba(0, 0, 0, 0.38);
+  --shadow-accent: 0 6px 16px rgba(255, 33, 20, 0.18);
 
   /* Motion */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -65,6 +66,7 @@
   --color-bg: #eef0f4;
   --color-bg-2: #e7eaf0;
   --color-panel: #ffffff;
+  --color-surface: #ffffff;
   --color-elevated: #ffffff;
   --color-muted: #f2f4f8;
   --color-fg: #0a0d12;
@@ -90,6 +92,12 @@
 
 * {
   box-sizing: border-box;
+}
+
+button,
+a,
+select {
+  touch-action: manipulation;
 }
 
 html,
@@ -127,25 +135,7 @@ main {
 .app-bg {
   position: relative;
   min-height: 100dvh;
-  background:
-    radial-gradient(120% 80% at 50% -10%, rgba(255, 33, 20, 0.12), transparent 55%),
-    radial-gradient(90% 60% at 100% 0%, rgba(61, 139, 255, 0.07), transparent 50%),
-    linear-gradient(180deg, var(--color-bg-2), var(--color-bg) 60%);
-}
-
-.app-bg::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.04) 1px, transparent 0);
-  background-size: 26px 26px;
-  mask-image: linear-gradient(to bottom, transparent, #000 8%, #000 92%, transparent);
-}
-
-[data-theme='swiss'] .app-bg::before {
-  background-image: radial-gradient(circle at 1px 1px, rgba(10, 13, 18, 0.06) 1px, transparent 0);
+  background: linear-gradient(180deg, var(--color-bg-2), var(--color-bg) 55%);
 }
 
 /* Checkered flag corner motif (decorative) */
@@ -174,10 +164,14 @@ main {
 }
 
 .surface-elevated {
-  background: linear-gradient(180deg, var(--color-elevated), var(--color-panel));
+  background: var(--color-elevated);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+.race-rule {
+  background: var(--color-accent);
 }
 
 /* Safe-area helpers */
@@ -401,9 +395,7 @@ main {
 .app-shell {
   position: relative;
   min-height: 100dvh;
-  background:
-    radial-gradient(120% 80% at 50% -10%, rgba(255, 33, 20, 0.1), transparent 55%),
-    linear-gradient(180deg, var(--color-bg-2), var(--color-bg) 60%);
+  background: linear-gradient(180deg, var(--color-bg-2), var(--color-bg) 55%);
 }
 .swiss-noise,
 .swiss-grid-pattern,

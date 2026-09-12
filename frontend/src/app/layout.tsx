@@ -21,7 +21,7 @@ const barlowCondensed = Barlow_Condensed({
 export const metadata: Metadata = {
   title: 'Motorsport IQ',
   description: 'Real-time Formula 1 race prediction game',
-  applicationName: 'Motosport IQ',
+  applicationName: 'Motorsport IQ',
   manifest: '/manifest.json',
   appleWebApp: {
     capable: true,
@@ -45,7 +45,6 @@ export const viewport: Viewport = {
   themeColor: '#07090d',
   width: 'device-width',
   initialScale: 1,
-  maximumScale: 1,
   viewportFit: 'cover',
 };
 

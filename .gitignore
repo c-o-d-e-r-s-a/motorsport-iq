@@ -143,3 +143,4 @@ vite.config.ts.timestamp-*
 .mcp.json
 .vercel
 .env*.local
+*.mp4

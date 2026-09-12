@@ -40,7 +40,7 @@ export default function GuidePage() {
         <Brand />
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
+          className="inline-flex min-h-11 items-center gap-1.5 text-sm font-medium text-[var(--color-faint-fg)] transition-colors hover:text-[var(--color-fg)]"
         >
           <span className="text-base">←</span> Back to play
         </Link>
@@ -49,9 +49,12 @@ export default function GuidePage() {
       <div className="relative z-10 mx-auto w-full max-w-5xl">
         {/* ── Hero ──────────────────────────────────────────────────────── */}
         <section className="animate-fade-up pt-4 text-center">
-          <div className="mb-4 flex items-center justify-center gap-2">
-            <Chip tone="accent">The Guide</Chip>
-            <Chip tone="warn">Beta</Chip>
+          <div className="mb-4 flex items-center justify-center gap-3">
+            <span className="h-px w-8 bg-[var(--color-accent)]" aria-hidden />
+            <p className="font-display text-xs font-bold uppercase tracking-[0.24em] text-[var(--color-accent)]">
+              The guide
+            </p>
+            <span className="h-px w-8 bg-[var(--color-accent)]" aria-hidden />
           </div>
           <h1 className="font-display text-[2.6rem] font-bold uppercase leading-[0.95] tracking-tight sm:text-6xl">
             F1 is better
@@ -424,7 +427,7 @@ function ContactCard({
       href={href}
       target={isExternal ? '_blank' : undefined}
       rel={isExternal ? 'noopener noreferrer' : undefined}
-      className="group block rounded-[var(--radius)] border border-[var(--color-border)] bg-[linear-gradient(180deg,var(--color-elevated),var(--color-panel))] p-5 shadow-[var(--shadow)] transition-[transform,border-color] duration-150 hover:-translate-y-0.5 hover:border-[var(--color-accent)]/50"
+      className="group block rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-elevated)] p-5 shadow-[var(--shadow)] transition-colors duration-150 hover:border-[var(--color-accent)]/50"
     >
       <span className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-sm)] bg-white/95 shadow-sm">
         {icon}

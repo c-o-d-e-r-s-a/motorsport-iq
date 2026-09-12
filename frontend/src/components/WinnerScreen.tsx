@@ -30,7 +30,6 @@ const PODIUM_HEIGHTS: Record<1 | 2 | 3, string> = {
   2: 'h-20',
   3: 'h-16',
 };
-const MEDALS = ['🥇', '🥈', '🥉'];
 /* Parc Fermé ceremony order: 3rd → 2nd → 1st, so the winner lands last. */
 const PODIUM_DELAY: Record<1 | 2 | 3, number> = { 3: 0.15, 2: 0.4, 1: 0.7 };
 /* Confetti and the rest of the field wait for the winner to land. */
@@ -59,7 +58,7 @@ export default function WinnerScreen({ entries, onLeaveLobby, isLeaving, current
 
   const handleShare = async () => {
     const text = winner
-      ? `🏁 ${winner.username} won our Motorsport IQ race night with ${winner.points} pts!`
+      ? `${winner.username} won our Motorsport IQ race night with ${winner.points} pts!`
       : 'Race night on Motorsport IQ!';
     try {
       if (navigator.share) {
@@ -99,7 +98,7 @@ export default function WinnerScreen({ entries, onLeaveLobby, isLeaving, current
           className="relative text-center"
         >
           <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[var(--color-accent)]">
-            🏁 Chequered Flag
+            Chequered flag
           </p>
           <h2 className="mt-2 font-display text-4xl font-bold uppercase tracking-tight md:text-5xl">
             {winner ? `${winner.username} wins` : 'Race finished'}
@@ -116,7 +115,16 @@ export default function WinnerScreen({ entries, onLeaveLobby, isLeaving, current
                 variants={reduced ? reducedFade : withDelay(riseIn, PODIUM_DELAY[place])}
                 className="flex w-1/3 max-w-[160px] flex-col items-center"
               >
-                <span className="text-2xl">{MEDALS[place - 1]}</span>
+                <span
+                  className={cn(
+                    'flex h-8 w-8 items-center justify-center rounded-full border font-display text-xs font-bold',
+                    isWinner
+                      ? 'border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-fg)]'
+                      : 'border-[var(--color-border-strong)] bg-[var(--color-muted)] text-[var(--color-muted-fg)]'
+                  )}
+                >
+                  P{place}
+                </span>
                 <p className="mt-1 max-w-full truncate text-center font-display text-base font-semibold uppercase leading-tight">
                   {entry.username}
                   {mine && <span className="text-[var(--color-accent)]"> ·you</span>}

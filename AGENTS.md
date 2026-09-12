@@ -57,6 +57,9 @@ Real-time Formula 1 prediction companion web app. Users join private lobbies, re
 | `GROQ_MODERATION_KEY` | Optional dedicated Groq key for username AI moderation. Falls back to `GROQ_API_KEY` if unset. Recommended to isolate moderation quota from gameplay calls. |
 | `GROQ_MODEL` | `llama-3.3-70b-versatile` |
 | `OPENF1_BASE_URL` | `https://api.openf1.org/v1` — replay telemetry and session listing (not used for live data) |
+| `OPENF1_USERNAME` | OpenF1 account username — backend-only; used to obtain one-hour OAuth tokens |
+| `OPENF1_PASSWORD` | OpenF1 account password — backend-only; used to obtain one-hour OAuth tokens |
+| `OPENF1_API_KEY` | Optional temporary bearer-token override; normally leave unset |
 | `PORT` | `4000` |
 | `CORS_ORIGIN` | Comma-separated allowed origins |
 | `ADMIN_SESSION_SECRET` | 32-char random secret |

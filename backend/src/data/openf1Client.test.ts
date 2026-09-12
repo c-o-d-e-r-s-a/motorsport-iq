@@ -66,3 +66,39 @@ describe('OpenF1Client live lock', () => {
     expect(telemetryFetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('OpenF1Client authentication', () => {
+  const originalUsername = process.env.OPENF1_USERNAME;
+  const originalPassword = process.env.OPENF1_PASSWORD;
+  const originalApiKey = process.env.OPENF1_API_KEY;
+
+  afterAll(() => {
+    if (originalUsername === undefined) delete process.env.OPENF1_USERNAME;
+    else process.env.OPENF1_USERNAME = originalUsername;
+    if (originalPassword === undefined) delete process.env.OPENF1_PASSWORD;
+    else process.env.OPENF1_PASSWORD = originalPassword;
+    if (originalApiKey === undefined) delete process.env.OPENF1_API_KEY;
+    else process.env.OPENF1_API_KEY = originalApiKey;
+  });
+
+  it('exchanges credentials once and reuses the access token', async () => {
+    process.env.OPENF1_USERNAME = 'driver@example.com';
+    process.env.OPENF1_PASSWORD = 'secret';
+    delete process.env.OPENF1_API_KEY;
+    jest.resetModules();
+    const { OpenF1Client: AuthenticatedOpenF1Client } = await import('./openf1Client');
+    const request = jest.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/token')) {
+        return jsonResponse({ access_token: 'token', expires_in: 3600 });
+      }
+      expect(init?.headers).toEqual({ Authorization: 'Bearer token' });
+      return jsonResponse([]);
+    });
+    const client = new AuthenticatedOpenF1Client({}, request as unknown as typeof fetch);
+
+    await client.getSessions(2026);
+    await client.getSessions(2025);
+
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+});

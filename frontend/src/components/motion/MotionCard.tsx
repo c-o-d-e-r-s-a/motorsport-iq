@@ -13,7 +13,7 @@ const toneClasses: Record<CardTone, string> = {
   default: 'bg-[var(--color-panel)] text-[var(--color-fg)] border border-[var(--color-border)]',
   muted: 'bg-[var(--color-muted)] text-[var(--color-fg)] border border-[var(--color-border)]',
   elevated:
-    'bg-[linear-gradient(180deg,var(--color-elevated),var(--color-panel))] text-[var(--color-fg)] border border-[var(--color-border)] shadow-[var(--shadow)]',
+    'bg-[var(--color-elevated)] text-[var(--color-fg)] border border-[var(--color-border)] shadow-[var(--shadow)]',
 };
 
 const enterVariants = {
